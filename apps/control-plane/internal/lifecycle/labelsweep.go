@@ -206,12 +206,23 @@ func rollbackMetadataApplication(application *MetadataApplication) error {
 		restored = append(restored, file)
 	}
 	for _, pending := range created {
-		if _, err := applyMetadataFile(
+		applied, err := applyMetadataFile(
 			pending.state, application.BeforeLabels, pending.backupPath,
-		); err != nil {
+		)
+		if applied != nil {
+			// A write whose rename succeeded but whose directory entry could not
+			// be flushed HAS changed the document. Recording it before handling
+			// the error is what lets the unwind below put it back — discarding it
+			// would leave config.json holding the pre-migration labels while the
+			// recorded documents were reapplied to their migrated ones, which is
+			// the half-reverted container this function exists to prevent, on the
+			// document the listing prefers.
+			restored = append(restored, applied)
+			application.Reconciled = append(application.Reconciled, pending.name)
+		}
+		if err != nil {
 			return errors.Join(err, reapply(restored))
 		}
-		application.Reconciled = append(application.Reconciled, pending.name)
 	}
 	return nil
 }
@@ -323,6 +334,29 @@ func planDocumentsCreatedSince(
 	recorded := make(map[string]struct{}, len(application.Files))
 	for _, file := range application.Files {
 		recorded[filepath.Base(file.Path)] = struct{}{}
+	}
+	// An unrecognised file means this code's model of the on-disk layout is out
+	// of date, and acting on a stale model is how a recovery misses a copy of the
+	// labels. Phase 3A enforced this while resolving an operator-named target;
+	// that resolution went with the forward stages, so the refusal lives here now
+	// — on the one path that still decides which documents a resource has.
+	entries, err := os.ReadDir(application.Directory)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", application.Directory, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if _, known := layout.companions[name]; known {
+			continue
+		}
+		if _, known := layout.documents[name]; known {
+			continue
+		}
+		return nil, fmt.Errorf(
+			"%s %s: %q is a file this migration does not recognise; recovery "+
+				"will not run against a layout it does not know",
+			application.Kind, application.ID, name,
+		)
 	}
 	names := make([]string, 0, len(layout.documents))
 	for name := range layout.documents {

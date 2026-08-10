@@ -56,6 +56,20 @@ var errForwardMetadataSweepRetired = fmt.Errorf(
 )
 
 func runMigrateLabelMetadata(ctx context.Context, args []string) error {
+	return migrateLabelMetadata(ctx, args, lifecycle.NewAppleRuntime())
+}
+
+// migrateLabelMetadata takes the runtime as a parameter so a test can prove the
+// central claim of this command: that every retired flag is refused before
+// anything reaches Apple Container. A constructor called inside the function
+// would make that claim untestable, and it is the claim most worth pinning —
+// the failure it guards against is stopping an operator's container runtime on
+// the way to printing "retired".
+func migrateLabelMetadata(
+	ctx context.Context,
+	args []string,
+	runtime *lifecycle.AppleRuntime,
+) error {
 	flags := flag.NewFlagSet("migrate-label-metadata", flag.ContinueOnError)
 	// The retired flags stay declared, with help text that says so, so the
 	// refusal below is what an operator reads rather than a parse error.
@@ -117,32 +131,33 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 		return errForwardMetadataSweepRetired
 	}
 
-	runtime := lifecycle.NewAppleRuntime()
 	// Rollback writes to Apple Container's own documents, so it clears the same
 	// gates the forward path did: the exact version allowlist that makes this
-	// layout knowable at all, and the running-container check, which cannot be
-	// made once the services are stopped.
-	if _, err := runtime.ResolveMetadataHost(ctx); err != nil {
+	// layout knowable at all, and the not-running check, which cannot be made
+	// once the services are stopped.
+	host, err := runtime.ResolveMetadataHost(ctx)
+	if err != nil {
 		return err
 	}
 	inventory, err := lifecycle.TakeOwnershipInventory(ctx, runtime)
 	if err != nil {
 		return err
 	}
-	if running := inventory.RunningManagedContainers(); len(running) > 0 {
+	if running := inventory.RunningIdentifiableContainers(); len(running) > 0 {
 		return fmt.Errorf(
-			"%d managed container(s) are not stopped (%s); stop them before "+
-				"rolling back runtime metadata",
+			"%d container(s) this binary can identify are not stopped (%s); "+
+				"stop them before rolling back runtime metadata",
 			len(running), strings.Join(running, ", "),
 		)
 	}
-	return runMetadataRollback(ctx, runtime, *rollback)
+	return runMetadataRollback(ctx, runtime, host, *rollback)
 }
 
 // runMetadataRollback restores every document a recorded run rewrote.
 func runMetadataRollback(
 	ctx context.Context,
 	runtime *lifecycle.AppleRuntime,
+	host *lifecycle.MetadataHost,
 	reportPath string,
 ) error {
 	raw, err := os.ReadFile(reportPath)
@@ -151,6 +166,13 @@ func runMetadataRollback(
 	}
 	plan, err := lifecycle.ParseRollbackPlan(raw)
 	if err != nil {
+		return fmt.Errorf("%s: %w", reportPath, err)
+	}
+	// Every path in the plan is an absolute location read verbatim out of a
+	// file. Binding them to the resolved host before the runtime is stopped is
+	// what keeps a stale or substituted plan from taking Apple Container down and
+	// then rewriting a document it has no business touching.
+	if err := plan.BindToHost(host); err != nil {
 		return fmt.Errorf("%s: %w", reportPath, err)
 	}
 	fmt.Printf("stopping Apple Container services\n")

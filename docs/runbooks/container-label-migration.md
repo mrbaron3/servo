@@ -26,6 +26,14 @@ label key の正典は `apps/control-plane/internal/lifecycle/ownership.go` **1 
 「他人のもの」を意味し、名前が空いているという判断に使われる。作成途中で中断した自分の
 container をそこへ落とすと、排他 attach 中の volume を持ったまま削除・再作成の対象になり得る。
 
+**「空文字」と「不在」は別扱いである。** `role` / `spec-sha256` が**空文字**なら書きかけと見なして
+fail-closed にするが、**不在**は正常な形として受け入れる。volume と network は role を持たないし、
+`spec.SpecDigest` が空の container は spec label を書かずに作られる（`buildContainerArgs`）。
+不在を fail-closed にすると、そうした container が **delete できなくなる**——所有しているのに
+触れない resource を作るのは、この phase が防ごうとしている事故そのものである。
+したがって `owned` は「所有しており、かつ書きかけの label が無い」を意味し、
+「3 つの label が揃っている」は意味しない。inventory の reason 文言もそう書いてある。
+
 ### P3B で何が変わったか
 
 - **旧 namespace だけを持つ resource は `missing-label`＝非所有になった。** `EnsureVolume` /
@@ -52,7 +60,7 @@ container をそこへ落とすと、排他 attach 中の volume を持ったま
 | **P1 dual label**（本 PR で実装済み） | なし | 新規作成 resource が新旧両 label を持ち、reader が上表 6 分類を明示し、旧 binary へ戻しても発見できることを grounded に確認済み |
 | **P2 旧 container 掃討**（本 PR で実装済み） | P1 が merge 済みで、稼働 host の inventory が取れている | old-only container が 0 件、移行・skip・conflict・block の bounded audit が残り、Apple Container 上で drain/recreate と volume detach/attach、restart 整合、rollback を grounded に確認済み |
 | **P3A 旧 write 停止＋obsolete label 掃討**（本 PR で実装済み） | P2 の gate を満たし、dual label 観測窓で ownership／attachment の回帰が無い | 新規作成 resource が `current-only` になり、reader は 6 分類を保ったまま、全 managed container / volume / network が `current-only` へ移行済み |
-| **P3B 旧 read 削除**（本 PR で実装済み） | P3A が merge 済みで、host に `legacy-only` が 0 件 | 旧 namespace の read が消え、reader が `com.mrbaron3.servo.*` だけを見る。production Go source に旧 key の string literal が 1 つも残らない（`TestNoProductionCodeReferencesTheLegacyNamespace` が回帰を止める） |
+| **P3B 旧 read 削除**（本 PR で実装済み） | P3A が merge 済みで、host に `legacy-only` が 0 件 | 旧 namespace の read が消え、reader が `com.mrbaron3.servo.*` だけを見る。production source に旧 key の参照が 1 つも残らない（`TestNoProductionCodeReferencesTheLegacyNamespace` が repository 全体で回帰を止める） |
 
 **P1 から P3 へ直接飛ばない。** 旧 write と旧 read は同じ PR で消さない（write を先に止める）。
 **P3A と P3B も同じ PR にしない。** write 停止と掃討が終わって初めて read を消せる。
@@ -69,7 +77,7 @@ agentopsctl migrate-labels -evidence-dir <dir>   # 上記に加えて durable �
 
 引数なしの `migrate-labels` は **stdout に出すだけで file を書かない**。read-only を名乗るものが
 worktree に file を落とさないためである。観測窓のサンプルなど控えが要るときだけ `-evidence-dir` を渡す。
-`--only` は `--apply` 専用で、inventory には渡せない（gate として読む件数が host 全体である必要があるため）。
+`--only` はどの path からも受け付けられない。`--apply` は撤去済みで、inventory は gate として読む件数が host 全体である必要があるため受け取らない。
 
 出力の `skipped` は所有かつ完全に label 済み、または非所有（`unmanaged` / `missing-label`）、
 `malformed` は中途半端な新 label（fail-closed）、`blocked` は未知 class に対する fail-closed 既定である。
@@ -559,13 +567,22 @@ P3B（旧 read の削除）へ進む条件と、その充足状況。
   は `owned` に統合、`conflicting` は `malformed` に置き換え。
 - **旧 namespace だけの resource は非所有**になった。`missing-label` として扱われ、
   採用も変更も削除もされない。
-- **production Go source に旧 key の string literal が 1 つも無い。**
-  `TestNoProductionCodeReferencesTheLegacyNamespace` が AST の string literal を走査して回帰を止める
-  （comment は対象外——この境界は説明されるべきものだからである）。
+- **production source に旧 key の参照が 1 つも無い。**
+  `TestNoProductionCodeReferencesTheLegacyNamespace` が repository 全体を走査して回帰を止める。
+  Go は AST の string literal を、TypeScript・script・manifest は plain text を見る。
+  comment は対象外——この境界は説明されるべきものだからである。`evidence/` `docs/` `_test.go` は
+  互換性の歴史を意図的に記録する場所なので除外する。
 - **前へ進める migration は 1 つも残っていない。** `migrate-labels --apply` は P3A で、
   `migrate-label-metadata --stage` は P3B で撤去された。両方とも runtime に触れる前に拒否する。
 - **`migrate-label-metadata --rollback` は残る。** label key を一切解釈せず、記録済みの label map を
   逐語で書き戻すだけなので、このbinaryが読めない namespace でも正しく復元できる。
+- **plan は host に束縛してから実行する。** plan の path は file から逐語で読んだ絶対 path なので、
+  `RollbackPlan.BindToHost` が **service を止める前に**次を全部証明する: kind が既知であること、
+  identity が directory を脱出しないこと、各 document の path が
+  `<appRoot>/<kind directory>/<id>/<既知の document 名>` を再構成したものと**完全一致**すること、
+  label path を plan からではなく layout から取ること、appRoot からの各 component が symlink で
+  ないこと、backup root が git work tree の外にあること（symlink 祖先も解決して確認する）。
+  古い・改竄された plan が Apple Container を止めたうえで無関係な JSON を書き換える経路を塞ぐ。
 
 ### P3B でやらないこと
 

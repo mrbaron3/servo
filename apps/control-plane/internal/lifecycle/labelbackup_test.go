@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -121,5 +122,136 @@ func TestParseRollbackPlanRefusesAMismatchedPlan(t *testing.T) {
 				t.Fatalf("expected %s to be refused", name)
 			}
 		})
+	}
+}
+
+// The plan's paths are absolute locations read verbatim out of a file, so
+// binding them to the resolved host is the trust boundary of the whole retained
+// path. Each case below is a plan that parses cleanly and is internally
+// consistent — ParseRollbackPlan accepts every one of them — and must still be
+// refused before anything is stopped or written.
+
+func bindablePlan(t *testing.T, root, backups string) *RollbackPlan {
+	t.Helper()
+	record := phase3ARecord(
+		t, MetadataKindVolume, "vol-a", root, backups, legacyTriple(),
+	)
+	return &RollbackPlan{
+		Stage:   "retire",
+		Applied: []*MetadataApplication{record},
+		Locations: [][]RollbackLocation{{{
+			Path:       record.Files[0].Path,
+			BackupPath: record.Files[0].BackupPath,
+		}}},
+		Labels: []RollbackLabels{{
+			Before: legacyTriple(), After: record.AfterLabels,
+		}},
+	}
+}
+
+func TestBindToHostAcceptsAPlanThatDescribesThisHost(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	plan := bindablePlan(t, root, backups)
+	if err := plan.BindToHost(&MetadataHost{
+		AppRoot: root, CLIVersion: "1.1.0",
+	}); err != nil {
+		t.Fatalf("a plan describing this host was refused: %v", err)
+	}
+}
+
+func TestBindToHostRefusesAPlanThatDoesNotDescribeThisHost(t *testing.T) {
+	for name, mutate := range map[string]func(*RollbackPlan, string){
+		"a document outside the application root": func(p *RollbackPlan, root string) {
+			p.Applied[0].Files[0].Path = filepath.Join(
+				filepath.Dir(root), "elsewhere", "entity.json",
+			)
+		},
+		"a document under a different resource": func(p *RollbackPlan, root string) {
+			p.Applied[0].Files[0].Path = filepath.Join(
+				root, "volumes", "vol-b", "entity.json",
+			)
+		},
+		"a document the layout does not define": func(p *RollbackPlan, root string) {
+			p.Applied[0].Files[0].Path = filepath.Join(
+				root, "volumes", "vol-a", "volume.img",
+			)
+		},
+		"an identity that escapes its directory": func(p *RollbackPlan, root string) {
+			p.Applied[0].ID = "../networks/net-a"
+		},
+		"a kind this migration does not know": func(p *RollbackPlan, root string) {
+			p.Applied[0].Kind = MetadataResourceKind("image")
+		},
+		// The label path decides which JSON field is overwritten. A forged one
+		// would let a plan rewrite something that is not a labels object.
+		"a forged label path": func(p *RollbackPlan, root string) {
+			p.Applied[0].Files[0].LabelPath = []string{"name"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := seedAppRoot(t)
+			backups := filepath.Join(t.TempDir(), "private-backups")
+			plan := bindablePlan(t, root, backups)
+			mutate(plan, root)
+			if err := plan.BindToHost(&MetadataHost{
+				AppRoot: root, CLIVersion: "1.1.0",
+			}); err == nil {
+				t.Fatalf("a plan with %s was bound to this host", name)
+			}
+		})
+	}
+}
+
+func TestBindToHostRequiresAResolvedHost(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	plan := bindablePlan(t, root, backups)
+	if err := plan.BindToHost(nil); err == nil {
+		t.Fatal("a plan was bound with no host at all")
+	}
+	if err := plan.BindToHost(&MetadataHost{AppRoot: "  "}); err == nil {
+		t.Fatal("a plan was bound to a host with no application root")
+	}
+}
+
+// TestBindToHostRefusesABackupRootInsideAGitWorkTree restores a property Phase
+// 3A enforced when it chose the backup root. Rollback writes new backups of its
+// own — a document created since the migration is copied before it is brought
+// back in line — and a backup is a verbatim copy of a container's environment.
+func TestBindToHostRefusesABackupRootInsideAGitWorkTree(t *testing.T) {
+	root := seedAppRoot(t)
+	checkout := t.TempDir()
+	if err := os.Mkdir(filepath.Join(checkout, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backups := filepath.Join(checkout, "private-backups")
+	plan := bindablePlan(t, root, backups)
+	err := plan.BindToHost(&MetadataHost{AppRoot: root, CLIVersion: "1.1.0"})
+	if err == nil || !strings.Contains(err.Error(), "git work tree") {
+		t.Fatalf("a backup root inside a checkout was accepted: %v", err)
+	}
+}
+
+// A symlinked ancestor is the case a lexical walk misses: ~/.local/state
+// symlinked into a dotfiles repository is an ordinary stow arrangement.
+func TestBindToHostFollowsASymlinkedAncestorIntoAWorkTree(t *testing.T) {
+	root := seedAppRoot(t)
+	outer := t.TempDir()
+	checkout := filepath.Join(outer, "dotfiles")
+	if err := os.MkdirAll(filepath.Join(checkout, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(checkout, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(outer, "state")
+	if err := os.Symlink(filepath.Join(checkout, "state"), link); err != nil {
+		t.Fatal(err)
+	}
+	plan := bindablePlan(t, root, filepath.Join(link, "agentops", "backups"))
+	err := plan.BindToHost(&MetadataHost{AppRoot: root, CLIVersion: "1.1.0"})
+	if err == nil || !strings.Contains(err.Error(), "git work tree") {
+		t.Fatalf("a symlinked ancestor was not resolved and refused: %v", err)
 	}
 }

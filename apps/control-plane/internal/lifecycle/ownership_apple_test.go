@@ -206,11 +206,17 @@ func TestAppleContainerReadsEveryOwnershipStateFromRealVolumes(t *testing.T) {
 		return runtime.runner.Run(ctx, args)
 	}
 
+	// There is deliberately no malformed case here. A malformed resource needs a
+	// blank or marker-less current label, and seeding one means asking Apple
+	// Container to create a resource with a half-written ownership label — a
+	// state the runtime is not obliged to preserve and that this suite would then
+	// be asserting about the seeding tool rather than about the reader.
+	// Requirement (4) is pinned headlessly instead, where the label map is
+	// constructed exactly.
 	for _, testCase := range []struct {
-		name      string
-		labels    []string
-		accepted  bool
-		malformed bool
+		name     string
+		labels   []string
+		accepted bool
 	}{
 		{
 			name:     "current-only",
@@ -271,7 +277,7 @@ func TestAppleContainerReadsEveryOwnershipStateFromRealVolumes(t *testing.T) {
 				}
 				return
 			}
-			assertOwnershipRejection(t, err, testCase.malformed)
+			assertOwnershipRejection(t, err, false)
 			// The refusal must leave the volume alone. This is the property that
 			// matters most for the legacy-only case: Apple Container attaches a
 			// named volume exclusively, so a volume this binary can no longer read

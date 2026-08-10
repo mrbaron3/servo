@@ -50,17 +50,18 @@ func runMigrateLabels(ctx context.Context, args []string) error {
 	apply := flags.Bool(
 		"apply",
 		false,
-		"retired in Phase 3A; use `migrate-label-metadata` instead",
+		"retired in Phase 3A; no forward container label migration remains "+
+			"anywhere in this binary",
 	)
 	evidenceDir := flags.String(
 		"evidence-dir",
 		"",
-		"where to write the durable inventory and sweep records",
+		"where to write the durable inventory",
 	)
 	only := flags.String(
 		"only",
 		"",
-		"retired with --apply; pass targets to `migrate-label-metadata --only`",
+		"retired with --apply; `migrate-label-metadata --only` is retired too",
 	)
 	if err := flags.Parse(args); err != nil {
 		return err

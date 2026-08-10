@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // This file is the operator-facing shape of what survives Phase 3A's sweep: an
@@ -114,11 +116,30 @@ func (inventory *OwnershipInventory) add(record OwnershipInventoryRecord) {
 	}
 }
 
-// RunningManagedContainers lists owned containers that are not stopped.
-func (inventory *OwnershipInventory) RunningManagedContainers() []string {
+// RunningIdentifiableContainers lists containers that are not stopped and that
+// this binary has some claim on: owned, or incompletely labelled in the current
+// namespace.
+//
+// Malformed is included deliberately. Through Phase 3A the equivalent gate
+// counted owned containers only, and that was complete because every shape this
+// binary could own was owned. Since Phase 3B a half-labelled container of ours
+// classifies as malformed, and leaving it out would let a rollback stop the
+// runtime underneath a container it is about to rewrite.
+//
+// Missing-label and unmanaged are still excluded, and that is not an oversight:
+// stopping Apple Container affects the whole host, but blocking on `buildkit` or
+// on another deployment's container would make rollback impossible on any real
+// machine. This gate is therefore a courtesy check over containers this binary
+// can identify — RequireServicesStopped, which demands two independent signals
+// that the runtime is down, is what actually proves no document is rewritten
+// under a live apiserver.
+func (inventory *OwnershipInventory) RunningIdentifiableContainers() []string {
 	running := make([]string, 0)
 	for _, record := range inventory.Records {
-		if record.Kind != MetadataKindContainer || !record.Class.Owned() {
+		if record.Kind != MetadataKindContainer {
+			continue
+		}
+		if !record.Class.Owned() && record.Class != OwnershipMalformed {
 			continue
 		}
 		if record.State != "stopped" {
@@ -229,6 +250,112 @@ func ParseRollbackPlan(raw []byte) (*RollbackPlan, error) {
 		}
 	}
 	return &plan, nil
+}
+
+// BindToHost proves a decoded plan describes documents belonging to this host,
+// and nothing else, before any of it is acted on.
+//
+// This is the plan's trust boundary and it has to be drawn here. `ParseRollbackPlan`
+// checks only that the plan is internally consistent — counts that line up, label
+// maps that exist — and every path it carries is an absolute location read
+// verbatim out of a file. A stale, hand-edited, or substituted plan would
+// otherwise stop Apple Container and then rewrite any JSON file this user can
+// write whose digests happened to match, selecting the field to overwrite
+// through its own `labelPath`.
+//
+// The check is a reconstruction rather than a comparison: each document's path is
+// rebuilt from the resolved application root plus the plan's own kind and
+// identity, and the plan must agree with what was rebuilt. A plan cannot
+// therefore name a location the layout does not put a document at, whatever its
+// path field says.
+//
+// It runs before StopSystem. A rollback that refuses must not first take the
+// operator's container runtime down.
+func (plan *RollbackPlan) BindToHost(host *MetadataHost) error {
+	if host == nil || strings.TrimSpace(host.AppRoot) == "" {
+		return fmt.Errorf("rollback requires a resolved Apple Container host")
+	}
+	for _, application := range plan.Applied {
+		layout, err := layoutFor(application.Kind)
+		if err != nil {
+			return err
+		}
+		// The identity indexes a directory, so it may not be able to escape one.
+		identity := application.ID
+		if identity == "" || identity == "." || identity == ".." ||
+			strings.ContainsRune(identity, os.PathSeparator) ||
+			strings.ContainsRune(identity, '/') ||
+			identity != filepath.Clean(identity) {
+			return fmt.Errorf(
+				"%q is not an exact %s identity", identity, application.Kind,
+			)
+		}
+		directory := filepath.Join(host.AppRoot, layout.directory, identity)
+		if err := requireNoSymlinkInPath(directory, host.AppRoot); err != nil {
+			return err
+		}
+		for _, file := range application.Files {
+			name := filepath.Base(file.Path)
+			labelPath, known := layout.documents[name]
+			if !known {
+				return fmt.Errorf(
+					"%s %s: %q is not a document this migration knows about",
+					application.Kind, identity, name,
+				)
+			}
+			expected := filepath.Join(directory, name)
+			if file.Path != expected {
+				return fmt.Errorf(
+					"%s %s: the plan names %s, which is not where this host keeps "+
+						"that document", application.Kind, identity, file.Path,
+				)
+			}
+			// The label path decides which field is overwritten. Taking it from
+			// the layout rather than trusting the plan is what stops a forged
+			// plan from rewriting a non-label field.
+			if !equalStringSlices(file.LabelPath, labelPath) {
+				return fmt.Errorf(
+					"%s %s: the plan puts %s's labels somewhere this host does not",
+					application.Kind, identity, name,
+				)
+			}
+			if err := requireNoSymlinkInPath(file.Path, host.AppRoot); err != nil {
+				return err
+			}
+			if err := requireBackupRootIsPrivate(file.BackupPath); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// requireBackupRootIsPrivate refuses a backup location inside a git work tree.
+// Rollback writes new backups of its own — a document that appeared after the
+// migration is copied before it is brought back in line — so this is not a check
+// on somebody else's past behaviour but on where this run is about to write a
+// verbatim copy of a container's environment.
+func requireBackupRootIsPrivate(backupPath string) error {
+	if strings.TrimSpace(backupPath) == "" {
+		return fmt.Errorf("the plan records a document with no backup location")
+	}
+	resolved, err := resolveExistingAncestor(filepath.Dir(backupPath))
+	if err != nil {
+		return err
+	}
+	return requireOutsideGitWorkTree(resolved)
+}
+
+func equalStringSlices(first, second []string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // RollbackMetadataSweep restores every document a recorded run rewrote.

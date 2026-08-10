@@ -21,22 +21,17 @@ import (
 
 // MigrationDisposition is the inventory's verdict for one container.
 //
-// Two of these values are historical. `pending` and `migrated` could only be
-// produced by the Phase 2 sweep, which was retired in Phase 3A, and `pending`
-// additionally required a legacy-only container, which Phase 3B made
-// unreadable. They are retained because `evidence/label-p2/*.json` records them
-// in its totals and that audit trail has to keep decoding.
+// The Phase 2 sweep's own verdicts — `pending` and `migrated` — are deliberately
+// NOT declared here. Nothing produces them, and a constant is not what keeps the
+// committed evidence readable: MigrationAudit.Totals is keyed by this defined
+// string type, which decodes any key whether or not a constant exists for it.
+// `evidence/label-p2/*.json` therefore keeps decoding on its own, which is what
+// TestMergedPhase2EvidenceStillDecodes proves.
 type MigrationDisposition string
 
 const (
-	// MigrationPending is historical: an owned legacy-only container the retired
-	// Phase 2 sweep would have rebuilt. No live code path produces it.
-	MigrationPending MigrationDisposition = "pending"
-	// MigrationMigrated is historical: a container the retired Phase 2 sweep
-	// replaced and then proved equivalent. No live code path produces it.
-	MigrationMigrated MigrationDisposition = "migrated"
-	// MigrationSkipped is a container with nothing to do: owned and completely
-	// labelled, or not owned by this binary at all.
+	// MigrationSkipped is a container with nothing to do: owned, or not owned by
+	// this binary at all.
 	MigrationSkipped MigrationDisposition = "skipped"
 	// MigrationMalformed is a container whose current ownership labels are
 	// incomplete. It is a hard stop and never a deletion candidate.
@@ -172,7 +167,11 @@ func disposition(
 	case OwnershipUnmanaged:
 		return MigrationSkipped, "ownership label names another deployment"
 	case OwnershipOwned:
-		return MigrationSkipped, "owned and completely labelled in " +
+		// Deliberately not "completely labelled": an absent role or specification
+		// digest is accepted above (a volume has no role, and a container may be
+		// created without a sealed digest), so this row is only evidence that no
+		// ownership label is half-written — not that every one is present.
+		return MigrationSkipped, "owned; no incomplete ownership label in " +
 			CurrentLabelNamespace
 	default:
 		// Unreachable while OwnershipClass stays closed, but a new class must

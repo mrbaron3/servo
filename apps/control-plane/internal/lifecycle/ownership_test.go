@@ -42,54 +42,98 @@ const labelValueSentinel = "zzz-label-value-must-not-leak-zzz"
 // namespace is not reachable at all, so a future edit cannot reintroduce a read
 // through a constant no behavioural test happens to cover.
 //
-// It inspects string literals rather than raw bytes, which is the difference
-// between "no code names the retired namespace" and "nobody may write the word".
-// Comments are expected to name it — this phase is a compatibility boundary, and
-// a boundary nobody is allowed to describe is one the next reader has to
-// rediscover.
+// In Go source it inspects string literals rather than raw bytes, which is the
+// difference between "no code names the retired namespace" and "nobody may write
+// the word". Comments are expected to name it — this phase is a compatibility
+// boundary, and a boundary nobody is allowed to describe is one the next reader
+// has to rediscover.
+//
+// It walks the whole repository rather than one package, because the claim is
+// about the product and not about `apps/control-plane`. Three directories are
+// excluded by name and each for its own reason: `evidence/` is the migration's
+// own audit trail, `docs/` is where the compatibility history is deliberately
+// written down, and `_test.go` files pin the behaviour of resources that still
+// carry the retired namespace. Everything else — the TypeScript application,
+// `deploy/`, `db/` — is scanned as text, because a legacy key in a script or a
+// manifest is just as live a reference as one in Go.
 func TestNoProductionCodeReferencesTheLegacyNamespace(t *testing.T) {
 	root := repositoryRootForTest(t)
 	fileSet := token.NewFileSet()
-	scanned := 0
+	skipDirectories := map[string]struct{}{
+		".git": {}, "node_modules": {}, "evidence": {}, "docs": {},
+	}
+	scannedGo, scannedText := 0, 0
 	err := filepath.WalkDir(
-		filepath.Join(root, "apps", "control-plane"),
+		root,
 		func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			if entry.IsDir() || filepath.Ext(path) != ".go" ||
-				strings.HasSuffix(path, "_test.go") {
+			if entry.IsDir() {
+				if _, skip := skipDirectories[entry.Name()]; skip {
+					return filepath.SkipDir
+				}
 				return nil
 			}
-			parsed, err := parser.ParseFile(fileSet, path, nil, 0)
+			if strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			relative, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				relative = path
+			}
+			if filepath.Ext(path) == ".go" {
+				parsed, err := parser.ParseFile(fileSet, path, nil, 0)
+				if err != nil {
+					return err
+				}
+				scannedGo++
+				ast.Inspect(parsed, func(node ast.Node) bool {
+					literal, ok := node.(*ast.BasicLit)
+					if !ok || literal.Kind != token.STRING {
+						return true
+					}
+					if strings.Contains(literal.Value, legacyLabelNamespace) {
+						t.Errorf(
+							"%s:%d has the string literal %s, which names the "+
+								"retired namespace",
+							relative, fileSet.Position(literal.Pos()).Line,
+							literal.Value,
+						)
+					}
+					return true
+				})
+				return nil
+			}
+			switch filepath.Ext(path) {
+			case ".ts", ".tsx", ".js", ".mjs", ".json", ".yaml", ".yml", ".sh", ".sql":
+			default:
+				return nil
+			}
+			source, err := os.ReadFile(path)
 			if err != nil {
 				return err
 			}
-			scanned++
-			relative, _ := filepath.Rel(root, path)
-			ast.Inspect(parsed, func(node ast.Node) bool {
-				literal, ok := node.(*ast.BasicLit)
-				if !ok || literal.Kind != token.STRING {
-					return true
-				}
-				if strings.Contains(literal.Value, legacyLabelNamespace) {
-					t.Errorf(
-						"%s:%d has the string literal %s, which names the "+
-							"retired namespace",
-						relative, fileSet.Position(literal.Pos()).Line,
-						literal.Value,
-					)
-				}
-				return true
-			})
+			scannedText++
+			if strings.Contains(string(source), legacyLabelNamespace) {
+				t.Errorf(
+					"%s references the retired namespace %q",
+					relative, legacyLabelNamespace,
+				)
+			}
 			return nil
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned == 0 {
-		t.Fatal("scanned no production source; the walk is not reaching the tree")
+	// A walk that silently stopped reaching the tree would make this test pass
+	// for the worst possible reason.
+	if scannedGo == 0 || scannedText == 0 {
+		t.Fatalf(
+			"scanned %d Go and %d text files; the walk is not reaching the tree",
+			scannedGo, scannedText,
+		)
 	}
 }
 
@@ -386,12 +430,19 @@ func TestClassifyOwnershipReadsTheCurrentNamespaceAlone(t *testing.T) {
 
 func TestRequireOwnedReportsMalformedSeparatelyFromForeignOwnership(t *testing.T) {
 	for name, labels := range map[string]map[string]string{
-		"blank marker":       {CurrentManagedLabelKey: ""},
-		"marker-less role":   {CurrentRoleLabelKey: "runner"},
-		"marker-less digest": {CurrentSpecLabelKey: strings.Repeat("a", 64)},
-		"blank beside a legacy": {
-			legacyManagedLabelKey:  "v1",
+		// Every fixture carries the sentinel on a label the classifier is handed,
+		// so the leak assertion below has something it could actually find. A
+		// fixture without it would make that assertion unfalsifiable.
+		"blank marker": {
 			CurrentManagedLabelKey: "",
+			CurrentRoleLabelKey:    labelValueSentinel,
+		},
+		"marker-less role":   {CurrentRoleLabelKey: labelValueSentinel},
+		"marker-less digest": {CurrentSpecLabelKey: labelValueSentinel},
+		"blank beside a legacy": {
+			legacyManagedLabelKey:  labelValueSentinel,
+			CurrentManagedLabelKey: "",
+			CurrentSpecLabelKey:    labelValueSentinel,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -413,9 +464,12 @@ func TestRequireOwnedReportsMalformedSeparatelyFromForeignOwnership(t *testing.T
 			}
 			// A label value is accident- or attacker-supplied text that reaches
 			// operator output and the durable lifecycle failure record, so the
-			// message names keys and never values. The sentinel is deliberately
-			// unlike any substring of the subject or the key names, so this
-			// assertion cannot pass by accident.
+			// message names keys and never values. The guard below proves the
+			// fixture could detect a leak before asserting that there is none:
+			// without it this assertion cannot fail, whatever the message says.
+			if !fixtureCarriesSentinel(labels) {
+				t.Fatalf("fixture %q cannot detect a leak: %v", name, labels)
+			}
 			if strings.Contains(err.Error(), labelValueSentinel) {
 				t.Fatalf("the error echoes a label value: %v", err)
 			}
@@ -923,4 +977,16 @@ func TestDeleteRefusesContainersWithBlankRoleOrSpecLabels(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fixtureCarriesSentinel reports whether a fixture actually contains the value
+// the leak assertion looks for. It exists so a fixture that lost the sentinel
+// fails loudly rather than making the assertion above vacuously true.
+func fixtureCarriesSentinel(labels map[string]string) bool {
+	for _, value := range labels {
+		if value == labelValueSentinel {
+			return true
+		}
+	}
+	return false
 }

@@ -14,7 +14,7 @@ import (
 // free-form error before it reached committed evidence. No forward run remains
 // to halt.
 
-func TestRunningManagedContainersIgnoresUnownedAndStopped(t *testing.T) {
+func TestRunningIdentifiableContainersIgnoresUnownedAndStopped(t *testing.T) {
 	inventory := &OwnershipInventory{
 		Totals:  map[OwnershipClass]int{},
 		ByKind:  map[MetadataResourceKind]int{},
@@ -28,14 +28,15 @@ func TestRunningManagedContainersIgnoresUnownedAndStopped(t *testing.T) {
 		// Not ours: another deployment's running container must not block us.
 		{Kind: MetadataKindContainer, ID: "foreign-running",
 			Class: OwnershipUnmanaged, State: "running"},
-		// Since Phase 3B a legacy-only container reads as missing-label. It is
-		// not ours, so it must not block a rollback either — which is the same
-		// answer the unmanaged case gets, reached for a different reason.
+		// Since Phase 3B a legacy-only container reads as missing-label. It is not
+		// identifiable as ours, and blocking on it would also block on `buildkit`
+		// and on every other deployment's container — which would make rollback
+		// impossible on any real host.
 		{Kind: MetadataKindContainer, ID: "legacy-running",
 			Class: OwnershipMissingLabel, State: "running"},
-		// A malformed container is neither ours nor foreign. It must not be
-		// counted as a running managed container, because the rollback gate is
-		// about documents the runtime is actively holding open.
+		// A malformed container IS plausibly ours: the current namespace is
+		// present but half-written. Rollback rewrites documents, so a running one
+		// has to stop the run rather than be stopped underneath it.
 		{Kind: MetadataKindContainer, ID: "malformed-running",
 			Class: OwnershipMalformed, State: "running"},
 		// A volume has no state and must never be counted as a running container.
@@ -43,9 +44,14 @@ func TestRunningManagedContainersIgnoresUnownedAndStopped(t *testing.T) {
 	} {
 		inventory.add(record)
 	}
-	running := inventory.RunningManagedContainers()
-	if len(running) != 1 || running[0] != "managed-running" {
-		t.Fatalf("running managed containers = %v", running)
+	running := inventory.RunningIdentifiableContainers()
+	found := make(map[string]bool, len(running))
+	for _, id := range running {
+		found[id] = true
+	}
+	if len(running) != 2 ||
+		!found["managed-running"] || !found["malformed-running"] {
+		t.Fatalf("running identifiable containers = %v", running)
 	}
 }
 

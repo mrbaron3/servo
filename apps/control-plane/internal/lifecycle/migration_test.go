@@ -313,8 +313,11 @@ func TestMigrationAuditTotalsAgreeWithRecords(t *testing.T) {
 			)
 		}
 	}
+	// The Phase 2 sweep's verdicts are no longer declared as constants, so they
+	// are spelled here as the wire values committed evidence carries. Nothing may
+	// produce them.
 	for _, unreachable := range []MigrationDisposition{
-		MigrationBlocked, MigrationPending, MigrationMigrated,
+		MigrationBlocked, "pending", "migrated",
 	} {
 		if audit.Totals[unreachable] != 0 {
 			t.Fatalf("unexpected %s total: %#v", unreachable, audit.Totals)

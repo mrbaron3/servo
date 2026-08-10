@@ -157,8 +157,9 @@ var ErrLabelSweepRetired = errors.New(
 	"the Phase 2 container label sweep is retired as of Phase 3A of " +
 		"Issue #123: it deleted and recreated containers, which now produces a " +
 		"current-only replacement in one step and skips the staged migration " +
-		"the epic requires. Use `agentopsctl migrate-label-metadata`, which " +
-		"moves the same labels in two reviewable stages and deletes nothing",
+		"the epic required. Its staged replacement was retired in turn by " +
+		"Phase 3B, which removed every read of the legacy namespace; no " +
+		"forward container label migration remains in this binary",
 )
 
 // Apply is retired. It refuses before reading anything from the runtime, so no

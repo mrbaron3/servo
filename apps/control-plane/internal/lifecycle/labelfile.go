@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"syscall"
 )
 
@@ -93,6 +94,99 @@ func (application *metadataFileApplication) Ref() metadataFileRef {
 func digestOf(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// requireNoSymlinkInPath proves that no component between a trusted root and a
+// target is a symbolic link. Checking the final file alone is not enough: a
+// symlinked parent directory presents a perfectly ordinary regular file while
+// the write lands somewhere the operator never named.
+//
+// Through Phase 3A this guarded the resolution of an operator-supplied identity
+// into a document path. Phase 3B removed that resolution with the forward
+// stages, and this guard came out with it — which was wrong: the retained
+// rollback reads its paths out of a plan file, and a plan is exactly the kind of
+// input this check exists for. It now guards plan validation instead.
+func requireNoSymlinkInPath(path, root string) error {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return fmt.Errorf("resolve %s under %s: %w", path, root, err)
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("%s is outside the expected root", path)
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(os.PathSeparator)) {
+		if component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symbolic link", current)
+		}
+	}
+	return nil
+}
+
+// requireOutsideGitWorkTree refuses a path inside a repository checkout. It
+// walks the ancestry looking for a `.git` entry rather than shelling out, so it
+// gives the same answer with or without git installed, and it catches the
+// worktree case where `.git` is a file rather than a directory.
+//
+// A backup is a verbatim copy of an Apple Container metadata document, and a
+// container's config.json carries initProcess.environment with values —
+// POSTGRES_PASSWORD among them on this project's own topology. A backup root is
+// therefore a credential store, not an artifact. Phase 3A enforced this when it
+// *chose* the root; Phase 3B removed that resolution along with the forward
+// stages, so the rule is enforced here, where a retained plan's root is read.
+func requireOutsideGitWorkTree(path string) error {
+	current := path
+	for {
+		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+			return fmt.Errorf(
+				"%s is inside the git work tree at %s; backups are verbatim "+
+					"copies of container configuration, which carries "+
+					"environment values, and must never sit where they can be "+
+					"committed",
+				path, current,
+			)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+		current = parent
+	}
+}
+
+// resolveExistingAncestor resolves symlinks over the part of a path that
+// exists, then reattaches the components that do not exist yet. EvalSymlinks
+// alone fails on a path whose leaf has not been created. Without it, a
+// ~/.local/state symlinked into a dotfiles repository — an ordinary stow
+// arrangement — would pass the work-tree refusal while the backups land inside
+// a checkout after all.
+func resolveExistingAncestor(path string) (string, error) {
+	missing := make([]string, 0)
+	current := path
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf(
+				"no existing ancestor of %s could be resolved", path,
+			)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 // requireOwnedByCurrentUser refuses a document owned by anybody else. Apple
