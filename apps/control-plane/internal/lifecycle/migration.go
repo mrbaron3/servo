@@ -223,22 +223,24 @@ func disposition(
 			return MigrationSkipped, "every ownership label pair is present in " +
 				"the current namespace"
 		}
-		if _, err := RebuildMigratedSpec(actual, nil); err != nil {
+		if err := reproducibleShape(actual); err != nil {
 			return MigrationBlocked, "a label pair is still legacy-only and " +
-				"no identical replacement can be rebuilt: " + err.Error()
+				"the container cannot be recreated identically: " + err.Error()
 		}
 		return MigrationPending, "a role or specification digest label is " +
 			"still written in the legacy namespace only"
 	case OwnershipLegacyOnly:
-		// Classification asks only whether a faithful replacement is
-		// expressible, which does not depend on the image's declared
-		// environment, so the inventory does not need to read the image.
-		if _, err := RebuildMigratedSpec(actual, nil); err != nil {
-			return MigrationBlocked, "cannot rebuild an identical replacement: " +
-				err.Error()
+		// The inventory checks only what can be decided from the container
+		// itself. Whether its process and environment are image defaults needs
+		// the image, which a read-only inventory does not read; the sweep
+		// proves that before it deletes anything. So "pending" means no
+		// shape-level blocker, not a guarantee the sweep will proceed.
+		if err := reproducibleShape(actual); err != nil {
+			return MigrationBlocked, "cannot recreate this container " +
+				"identically: " + err.Error()
 		}
-		return MigrationPending, "legacy-only; a faithful dual-labeled " +
-			"replacement can be rebuilt"
+		return MigrationPending, "legacy-only; no shape-level obstacle to a " +
+			"dual-labeled replacement"
 	default:
 		// Unreachable while OwnershipClass stays closed, but a new class must
 		// fail closed rather than inherit "skip".
@@ -251,7 +253,7 @@ func disposition(
 // cannot express, because the caller's next step deletes the original.
 func RebuildMigratedSpec(
 	actual ContainerActual,
-	imageEnvironment []string,
+	image ImageConfiguration,
 ) (ContainerSpec, error) {
 	labels := actual.Configuration.Labels
 	if err := RequireManaged("container "+actual.ID, labels); err != nil {
@@ -272,7 +274,7 @@ func RebuildMigratedSpec(
 	if err := reproducibleShape(actual); err != nil {
 		return ContainerSpec{}, err
 	}
-	environment, err := environmentMap(actual, imageEnvironment)
+	environment, err := environmentMap(actual, image.Environment)
 	if err != nil {
 		return ContainerSpec{}, err
 	}
@@ -304,22 +306,23 @@ func RebuildMigratedSpec(
 			"container %s has no image reference", actual.ID,
 		)
 	}
-	// Apple Container reports the *effective* entrypoint without saying whether
-	// it came from the image or from an override at creation. An absolute one
-	// is reproduced explicitly, which is behaviourally identical in both cases.
-	// A relative executable ("node") is necessarily an image default, because
-	// the specification only accepts an absolute entrypoint, so it is left to
-	// the image rather than guessed at. Either way the replacement's effective
-	// entrypoint is proven by VerifyMigrationEquivalence, so a container whose
-	// entrypoint could not be reproduced is caught rather than accepted.
-	executable := strings.TrimSpace(
-		actual.Configuration.InitProcess.Executable,
-	)
-	if strings.HasPrefix(executable, "/") {
-		spec.Entrypoint = executable
-		spec.Command = append(
-			[]string(nil), actual.Configuration.InitProcess.Arguments...,
-		)
+	if err := restateProcess(&spec, actual, image); err != nil {
+		return ContainerSpec{}, err
+	}
+	// Resources are restated from what was observed rather than left to the
+	// runtime to default the same way twice. Apple Container accepts --cpus and
+	// --memory, so there is no reason to hope.
+	resources := actual.Configuration.Resources
+	spec.CPUs = resources.CPUs
+	if resources.MemoryInBytes > 0 {
+		const bytesPerMiB = 1024 * 1024
+		if resources.MemoryInBytes%bytesPerMiB != 0 {
+			return ContainerSpec{}, fmt.Errorf(
+				"container %s has a memory allocation that is not a whole "+
+					"number of MiB, which --memory cannot restate", actual.ID,
+			)
+		}
+		spec.MemoryMiB = resources.MemoryInBytes / bytesPerMiB
 	}
 	for _, attachment := range NamedVolumeAttachments(actual) {
 		spec.Mounts = append(spec.Mounts, Mount{
@@ -336,6 +339,68 @@ func RebuildMigratedSpec(
 		)
 	}
 	return spec, nil
+}
+
+// restateProcess decides how the replacement gets its executable, arguments,
+// working directory, and user. Apple Container reports the *effective* values
+// without saying which came from the image, so each one is either proven to be
+// an image default — in which case the replacement inherits it — or restated
+// explicitly. Anything that is neither is refused while the original is still
+// alive, because the alternative is discovering it after the delete.
+func restateProcess(
+	spec *ContainerSpec,
+	actual ContainerActual,
+	image ImageConfiguration,
+) error {
+	process := actual.Configuration.InitProcess
+	executable := strings.TrimSpace(process.Executable)
+	if executable == "" {
+		return fmt.Errorf(
+			"container %s reports no executable", actual.ID,
+		)
+	}
+	observed := append([]string{executable}, process.Arguments...)
+	if !equalStrings(observed, image.Process()) {
+		// The process was overridden at creation. --entrypoint can restate it
+		// only when the executable is absolute; a relative one would be
+		// resolved through the replacement's PATH, which is not the same thing.
+		if !strings.HasPrefix(executable, "/") {
+			return fmt.Errorf(
+				"container %s runs a process that differs from its image "+
+					"default and whose executable %q is not absolute, so it "+
+					"cannot be restated", actual.ID, executable,
+			)
+		}
+		spec.Entrypoint = executable
+		spec.Command = append([]string(nil), process.Arguments...)
+	}
+	if process.WorkingDirectory != image.WorkingDir {
+		spec.WorkingDir = process.WorkingDirectory
+	}
+	if raw := strings.TrimSpace(process.User.Raw.UserString); raw != "" {
+		spec.User = raw
+		return nil
+	}
+	// Without a raw user string the container took the image's user. Setting
+	// --user explicitly would change what the runtime reports back, so the
+	// replacement has to inherit it — which is only safe when the image's
+	// declared user really is the root the container is running as.
+	if process.User.ID.UID != 0 || process.User.ID.GID != 0 {
+		return fmt.Errorf(
+			"container %s runs as uid %d:%d with no user string, which cannot "+
+				"be restated without changing what the runtime reports",
+			actual.ID, process.User.ID.UID, process.User.ID.GID,
+		)
+	}
+	switch strings.TrimSpace(image.User) {
+	case "", "root", "0", "0:0":
+		return nil
+	default:
+		return fmt.Errorf(
+			"container %s runs as root but its image declares user %q, so the "+
+				"replacement would not", actual.ID, image.User,
+		)
+	}
 }
 
 // reproducibleShape refuses every observed configuration the specification
@@ -415,7 +480,44 @@ func reproducibleShape(actual ContainerActual) error {
 			}
 		}
 	}
+	// The specification attaches by network name only. An attachment carrying
+	// anything the replacement would not reproduce has to stop the migration
+	// here; comparing it after the delete would only name what was already lost.
+	for _, network := range configuration.Networks {
+		for key, value := range network.Options {
+			switch key {
+			case "hostname":
+				// Apple Container derives the hostname from the container name,
+				// so the replacement reproduces it by having the same name.
+				if hostname, _ := value.(string); hostname != actual.ID {
+					return fmt.Errorf(
+						"container %s attaches to network %s with hostname "+
+							"%q rather than its own name, which the managed "+
+							"specification cannot restate",
+						actual.ID, network.Network, hostname,
+					)
+				}
+			case "mtu":
+				// Derived from the network the replacement re-attaches to.
+			default:
+				return fmt.Errorf(
+					"container %s attaches to network %s with option %q, "+
+						"which the managed specification cannot restate",
+					actual.ID, network.Network, key,
+				)
+			}
+		}
+	}
 	for _, published := range configuration.PublishedPorts {
+		if address, _ := published["hostAddress"].(string); address !=
+			"127.0.0.1" {
+			// Recreating a non-loopback publication would re-assert a host
+			// exposure this topology forbids everywhere else.
+			return fmt.Errorf(
+				"container %s publishes on %s rather than loopback",
+				actual.ID, address,
+			)
+		}
 		if proto, _ := published["proto"].(string); proto != "" &&
 			proto != "tcp" {
 			return fmt.Errorf(

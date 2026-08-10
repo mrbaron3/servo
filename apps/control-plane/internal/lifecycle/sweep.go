@@ -2,7 +2,9 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -38,10 +40,14 @@ import (
 type SweepRuntime interface {
 	Containers(ctx context.Context) ([]ContainerActual, error)
 	Volumes(ctx context.Context) ([]Resource, error)
-	ImageEnvironment(ctx context.Context, image string) ([]string, error)
+	ImageConfiguration(
+		ctx context.Context, image string,
+	) (ImageConfiguration, error)
 	ImageDigest(ctx context.Context, image string) (string, error)
 	Stop(ctx context.Context, name string, seconds int) error
-	Delete(ctx context.Context, name string) error
+	// DeleteExisting must report ErrContainerAbsent rather than succeeding when
+	// the identity has already gone.
+	DeleteExisting(ctx context.Context, name string) error
 	CreateContainer(ctx context.Context, spec ContainerSpec) (string, error)
 	RunContainer(ctx context.Context, spec ContainerSpec) (string, error)
 }
@@ -158,12 +164,29 @@ func RedactedReplacement(
 	}
 }
 
+// plannedMigration is the complete plan for one container, held in memory for
+// the life of the sweep. The evidence file gets RedactedReplacement instead,
+// because this carries environment values.
+//
+// Keeping it matters for more than convenience: the replacement is created from
+// this exact specification, and the observation it was derived from is compared
+// against a fresh one immediately before the delete. Re-deriving the
+// specification at mutation time would silently migrate whatever now answers to
+// that name, which on Apple Container is a reusable identifier.
+type plannedMigration struct {
+	Observed ContainerActual
+	Spec     ContainerSpec
+}
+
 // LabelSweeper migrates old-only containers to dual labels.
 type LabelSweeper struct {
 	Runtime             SweepRuntime
 	StopTimeoutSeconds  int
 	ReleasePollInterval time.Duration
 	ReleaseTimeout      time.Duration
+	// RecreateAttempts bounds how many times the replacement is retried when
+	// the runtime reports the named volume is still exclusively attached.
+	RecreateAttempts int
 	// SnapshotBeforeMutation receives the exact pre-mutation audit the sweep is
 	// about to act on. Issue #123 requires that snapshot to be durable before
 	// the first mutation, so returning an error here aborts the sweep with
@@ -191,6 +214,7 @@ func NewLabelSweeper(runtime SweepRuntime) *LabelSweeper {
 		StopTimeoutSeconds:  20,
 		ReleasePollInterval: 500 * time.Millisecond,
 		ReleaseTimeout:      2 * time.Minute,
+		RecreateAttempts:    3,
 	}
 }
 
@@ -233,11 +257,15 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 	// Every target is rebuilt before any of them is mutated. A target that
 	// cannot be reproduced then stops the sweep while all of them are still
 	// alive, instead of stopping it after the earlier ones have been replaced.
-	planned, err := sweeper.planReplacements(ctx, targets)
+	plans, err := sweeper.planReplacements(ctx, targets)
 	if err != nil {
 		report.Applied = false
 		report.Halted = err.Error()
 		return report, err
+	}
+	planned := make([]PlannedReplacement, 0, len(plans))
+	for _, plan := range plans {
+		planned = append(planned, RedactedReplacement(plan.Spec, plan.Observed))
 	}
 	report.PlannedSpecs = planned
 	if sweeper.SnapshotBeforeMutation != nil {
@@ -260,15 +288,15 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 	}
 	migrated := make([]string, 0, len(targets))
 	var sweepErr error
-	for _, target := range targets {
-		if stepErr := sweeper.migrateOne(ctx, target, &report); stepErr != nil {
+	for _, plan := range plans {
+		if stepErr := sweeper.migrateOne(ctx, plan, &report); stepErr != nil {
 			report.Halted = fmt.Sprintf(
-				"halted at container %s: %v", target.ID, stepErr,
+				"halted at container %s: %v", plan.Observed.ID, stepErr,
 			)
 			sweepErr = stepErr
 			break
 		}
-		migrated = append(migrated, target.ID)
+		migrated = append(migrated, plan.Observed.ID)
 	}
 	report.Migrated = migrated
 	report.Volumes = sweeper.preservation(ctx, volumesBefore, &report)
@@ -314,8 +342,8 @@ func markMigrated(audit *MigrationAudit, migrated []string) {
 func (sweeper *LabelSweeper) planReplacements(
 	ctx context.Context,
 	targets []ContainerInventoryRecord,
-) ([]PlannedReplacement, error) {
-	planned := make([]PlannedReplacement, 0, len(targets))
+) ([]plannedMigration, error) {
+	plans := make([]plannedMigration, 0, len(targets))
 	for _, target := range targets {
 		actual, err := sweeper.containerByID(ctx, target.ID)
 		if err != nil {
@@ -327,19 +355,49 @@ func (sweeper *LabelSweeper) planReplacements(
 				target.ID,
 			)
 		}
-		imageEnvironment, err := sweeper.Runtime.ImageEnvironment(
+		image, err := sweeper.Runtime.ImageConfiguration(
 			ctx, actual.Configuration.Image.Reference,
 		)
 		if err != nil {
 			return nil, err
 		}
-		spec, err := RebuildMigratedSpec(*actual, imageEnvironment)
+		spec, err := RebuildMigratedSpec(*actual, image)
 		if err != nil {
 			return nil, err
 		}
-		planned = append(planned, RedactedReplacement(spec, *actual))
+		plans = append(plans, plannedMigration{Observed: *actual, Spec: spec})
 	}
-	return planned, nil
+	return plans, nil
+}
+
+// requireUnchangedSincePlan proves the container answering to this name is
+// still the one the plan was built from. Apple Container names are reusable, so
+// without this the sweep could delete a container it never inspected and
+// recreate it from somebody else's configuration. The runtime-assigned status
+// beyond the lifecycle state is excluded: an address does not change identity.
+func requireUnchangedSincePlan(planned, fresh ContainerActual) error {
+	equal, err := canonicallyEqual(
+		planned.Configuration, fresh.Configuration,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"container %s could not be compared against its plan: %w",
+			planned.ID, err,
+		)
+	}
+	if !equal {
+		return fmt.Errorf(
+			"container %s changed between the snapshot and this step; another "+
+				"actor is mutating it", planned.ID,
+		)
+	}
+	if planned.Status.State != fresh.Status.State {
+		return fmt.Errorf(
+			"container %s changed lifecycle state from %q to %q since the "+
+				"snapshot", planned.ID, planned.Status.State, fresh.Status.State,
+		)
+	}
+	return nil
 }
 
 // requireUnmovedImage proves the container's image reference still resolves to
@@ -441,24 +499,30 @@ func (sweeper *LabelSweeper) selectedTargets(
 // migrateOne walks a single container through the state machine.
 func (sweeper *LabelSweeper) migrateOne(
 	ctx context.Context,
-	planned ContainerInventoryRecord,
+	plan plannedMigration,
 	report *SweepReport,
 ) error {
-	// Stage 1: re-inspect. The plan may be seconds or minutes old, and the
-	// next stage deletes something. Ownership, role, and specification
-	// agreement are all re-proven against the exact resolved identity.
-	actual, err := sweeper.containerByID(ctx, planned.ID)
+	id := plan.Observed.ID
+	// Stage 1: re-inspect. The plan may be seconds or minutes old, and the next
+	// stage deletes something. The fresh observation is compared against the one
+	// the plan was built from, so a container that changed — or a different
+	// container that took the same reusable name — stops the sweep here rather
+	// than being deleted and recreated from somebody else's configuration.
+	actual, err := sweeper.containerByID(ctx, id)
 	if err != nil {
-		return sweeper.fail(report, planned.ID, StageReinspect, err)
+		return sweeper.fail(report, id, StageReinspect, err)
 	}
 	if actual == nil {
-		return sweeper.fail(report, planned.ID, StageReinspect, fmt.Errorf(
+		return sweeper.fail(report, id, StageReinspect, fmt.Errorf(
 			"container disappeared between planning and migration",
 		))
 	}
-	current := InventoryContainer(*actual)
-	if current.Disposition != MigrationPending {
-		return sweeper.fail(report, planned.ID, StageReinspect, fmt.Errorf(
+	if err := requireUnchangedSincePlan(plan.Observed, *actual); err != nil {
+		return sweeper.fail(report, id, StageReinspect, err)
+	}
+	if current := InventoryContainer(*actual); current.Disposition !=
+		MigrationPending {
+		return sweeper.fail(report, id, StageReinspect, fmt.Errorf(
 			"container is now %q, not a migration target", current.Disposition,
 		))
 	}
@@ -467,23 +531,15 @@ func (sweeper *LabelSweeper) migrateOne(
 	// content. That is a redeployment, and without this check it would only be
 	// discovered by the equivalence gate — after the irreversible delete.
 	if err := sweeper.requireUnmovedImage(ctx, *actual); err != nil {
-		return sweeper.fail(report, planned.ID, StageReinspect, err)
+		return sweeper.fail(report, id, StageReinspect, err)
 	}
-	imageEnvironment, err := sweeper.Runtime.ImageEnvironment(
-		ctx, actual.Configuration.Image.Reference,
-	)
-	if err != nil {
-		return sweeper.fail(report, planned.ID, StageReinspect, err)
-	}
-	spec, err := RebuildMigratedSpec(*actual, imageEnvironment)
-	if err != nil {
-		return sweeper.fail(report, planned.ID, StageReinspect, err)
-	}
-	volumes := NamedVolumeAttachments(*actual)
-	wasRunning := actual.Status.State == "running"
-	sweeper.ok(report, planned.ID, StageReinspect, fmt.Sprintf(
-		"legacy-only, state=%s, named volumes=%d",
-		actual.Status.State, len(volumes),
+	// The specification is the one captured in the plan, not a fresh derivation.
+	spec := plan.Spec
+	volumes := NamedVolumeAttachments(plan.Observed)
+	wasRunning := plan.Observed.Status.State == "running"
+	sweeper.ok(report, id, StageReinspect, fmt.Sprintf(
+		"unchanged since the snapshot, state=%s, named volumes=%d",
+		plan.Observed.Status.State, len(volumes),
 	))
 
 	// Stage 2: stop. Skipped when the container is already stopped, so a
@@ -497,17 +553,17 @@ func (sweeper *LabelSweeper) migrateOne(
 	// but it is narrowed to a single call and the stop is refused outright when
 	// the name no longer resolves to something owned.
 	if wasRunning {
-		if err := sweeper.requireStillOwned(ctx, planned.ID); err != nil {
-			return sweeper.fail(report, planned.ID, StageStop, err)
+		if err := sweeper.requireStillOwned(ctx, id); err != nil {
+			return sweeper.fail(report, id, StageStop, err)
 		}
 		if err := sweeper.Runtime.Stop(
-			ctx, planned.ID, sweeper.StopTimeoutSeconds,
+			ctx, id, sweeper.StopTimeoutSeconds,
 		); err != nil {
-			return sweeper.fail(report, planned.ID, StageStop, err)
+			return sweeper.fail(report, id, StageStop, err)
 		}
-		sweeper.ok(report, planned.ID, StageStop, "graceful stop completed")
+		sweeper.ok(report, id, StageStop, "graceful stop completed")
 	} else {
-		sweeper.ok(report, planned.ID, StageStop, "already stopped; not started")
+		sweeper.ok(report, id, StageStop, "already stopped; not started")
 	}
 
 	// Stage 3: delete the exact resolved identity. Delete re-proves ownership
@@ -516,47 +572,44 @@ func (sweeper *LabelSweeper) migrateOne(
 	// vanished, which is not success here: something else is mutating the same
 	// container, and continuing would recreate a container from a snapshot of a
 	// world that no longer exists.
-	if err := sweeper.requireStillOwned(ctx, planned.ID); err != nil {
-		return sweeper.fail(report, planned.ID, StageDelete, err)
+	if err := sweeper.requireStillOwned(ctx, id); err != nil {
+		return sweeper.fail(report, id, StageDelete, err)
 	}
-	if err := sweeper.Runtime.Delete(ctx, planned.ID); err != nil {
-		return sweeper.fail(report, planned.ID, StageDelete, err)
+	if err := sweeper.Runtime.DeleteExisting(ctx, id); err != nil {
+		return sweeper.fail(report, id, StageDelete, err)
 	}
-	sweeper.ok(report, planned.ID, StageDelete, "exact container deleted; "+
+	sweeper.ok(report, id, StageDelete, "exact container deleted; "+
 		"named volumes untouched")
 
 	// Stage 4: prove the named volumes are released before re-attaching them.
 	// Apple Container attaches a named volume to one virtual machine
 	// exclusively; attaching before the previous holder is gone fails the
 	// replacement instead of the migration, which is much harder to diagnose.
-	if err := sweeper.proveVolumeRelease(ctx, planned.ID, volumes); err != nil {
-		return sweeper.fail(report, planned.ID, StageVolumeRelease, err)
+	if err := sweeper.proveVolumeRelease(ctx, id, volumes); err != nil {
+		return sweeper.fail(report, id, StageVolumeRelease, err)
 	}
-	sweeper.ok(report, planned.ID, StageVolumeRelease, fmt.Sprintf(
+	sweeper.ok(report, id, StageVolumeRelease, fmt.Sprintf(
 		"%d named volume(s) released and still present", len(volumes),
 	))
 
 	// Stage 5: recreate in the state the original was observed in.
-	if wasRunning {
-		_, err = sweeper.Runtime.RunContainer(ctx, spec)
-	} else {
-		_, err = sweeper.Runtime.CreateContainer(ctx, spec)
+	if err := sweeper.materialize(
+		ctx, spec, volumes, wasRunning, report,
+	); err != nil {
+		return sweeper.fail(report, id, StageRecreate, err)
 	}
-	if err != nil {
-		return sweeper.fail(report, planned.ID, StageRecreate, err)
-	}
-	sweeper.ok(report, planned.ID, StageRecreate, fmt.Sprintf(
+	sweeper.ok(report, id, StageRecreate, fmt.Sprintf(
 		"replacement materialized with both ownership namespaces (running=%t)",
 		wasRunning,
 	))
 
 	// Stage 6: prove the replacement differs only by the gained namespace.
-	replacement, err := sweeper.containerByID(ctx, planned.ID)
+	replacement, err := sweeper.containerByID(ctx, id)
 	if err != nil {
-		return sweeper.fail(report, planned.ID, StageVerify, err)
+		return sweeper.fail(report, id, StageVerify, err)
 	}
 	if replacement == nil {
-		return sweeper.fail(report, planned.ID, StageVerify, fmt.Errorf(
+		return sweeper.fail(report, id, StageVerify, fmt.Errorf(
 			"replacement is not present after recreation",
 		))
 	}
@@ -568,21 +621,92 @@ func (sweeper *LabelSweeper) migrateOne(
 		// because it is the only remaining copy of that configuration.
 		if wasRunning {
 			if stopErr := sweeper.Runtime.Stop(
-				ctx, planned.ID, sweeper.StopTimeoutSeconds,
+				ctx, id, sweeper.StopTimeoutSeconds,
 			); stopErr != nil {
-				return sweeper.fail(report, planned.ID, StageVerify, fmt.Errorf(
+				return sweeper.fail(report, id, StageVerify, fmt.Errorf(
 					"%w; the unproven replacement could not be quarantined: %v",
 					err, stopErr,
 				))
 			}
-			sweeper.ok(report, planned.ID, StageVerify,
+			sweeper.ok(report, id, StageVerify,
 				"unproven replacement stopped pending an operator decision")
 		}
-		return sweeper.fail(report, planned.ID, StageVerify, err)
+		return sweeper.fail(report, id, StageVerify, err)
 	}
-	sweeper.ok(report, planned.ID, StageVerify,
+	sweeper.ok(report, id, StageVerify,
 		"replacement is equivalent and dual-labeled")
 	return nil
+}
+
+// exclusiveAttachPattern matches the way Apple Container reports that a named
+// volume is still attached to a virtual machine that has not finished tearing
+// down. The container listing can already show the previous holder as gone
+// while the block device is still attached, so listing-based release is a
+// necessary precondition and not a proof; this is the signal that says so.
+var exclusiveAttachPattern = regexp.MustCompile(
+	`(?i)(vz\s*(error)?\s*code\s*=\s*2|already (in use|attached)|resource busy|device or resource busy|attach(ment)? (failed|busy))`,
+)
+
+// materialize creates the replacement, retrying a bounded number of times when
+// the runtime reports the named volume is still exclusively attached.
+//
+// The release proof before this point is derived from listings, and Apple
+// Container removes a container record before its virtual machine has finished
+// releasing the block device. Rather than claim a stronger proof than the
+// runtime offers, the sweep treats that specific failure as transient: it
+// reconciles any partially created container, re-proves listing-level release,
+// and tries again. Every other failure is returned immediately.
+func (sweeper *LabelSweeper) materialize(
+	ctx context.Context,
+	spec ContainerSpec,
+	volumes []VolumeAttachment,
+	wasRunning bool,
+	report *SweepReport,
+) error {
+	attempts := sweeper.RecreateAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var err error
+		if wasRunning {
+			_, err = sweeper.Runtime.RunContainer(ctx, spec)
+		} else {
+			_, err = sweeper.Runtime.CreateContainer(ctx, spec)
+		}
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !exclusiveAttachPattern.MatchString(err.Error()) ||
+			attempt == attempts {
+			return err
+		}
+		// A failed create can still leave a container record behind. Removing
+		// it keeps the next attempt from colliding with the debris of this one.
+		existing, lookupErr := sweeper.containerByID(ctx, spec.Name)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if existing != nil {
+			if deleteErr := sweeper.Runtime.DeleteExisting(
+				ctx, spec.Name,
+			); deleteErr != nil && !errors.Is(deleteErr, ErrContainerAbsent) {
+				return deleteErr
+			}
+		}
+		if releaseErr := sweeper.proveVolumeRelease(
+			ctx, spec.Name, volumes,
+		); releaseErr != nil {
+			return releaseErr
+		}
+		sweeper.ok(report, spec.Name, StageRecreate, fmt.Sprintf(
+			"attempt %d found the named volume still attached; "+
+				"reconciled and retrying", attempt,
+		))
+	}
+	return lastErr
 }
 
 // proveVolumeRelease polls until the deleted container is gone from the

@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -151,19 +152,29 @@ func TestImageEnvironmentParsesTheRealInspectShape(t *testing.T) {
 		Status: 0,
 		Stdout: `[{"id":"agentops-control:dev","variants":[{"config":{"config":{
 			"Env":["PATH=/usr/local/bin:/usr/bin","HOME=/home/nonroot",
-			"AGENTOPS_APP_ROOT=/app"]}}}]}]`,
+			"AGENTOPS_APP_ROOT=/app"],
+			"Entrypoint":["node","dist/src/runner/cli.js"],
+			"WorkingDir":"/app","User":"agentops"}}}]}]`,
 	}}}
 	runtime := NewAppleRuntimeForTest(fake)
-	environment, err := runtime.ImageEnvironment(
+	image, err := runtime.ImageConfiguration(
 		context.Background(), "agentops-control:dev",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(environment) != 3 ||
-		environment[0] != "PATH=/usr/local/bin:/usr/bin" ||
-		environment[2] != "AGENTOPS_APP_ROOT=/app" {
-		t.Fatalf("image environment = %#v", environment)
+	if len(image.Environment) != 3 ||
+		image.Environment[0] != "PATH=/usr/local/bin:/usr/bin" ||
+		image.Environment[2] != "AGENTOPS_APP_ROOT=/app" {
+		t.Fatalf("image environment = %#v", image.Environment)
+	}
+	if image.WorkingDir != "/app" || image.User != "agentops" {
+		t.Fatalf("image process context = %#v", image)
+	}
+	// Entrypoint plus Cmd is what the container actually runs.
+	if process := image.Process(); len(process) != 2 ||
+		process[0] != "node" || process[1] != "dist/src/runner/cli.js" {
+		t.Fatalf("image process = %#v", image.Process())
 	}
 }
 
@@ -177,10 +188,30 @@ func TestImageEnvironmentRefusesDisagreeingVariants(t *testing.T) {
 			{"config":{"config":{"Env":["PATH=/b"]}}}]}]`,
 	}}}
 	runtime := NewAppleRuntimeForTest(fake)
-	if _, err := runtime.ImageEnvironment(
+	if _, err := runtime.ImageConfiguration(
 		context.Background(), "agentops-control:dev",
 	); err == nil {
 		t.Fatal("disagreeing variants were silently reconciled")
+	}
+}
+
+// Teardown wants deleting an absent container to be success. The label sweep,
+// which has just proven the container exists and owns it, needs the opposite:
+// absence there means another actor is mutating the same reusable name.
+func TestDeleteDistinguishesAbsenceFromSuccess(t *testing.T) {
+	absent := func() *AppleRuntime {
+		return NewAppleRuntimeForTest(&fakeRuntimeRunner{
+			results: []CommandResult{{Status: 0, Stdout: `[]`}},
+		})
+	}
+	err := absent().DeleteExisting(context.Background(), "agentops-runner")
+	if !errors.Is(err, ErrContainerAbsent) {
+		t.Fatalf("DeleteExisting() on an absent container = %v", err)
+	}
+	if err := absent().Delete(
+		context.Background(), "agentops-runner",
+	); err != nil {
+		t.Fatalf("Delete() stopped being idempotent: %v", err)
 	}
 }
 

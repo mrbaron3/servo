@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -26,9 +27,14 @@ type fakeSweepRuntime struct {
 	createdSpec []ContainerSpec
 
 	deleteErr error
-	// imageEnvironment is what the probe image declares for itself.
-	imageEnvironment []string
-	imageEnvErr      error
+	// imageConfig is what the probe image declares for itself.
+	imageConfig ImageConfiguration
+	imageEnvErr error
+	// attachBusyRemaining models the volume still being attached to the
+	// previous container's virtual machine after that container has already
+	// left the listing. It is deliberately separate from deleteLinger: the
+	// whole hazard is that listing disappearance is NOT detachment.
+	attachBusyRemaining int
 	// imageDigest overrides what the tag currently resolves to; empty means it
 	// still resolves to the digest the fixture container was created from.
 	imageDigest    string
@@ -47,9 +53,14 @@ func newFakeSweepRuntime(containers ...ContainerActual) *fakeSweepRuntime {
 		volumes:    map[string]bool{},
 		pending:    map[string]int{},
 		originals:  map[string]ContainerActual{},
-		// The fixture's PATH is an image default; everything else on it is
-		// specification-supplied.
-		imageEnvironment: []string{"PATH=/usr/bin"},
+		// The fixture's PATH, entrypoint, and working directory are image
+		// defaults; everything else on it is specification-supplied.
+		imageConfig: ImageConfiguration{
+			Environment: []string{"PATH=/usr/bin"},
+			Entrypoint:  []string{"node", "dist/src/runner/cli.js"},
+			WorkingDir:  "/app",
+			User:        "agentops",
+		},
 	}
 	for _, container := range containers {
 		for _, attachment := range NamedVolumeAttachments(container) {
@@ -104,11 +115,11 @@ func (runtime *fakeSweepRuntime) Volumes(
 	return resources, nil
 }
 
-func (runtime *fakeSweepRuntime) ImageEnvironment(
+func (runtime *fakeSweepRuntime) ImageConfiguration(
 	_ context.Context,
 	_ string,
-) ([]string, error) {
-	return runtime.imageEnvironment, runtime.imageEnvErr
+) (ImageConfiguration, error) {
+	return runtime.imageConfig, runtime.imageEnvErr
 }
 
 func (runtime *fakeSweepRuntime) ImageDigest(
@@ -135,9 +146,21 @@ func (runtime *fakeSweepRuntime) Stop(
 	return nil
 }
 
-func (runtime *fakeSweepRuntime) Delete(_ context.Context, name string) error {
+func (runtime *fakeSweepRuntime) DeleteExisting(
+	_ context.Context,
+	name string,
+) error {
 	if runtime.deleteErr != nil {
 		return runtime.deleteErr
+	}
+	present := false
+	for _, container := range runtime.containers {
+		if container.ID == name {
+			present = true
+		}
+	}
+	if !present {
+		return fmt.Errorf("container %s: %w", name, ErrContainerAbsent)
 	}
 	for _, container := range runtime.containers {
 		if container.ID == name {
@@ -179,10 +202,20 @@ func (runtime *fakeSweepRuntime) materialize(
 	if _, _, err := containerArgs(verb, spec); err != nil {
 		return "", err
 	}
+	// The previous container's virtual machine may still hold the volume even
+	// though its record has left the listing.
+	if runtime.attachBusyRemaining > 0 {
+		runtime.attachBusyRemaining--
+		return "", fmt.Errorf(
+			"container run failed (status=1): Internal error: VZ error code=2: "+
+				"volume %q is already attached",
+			spec.Name,
+		)
+	}
 	runtime.createdVerb = append(runtime.createdVerb, verb)
 	runtime.createdSpec = append(runtime.createdSpec, spec)
 	previous := runtime.originals[spec.Name]
-	replacement := synthesizeFromSpec(spec, previous, runtime.imageEnvironment)
+	replacement := synthesizeFromSpec(spec, previous, runtime.imageConfig)
 	if runtime.synthesize != nil {
 		replacement = runtime.synthesize(spec, previous)
 	}
@@ -202,8 +235,9 @@ func (runtime *fakeSweepRuntime) materialize(
 func synthesizeFromSpec(
 	spec ContainerSpec,
 	previous ContainerActual,
-	imageEnvironment []string,
+	image ImageConfiguration,
 ) ContainerActual {
+	imageEnvironment := image.Environment
 	replacement := previous
 	labels := map[string]string{
 		LegacyManagedLabelKey:  ManagedLabelValue,
@@ -227,11 +261,30 @@ func synthesizeFromSpec(
 	}
 	replacement.Configuration.Image.Reference = spec.Image
 	replacement.Configuration.InitProcess.User.Raw.UserString = spec.User
+
+	// The process, working directory, and resources come from the SPEC or from
+	// the IMAGE — never from the record being replaced. Inheriting them would
+	// hand back whatever the rebuild forgot to restate.
 	if spec.Entrypoint != "" {
 		replacement.Configuration.InitProcess.Executable = spec.Entrypoint
 		replacement.Configuration.InitProcess.Arguments =
 			append([]string(nil), spec.Command...)
+	} else {
+		process := image.Process()
+		replacement.Configuration.InitProcess.Executable = ""
+		replacement.Configuration.InitProcess.Arguments = nil
+		if len(process) > 0 {
+			replacement.Configuration.InitProcess.Executable = process[0]
+			replacement.Configuration.InitProcess.Arguments = process[1:]
+		}
 	}
+	replacement.Configuration.InitProcess.WorkingDirectory = image.WorkingDir
+	if spec.WorkingDir != "" {
+		replacement.Configuration.InitProcess.WorkingDirectory = spec.WorkingDir
+	}
+	replacement.Configuration.Resources.CPUs = spec.CPUs
+	replacement.Configuration.Resources.MemoryInBytes =
+		spec.MemoryMiB * 1024 * 1024
 
 	// The effective environment is what the image declares plus what the
 	// specification supplies.
@@ -629,27 +682,62 @@ func TestSweepAbortsWhenTheTargetChangedSincePlanning(t *testing.T) {
 		t, "agentops-runner", "stopped",
 		legacyOnlyLabels("runner", fixtureSpecDigest), "",
 	))
-	sweeper := testSweeper(runtime)
-	before, err := sweeper.Plan(context.Background(), "pre")
+	sweeper := testSweeper(runtime, "agentops-runner")
+	plans, err := sweeper.planReplacements(
+		context.Background(),
+		[]ContainerInventoryRecord{{ID: "agentops-runner"}},
+	)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(before.MigrationTargets()) != 1 {
-		t.Fatal("fixture is not a migration target")
 	}
 	// Somebody migrated it out from under us.
 	runtime.containers[0].Configuration.Labels = dualLabelMap(
 		runtime.containers[0].Configuration.Labels,
 	)
 	report := SweepReport{}
-	err = sweeper.migrateOne(
-		context.Background(), before.MigrationTargets()[0], &report,
-	)
+	err = sweeper.migrateOne(context.Background(), plans[0], &report)
 	if err == nil {
 		t.Fatal("the sweep deleted a container that was no longer a target")
 	}
 	if len(runtime.deleted) != 0 {
 		t.Fatal("the sweep deleted despite the re-inspection failing")
+	}
+}
+
+// The dangerous shape is not a container that stopped being a target — it is a
+// DIFFERENT container that took the same reusable name and is still a target.
+// Only comparing against the captured plan can see that.
+func TestSweepAbortsWhenTheSameNameHoldsADifferentPendingContainer(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	sweeper := testSweeper(runtime, "agentops-runner")
+	plans, err := sweeper.planReplacements(
+		context.Background(),
+		[]ContainerInventoryRecord{{ID: "agentops-runner"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same name, still legacy-only and still pending, but a different
+	// container: it now holds a different named volume.
+	runtime.containers[0] = containerFixtureWithMounts(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest),
+		distinctVolume("somebody-elses-data"), "",
+	)
+	report := SweepReport{}
+	err = sweeper.migrateOne(context.Background(), plans[0], &report)
+	if err == nil {
+		t.Fatal("the sweep migrated a container it had never inspected")
+	}
+	if len(runtime.deleted) != 0 {
+		t.Fatal("the sweep deleted a container that was not the planned one")
+	}
+	last := report.Steps[len(report.Steps)-1]
+	if last.Stage != StageReinspect || last.Outcome != "failed" {
+		t.Fatalf("the substitution was caught too late: %#v", last)
 	}
 }
 
@@ -839,6 +927,85 @@ func TestPreservationDistinguishesAnUnreadableListingFromALostVolume(t *testing.
 	}
 	if report.VolumeListingError == "" {
 		t.Fatal("the unreadable listing was not recorded")
+	}
+}
+
+// A target that vanished between the ownership proof and the delete means
+// another actor is mutating the same name. Treating that as success would let
+// the sweep recreate a container from an observation of a world that is gone.
+func TestSweepTreatsAVanishedTargetAsFailureNotSuccess(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	runtime.deleteErr = fmt.Errorf(
+		"container agentops-runner: %w", ErrContainerAbsent,
+	)
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
+	if err == nil {
+		t.Fatal("a vanished delete target was reported as success")
+	}
+	if !errors.Is(err, ErrContainerAbsent) {
+		t.Fatalf("the absence was not surfaced: %v", err)
+	}
+	if len(runtime.createdSpec) != 0 {
+		t.Fatal("a replacement was created after the target vanished")
+	}
+	last := report.Steps[len(report.Steps)-1]
+	if last.Stage != StageDelete || last.Outcome != "failed" {
+		t.Fatalf("unexpected final step: %#v", last)
+	}
+}
+
+// Apple Container removes a container record before its virtual machine has
+// finished releasing the block device, so listing-level release is a
+// precondition, not a proof. The known transient is retried, bounded.
+func TestSweepRetriesTheKnownExclusiveAttachTransient(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	// The listing says released; the virtual machine disagrees, twice.
+	runtime.attachBusyRemaining = 2
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
+	if err != nil {
+		t.Fatalf("the sweep gave up on a known transient: %v (%+v)",
+			err, report.Steps)
+	}
+	if len(runtime.createdSpec) != 1 {
+		t.Fatalf("unexpected create count: %d", len(runtime.createdSpec))
+	}
+	var retries int
+	for _, step := range report.Steps {
+		if step.Stage == StageRecreate &&
+			strings.Contains(step.Detail, "still attached") {
+			retries++
+		}
+	}
+	if retries != 2 {
+		t.Fatalf("retries were not recorded in the audit: %+v", report.Steps)
+	}
+}
+
+// The retry is bounded: a volume that never detaches must fail, not spin.
+func TestSweepStopsRetryingAnAttachThatNeverFrees(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	runtime.attachBusyRemaining = 1_000
+	sweeper := testSweeper(runtime, "agentops-runner")
+	sweeper.RecreateAttempts = 3
+	if _, err := sweeper.Apply(context.Background()); err == nil {
+		t.Fatal("an attach that never freed was accepted")
+	}
+	if runtime.attachBusyRemaining != 1_000-3 {
+		t.Fatalf(
+			"expected exactly 3 attempts, saw %d",
+			1_000-runtime.attachBusyRemaining,
+		)
 	}
 }
 

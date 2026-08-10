@@ -414,29 +414,50 @@ func (runtime *AppleRuntime) ImageDigest(
 	return digest, nil
 }
 
-// ImageEnvironment returns the environment an image declares for itself. The
-// Phase 2 label migration subtracts it from a container's observed environment
-// to recover the values the original specification actually supplied: Apple
-// Container reports only the merged result, and carrying an image's own PATH or
-// HOME onto the replacement would both over-specify it and displace the host's
-// values in the `container` CLI process that creates it.
-//
-// Variants that disagree are refused rather than guessed between, because
-// picking the wrong one would silently change the replacement's environment.
-func (runtime *AppleRuntime) ImageEnvironment(
+// ImageConfiguration is the part of an image's own configuration the label
+// migration has to reason about. Apple Container reports a container's
+// *effective* process, environment, and working directory without saying which
+// parts came from the image and which were supplied at creation. Reading the
+// image's own declarations is what lets the migration tell those apart before
+// it deletes anything, rather than discovering the difference afterwards.
+type ImageConfiguration struct {
+	Environment []string
+	Entrypoint  []string
+	Command     []string
+	WorkingDir  string
+	User        string
+}
+
+// Process is the executable and arguments a container gets from this image
+// alone, which is Entrypoint followed by Cmd exactly as the OCI runtime
+// composes them.
+func (configuration ImageConfiguration) Process() []string {
+	process := append([]string(nil), configuration.Entrypoint...)
+	return append(process, configuration.Command...)
+}
+
+// ImageConfiguration reads one image's declared configuration. Variants that
+// disagree are refused rather than guessed between, because picking the wrong
+// one would silently change what the replacement runs.
+func (runtime *AppleRuntime) ImageConfiguration(
 	ctx context.Context,
 	image string,
-) ([]string, error) {
+) (ImageConfiguration, error) {
 	result := runtime.runner.Run(ctx, []string{"image", "inspect", image})
 	if result.Status != 0 {
-		return nil, runtimeError(result, nil)
+		return ImageConfiguration{}, runtimeError(result, nil)
+	}
+	type variantConfiguration struct {
+		Env        []string `json:"Env"`
+		Entrypoint []string `json:"Entrypoint"`
+		Cmd        []string `json:"Cmd"`
+		WorkingDir string   `json:"WorkingDir"`
+		User       string   `json:"User"`
 	}
 	type inspection struct {
 		Variants []struct {
 			Config struct {
-				Config struct {
-					Env []string `json:"Env"`
-				} `json:"config"`
+				Config variantConfiguration `json:"config"`
 			} `json:"config"`
 		} `json:"variants"`
 	}
@@ -444,32 +465,51 @@ func (runtime *AppleRuntime) ImageEnvironment(
 	var items []inspection
 	if len(body) > 0 && body[0] == '[' {
 		if err := json.Unmarshal(body, &items); err != nil {
-			return nil, fmt.Errorf("parse Apple Container image inspect: %w", err)
+			return ImageConfiguration{}, fmt.Errorf(
+				"parse Apple Container image inspect: %w", err,
+			)
 		}
 	} else {
 		var item inspection
 		if err := json.Unmarshal(body, &item); err != nil {
-			return nil, fmt.Errorf("parse Apple Container image inspect: %w", err)
+			return ImageConfiguration{}, fmt.Errorf(
+				"parse Apple Container image inspect: %w", err,
+			)
 		}
 		items = []inspection{item}
 	}
-	var declared []string
+	var declared ImageConfiguration
 	seen := false
 	for _, item := range items {
 		for _, variant := range item.Variants {
-			environment := variant.Config.Config.Env
+			candidate := ImageConfiguration{
+				Environment: variant.Config.Config.Env,
+				Entrypoint:  variant.Config.Config.Entrypoint,
+				Command:     variant.Config.Config.Cmd,
+				WorkingDir:  variant.Config.Config.WorkingDir,
+				User:        variant.Config.Config.User,
+			}
 			if !seen {
-				declared = append([]string(nil), environment...)
+				declared = candidate
 				seen = true
 				continue
 			}
-			if !equalStrings(declared, environment) {
-				return nil, fmt.Errorf(
-					"image %s declares different environments per variant",
+			if !equalStrings(declared.Environment, candidate.Environment) ||
+				!equalStrings(declared.Entrypoint, candidate.Entrypoint) ||
+				!equalStrings(declared.Command, candidate.Command) ||
+				declared.WorkingDir != candidate.WorkingDir ||
+				declared.User != candidate.User {
+				return ImageConfiguration{}, fmt.Errorf(
+					"image %s declares different configurations per variant",
 					image,
 				)
 			}
 		}
+	}
+	if !seen {
+		return ImageConfiguration{}, fmt.Errorf(
+			"image %s reported no configuration variant", image,
+		)
 	}
 	return declared, nil
 }
@@ -528,6 +568,14 @@ type ContainerSpec struct {
 	Command     []string
 	Detach      bool
 	Remove      bool
+	// WorkingDir, CPUs, and MemoryMiB exist so the Phase 2 label migration can
+	// restate what it observed instead of hoping the runtime defaults the same
+	// way twice. They are left zero by the topology's own specifications, which
+	// deliberately take the image's working directory and the runtime's
+	// resource defaults.
+	WorkingDir string
+	CPUs       int
+	MemoryMiB  int64
 }
 
 func SpecDigest(spec ContainerSpec, imageDigest string) (string, error) {
@@ -688,6 +736,24 @@ func containerArgs(
 	if spec.User != "" {
 		args = append(args, "--user", spec.User)
 	}
+	if spec.WorkingDir != "" {
+		if !strings.HasPrefix(spec.WorkingDir, "/") ||
+			strings.Contains(spec.WorkingDir, "..") {
+			return nil, nil, fmt.Errorf(
+				"working directory must be a safe container-absolute path",
+			)
+		}
+		args = append(args, "--workdir", spec.WorkingDir)
+	}
+	if spec.CPUs < 0 || spec.MemoryMiB < 0 {
+		return nil, nil, fmt.Errorf("cpu and memory allocations must not be negative")
+	}
+	if spec.CPUs > 0 {
+		args = append(args, "--cpus", strconv.Itoa(spec.CPUs))
+	}
+	if spec.MemoryMiB > 0 {
+		args = append(args, "--memory", strconv.FormatInt(spec.MemoryMiB, 10)+"MiB")
+	}
 	for _, path := range spec.Tmpfs {
 		if !strings.HasPrefix(path, "/") || strings.Contains(path, ":") {
 			return nil, nil, fmt.Errorf("tmpfs target must be a container-absolute path")
@@ -767,13 +833,42 @@ func (runtime *AppleRuntime) Stop(ctx context.Context, name string, seconds int)
 	}, nil)
 }
 
+// ErrContainerAbsent reports that an exact identity was already gone. Ordinary
+// teardown treats that as success — deleting what is not there is what it wanted
+// — but a caller that has just proven the container exists and owns it needs to
+// know, because absence then means somebody else is mutating the same name.
+var ErrContainerAbsent = errors.New("container is not present")
+
+// Delete removes a managed container and is idempotent: an absent container is
+// success, because every teardown path wants that. The label sweep uses
+// DeleteExisting instead.
 func (runtime *AppleRuntime) Delete(ctx context.Context, name string) error {
+	err := runtime.DeleteExisting(ctx, name)
+	if errors.Is(err, ErrContainerAbsent) {
+		return nil
+	}
+	return err
+}
+
+// DeleteExisting removes a container the caller has already resolved and proven
+// it owns, and reports ErrContainerAbsent when the identity has since vanished.
+// The label sweep needs that distinction: between its ownership proof and this
+// call the name could have been taken over by another actor, and silently
+// succeeding would let it recreate a container from an observation of a world
+// that no longer exists.
+func (runtime *AppleRuntime) DeleteExisting(
+	ctx context.Context,
+	name string,
+) error {
 	if err := validateResourceName(name); err != nil {
 		return err
 	}
 	actual, err := runtime.Container(ctx, name)
-	if err != nil || actual == nil {
+	if err != nil {
 		return err
+	}
+	if actual == nil {
+		return fmt.Errorf("container %s: %w", name, ErrContainerAbsent)
 	}
 	if err := RequireManaged(
 		"container "+name,

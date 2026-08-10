@@ -189,11 +189,11 @@ sweep は container ごとに次の順で進む。**どの段階で中断して�
 
 | 段階 | 何をするか | 中断したときの位置 | rollback |
 | --- | --- | --- | --- |
-| `re-inspect` | exact id を取り直し、ownership/role/spec が conflict でないことを**削除直前に**再検証する | 何も変わっていない | 不要。再実行するだけ |
+| `re-inspect` | exact id を取り直し、**snapshot 時の観測と全項目一致すること**、image tag が作成時の digest を今も指すこと、ownership/role/spec が conflict でないことを**削除直前に**再検証する | 何も変わっていない | 不要。再実行するだけ |
 | `stop` | running のときだけ graceful stop。**stopped のものは起動しない** | 元の container が stopped で残る（まだ legacy-only） | `container start <id>` |
 | `delete` | exact id の container を削除。volume は触らない | **container が存在しない唯一の窓**。volume と data は無傷 | `pre-mutation-*.json` の `plannedSpecs[]` から再作成する（下記） |
 | `volume-release` | 削除した container が listing から消え、どの container も当該 volume を掴んでいないことを polling で証明し、volume が今も存在することを確認する | read-only。位置は `delete` と同じ | 同上 |
-| `recreate` | 観測どおりの replacement を作る（**元が stopped なら stopped のまま作る**） | replacement が存在する | replacement を削除し `plannedSpecs[]` から作り直す |
+| `recreate` | **snapshot 時に確定した spec** から replacement を作る（**元が stopped なら stopped のまま作る**）。volume がまだ排他 attach されている旨の既知 error は、部分生成を片付けて release を取り直したうえで有限回だけ retry する | replacement が存在する（retry 中なら存在しない） | replacement を削除し `plannedSpecs[]` から作り直す |
 | `verify` | 元と replacement が label 以外すべて一致し、新旧両 namespace を持つことを証明する | drift 検出時は sweep 全体を停止し、以降の container に触れない | **自動修復しない。** running だった場合は replacement を **stop して隔離**し（削除はしない＝その構成の唯一の複製のため）、operator の判断事項として escalate する |
 
 `verify` が失敗した replacement を自動で作り直さないのは意図的である。「同一だと証明できない」状態は
@@ -229,7 +229,9 @@ exact id だけを `--only` に渡して再開する。既に `dual` になっ�
 ### P2 の evidence 保全
 
 `--apply` は**最初の mutation より前に** `pre-mutation-<stamp>.json` を書く。書けなければ sweep は
-実行されない（監査も rollback もできない移行を始めないため）。sweep 後に `sweep-<stamp>.json` を
+実行されない（監査も rollback もできない移行を始めないため）。file 名には run ごとの乱数 id が入り、
+書き込みは `O_EXCL` である——evidence は不可逆な操作の記録なので、**既存 file を上書きしない**
+（衝突したら失敗する）。sweep 後に `sweep-<stamp>.json` を
 書く。**失敗した sweep でも書く**——どの段階で止まったかが必要になるのはその場合だからである。
 halt した場合でも事後 inventory を書くので、「3 件移行して 4 件目で止まった」状態が evidence から読める。
 
@@ -240,13 +242,24 @@ evidence には secret 値・host path・環境変数値を入れない。記録
 state、image と digest、ownership/role/spec label、named volume の**名前**と mount 先、tmpfs、
 network、分類と理由だけである（volume の host path は記録しない）。
 
-### 残る race（設計上の限界）
+### 同一性と volume release の扱い
 
-Apple Container の container は**再利用可能な名前**で識別され、世代 id が無い。sweep は
-stop と delete の**直前に毎回** exact id を引き直して所有を再証明するが、その 1 呼び出しぶんの窓は
-消せない。同様に volume の release 証明も「listing 上どの container も掴んでいない」ことの証明であり、
-attach の予約ではない。**sweep の実行中に別の actor が同じ host の managed resource を触らないこと**
-を前提とする。破れた場合は recreate が Apple Container 側で失敗し、sweep はそこで停止する。
+Apple Container の container は**再利用可能な名前**で識別され、世代 id が無い。そこで sweep は:
+
+- snapshot 時の**完全な観測**を記憶し、削除の直前に取り直した観測と**全項目比較**する。名前が同じでも
+  中身が違えば「別の container が同じ名前を取った」として停止する（disposition だけを見ていると、
+  同じく `pending` な別 container を掴んでしまう）。
+- replacement は**snapshot 時に確定した spec** から作る。mutation 時に作り直すと、その時点で
+  その名前に居るものを migrate してしまう。
+- stop と delete の**直前に毎回** exact id を引き直して所有を再証明する。delete は
+  「既に居なかった」を**成功ではなく失敗**として返す（別 actor が触っている証拠だから）。
+
+それでも 1 呼び出しぶんの窓は消せない。volume の release 証明も「listing 上どの container も
+掴んでいない」ことの証明であって attach の予約ではなく、**Apple Container は VM が block device を
+手放し切る前に container record を消す**。そこで recreate は、排他 attach を示す既知の error
+（`VZ error code=2` 等）に限り、部分生成を片付け release を取り直したうえで**有限回**だけ retry する。
+それ以外の error は即座に失敗させる。**sweep 実行中に別の actor が同じ host の managed resource を
+触らないこと**は依然として前提である。
 
 ## P3 の entry gate
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -105,10 +107,15 @@ func (manager *manager) MigrateLabels(
 	}
 	sweeper := lifecycle.NewLabelSweeper(manager.runtime)
 	sweeper.Only = only
-	// The process id keeps two runs started in the same second from writing the
-	// same evidence path, where the later one would truncate the earlier.
+	// A random run id, not just the clock and pid: two runs can share a second,
+	// and a pid is reused. Combined with O_EXCL on the write, a collision fails
+	// the run instead of overwriting another run's evidence.
+	runID, err := evidenceRunID()
+	if err != nil {
+		return err
+	}
 	stamp := fmt.Sprintf(
-		"%s-%d", time.Now().UTC().Format("20060102T150405Z"), os.Getpid(),
+		"%s-%s", time.Now().UTC().Format("20060102T150405Z"), runID,
 	)
 
 	if !apply {
@@ -193,6 +200,16 @@ func (manager *manager) MigrateLabels(
 	return sweepErr
 }
 
+// evidenceRunID returns a short collision-resistant identity for one run's
+// evidence files.
+func evidenceRunID() (string, error) {
+	raw := make([]byte, 6)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate evidence run identity: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
 func writeLabelMigrationEvidence(
 	directory, name string,
 	evidence labelMigrationEvidence,
@@ -205,7 +222,18 @@ func writeLabelMigrationEvidence(
 		return "", fmt.Errorf("encode migration evidence: %w", err)
 	}
 	path := filepath.Join(directory, name)
-	if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+	// O_EXCL rather than a truncating write: evidence is the record of an
+	// irreversible operation, and a second run that happened to choose the same
+	// name must fail loudly rather than silently replace the first run's
+	// account of what it did.
+	file, err := os.OpenFile(
+		path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644,
+	)
+	if err != nil {
+		return "", fmt.Errorf("write migration evidence: %w", err)
+	}
+	defer file.Close()
+	if _, err := file.Write(append(encoded, '\n')); err != nil {
 		return "", fmt.Errorf("write migration evidence: %w", err)
 	}
 	return path, nil

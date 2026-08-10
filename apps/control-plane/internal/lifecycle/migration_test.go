@@ -96,6 +96,18 @@ func dualLabels(role, spec string) string {
 
 const fixtureSpecDigest = "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
 
+// fixtureImage is what the fixture's image declares for itself. The fixture's
+// process, working directory, and PATH are all image defaults, which is what
+// lets the rebuild inherit them rather than restate them.
+func fixtureImage() ImageConfiguration {
+	return ImageConfiguration{
+		Environment: []string{"PATH=/usr/bin"},
+		Entrypoint:  []string{"node", "dist/src/runner/cli.js"},
+		WorkingDir:  "/app",
+		User:        "agentops",
+	}
+}
+
 // The sweep must reach exactly one verdict per ownership class. Phase 3 keys its
 // entry gate off these counts, so a class that silently collapses into another
 // would let the epic advance on an unproven inventory.
@@ -283,7 +295,7 @@ func TestRebuiltSpecPreservesObservedConfigurationAndDualWrites(t *testing.T) {
 		legacyOnlyLabels("runner", fixtureSpecDigest),
 		"",
 	)
-	spec, err := RebuildMigratedSpec(actual, nil)
+	spec, err := RebuildMigratedSpec(actual, fixtureImage())
 	if err != nil {
 		t.Fatalf("rebuild rejected a faithful container: %v", err)
 	}
@@ -380,7 +392,7 @@ func TestRebuildRefusesConfigurationItCannotExpress(t *testing.T) {
 				legacyOnlyLabels("runner", fixtureSpecDigest),
 				testCase.extra,
 			)
-			if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+			if _, err := RebuildMigratedSpec(actual, fixtureImage()); err == nil {
 				t.Fatal("an inexpressible container was accepted for rebuild")
 			}
 			record := InventoryContainer(actual)
@@ -424,7 +436,7 @@ func TestRebuildRefusesMountShapesItCannotRestate(t *testing.T) {
 				legacyOnlyLabels("runner", fixtureSpecDigest),
 				testCase.mounts, "",
 			)
-			if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+			if _, err := RebuildMigratedSpec(actual, fixtureImage()); err == nil {
 				t.Fatal("an inexpressible mount was accepted for rebuild")
 			}
 			if record := InventoryContainer(actual); record.Disposition !=
@@ -444,7 +456,7 @@ func TestRebuildRefusesAContainerCarryingUnmanagedLabels(t *testing.T) {
 		"com.mrbaron3.workflow.role": "runner",
 		"com.example.team": "platform"
 	}`, "")
-	if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+	if _, err := RebuildMigratedSpec(actual, fixtureImage()); err == nil {
 		t.Fatal("a container with an unreproducible label was accepted")
 	}
 	if record := InventoryContainer(actual); record.Disposition !=
@@ -460,7 +472,7 @@ func TestRebuildRefusesATransitionalLifecycleState(t *testing.T) {
 		t, "agentops-runner", "stopping",
 		legacyOnlyLabels("runner", fixtureSpecDigest), "",
 	)
-	if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+	if _, err := RebuildMigratedSpec(actual, fixtureImage()); err == nil {
 		t.Fatal("a container in a transitional state was accepted")
 	}
 }
@@ -575,7 +587,12 @@ func TestRebuildKeepsAnEmptyValuedEnvironmentVariable(t *testing.T) {
 			"user": {"raw": {"userString": "agentops"}}
 		}`,
 	)
-	spec, err := RebuildMigratedSpec(actual, []string{"PATH=/usr/bin"})
+	spec, err := RebuildMigratedSpec(actual, ImageConfiguration{
+		Environment: []string{"PATH=/usr/bin"},
+		Entrypoint:  []string{"/bin/run"},
+		WorkingDir:  "",
+		User:        "agentops",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +616,7 @@ func TestRebuildRefusesAReadOnlyTmpfs(t *testing.T) {
 		`[{"destination": "/tmp", "source": "tmpfs", "options": ["ro"],
 		   "type": {"tmpfs": {}}}]`, "",
 	)
-	if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+	if _, err := RebuildMigratedSpec(actual, fixtureImage()); err == nil {
 		t.Fatal("a read-only tmpfs was accepted for rebuild")
 	}
 }
@@ -624,6 +641,107 @@ func TestEquivalenceDetectsNetworkAttachmentOptionDrift(t *testing.T) {
 	}
 }
 
+// Resources and working directory used to be compared only after the delete.
+// Apple Container accepts --cpus, --memory, and --workdir, so they are restated
+// instead of hoping the runtime defaults the same way twice.
+func TestRebuiltSpecRestatesResourcesAndWorkingDirectory(t *testing.T) {
+	actual := containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	)
+	spec, err := RebuildMigratedSpec(actual, fixtureImage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.CPUs != 4 || spec.MemoryMiB != 1024 {
+		t.Fatalf("resources were not restated: %#v", spec)
+	}
+	// The fixture's working directory IS the image default, so it is inherited
+	// rather than restated.
+	if spec.WorkingDir != "" {
+		t.Fatalf("an image default was restated unnecessarily: %q",
+			spec.WorkingDir)
+	}
+	args, _, err := containerArgs("create", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := strings.Join(args, " ")
+	if !strings.Contains(rendered, "--cpus 4") ||
+		!strings.Contains(rendered, "--memory 1024MiB") {
+		t.Fatalf("resource flags are absent: %s", rendered)
+	}
+}
+
+// A working directory that is not the image's default has to be restated.
+func TestRebuiltSpecRestatesAnOverriddenWorkingDirectory(t *testing.T) {
+	actual := containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest),
+		`,"initProcess": {
+			"executable": "node", "arguments": ["dist/src/runner/cli.js"],
+			"workingDirectory": "/elsewhere",
+			"environment": ["PATH=/usr/bin"],
+			"user": {"raw": {"userString": "agentops"}}
+		}`,
+	)
+	spec, err := RebuildMigratedSpec(actual, fixtureImage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.WorkingDir != "/elsewhere" {
+		t.Fatalf("an overridden working directory was dropped: %#v", spec)
+	}
+}
+
+// A process that differs from the image default and is not absolute cannot be
+// restated through --entrypoint, so it has to block before the delete.
+func TestRebuildRefusesARelativeOverriddenProcess(t *testing.T) {
+	actual := containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest),
+		`,"initProcess": {
+			"executable": "node", "arguments": ["dist/src/other/cli.js"],
+			"workingDirectory": "/app",
+			"environment": ["PATH=/usr/bin"],
+			"user": {"raw": {"userString": "agentops"}}
+		}`,
+	)
+	if _, err := RebuildMigratedSpec(actual, fixtureImage()); err == nil {
+		t.Fatal("a relative overridden process was accepted")
+	}
+}
+
+// A network attachment carrying something the specification cannot restate has
+// to stop the migration before the delete, not be compared after it.
+func TestRebuildRefusesInexpressibleNetworkAttachmentOptions(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		options string
+	}{
+		{name: "foreign option", options: `{"mac": "02:00:00:00:00:01"}`},
+		{name: "overridden hostname", options: `{"hostname": "somebody-else"}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			actual := containerFixture(
+				t, "agentops-runner", "stopped",
+				legacyOnlyLabels("runner", fixtureSpecDigest),
+				`,"networks": [{"network": "agentops-internal",
+					"options": `+testCase.options+`}]`,
+			)
+			if _, err := RebuildMigratedSpec(
+				actual, fixtureImage(),
+			); err == nil {
+				t.Fatal("an inexpressible network attachment was accepted")
+			}
+			if record := InventoryContainer(actual); record.Disposition !=
+				MigrationBlocked {
+				t.Fatalf("disposition = %q, want blocked", record.Disposition)
+			}
+		})
+	}
+}
+
 // A container whose role or specification namespaces disagree is partially
 // migrated. Rebuilding it would pick one side of a disagreement it cannot
 // adjudicate.
@@ -633,7 +751,7 @@ func TestRebuildRefusesPartiallyMigratedLabelPairs(t *testing.T) {
 		"com.mrbaron3.workflow.role": "runner",
 		"com.mrbaron3.servo.role": "triage"
 	}`, "")
-	if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+	if _, err := RebuildMigratedSpec(actual, fixtureImage()); err == nil {
 		t.Fatal("a conflicting role pair was rebuilt")
 	}
 }
