@@ -17,7 +17,7 @@
     "container volume list --format json",
     "container network list --format json"
   ],
-  "generatedAt": "20260810T121946Z",
+  "generatedAt": "20260810T123008Z",
   "grounded": {
     "TestAppleContainerCurrentLabelsSurviveOnALiveContainer": true,
     "TestAppleContainerMetadataRollbackRefusesWhileTheRuntimeIsUp": true,
@@ -105,7 +105,7 @@
     }
   ],
   "notGroundedHere": [
-    "that a binding failure precedes StopSystem: this suite has already stopped the runtime before it binds, so the ordering is pinned by the command test TestRollbackNeverStopsTheRuntimeWhenThePlanDoesNotBind instead"
+    "that a binding failure precedes StopSystem, and that a failed StopSystem still restarts the runtime: this suite stops the runtime itself before it binds, so both orderings are pinned by the command tests TestRollbackNeverStopsTheRuntimeWhenThePlanDoesNotBind and TestRollbackRestartsTheRuntimeEvenWhenTheStopFails"
   ],
   "note": "Identities, classes, states and volume attachments only. No host path, no environment value, and no raw ownership label value is recorded here.",
   "phase": "LABEL-P3B",

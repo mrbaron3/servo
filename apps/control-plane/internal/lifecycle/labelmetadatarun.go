@@ -396,8 +396,26 @@ func (plan *RollbackPlan) BindToHost(host *MetadataHost) error {
 					resource, name,
 				)
 			}
+			// The document path is walked component by component; the backup path
+			// has to be too. Checking only the root leaves <root>/<kind> or
+			// <root>/<kind>/<id> swappable for a symlink, and rollback both READS
+			// a backup through that path and WRITES a new one down it.
+			if err := requireNoSymlinkInPath(
+				file.BackupPath, backupRoot,
+			); err != nil {
+				return err
+			}
 			if err := verifyRecordedBackup(resource, name, file); err != nil {
 				return err
+			}
+			// The live document is verified here as well as inside the restore.
+			// Both are needed and neither is redundant: this one runs before the
+			// runtime is stopped, so a plan that cannot apply is refused without
+			// taking Apple Container down; the one inside the restore runs again
+			// afterwards, because the runtime re-serialises entity.json across a
+			// stop and the document it will actually rewrite is the later one.
+			if err := preflightRestore(file); err != nil {
+				return fmt.Errorf("%s: %w", resource, err)
 			}
 		}
 	}

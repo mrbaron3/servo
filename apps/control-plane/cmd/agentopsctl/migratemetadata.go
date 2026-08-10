@@ -191,9 +191,10 @@ func runMetadataRollback(
 		)
 	}
 	fmt.Printf("stopping Apple Container services\n")
-	if err := runtime.StopSystem(ctx); err != nil {
-		return fmt.Errorf("stop Apple Container: %w", err)
-	}
+	// The restart is registered BEFORE the stop, not after it succeeds. A stop
+	// that fails partway has still taken services down, and returning from that
+	// error without a registered restart is how an operator's machine is left
+	// without a container runtime by a command that only meant to refuse.
 	defer func() {
 		// A cancelled context must not be able to leave Apple Container stopped.
 		// main wires ctx to signal.NotifyContext, so a SIGINT arriving inside the
@@ -211,6 +212,9 @@ func runMetadataRollback(
 			)
 		}
 	}()
+	if err := runtime.StopSystem(ctx); err != nil {
+		return fmt.Errorf("stop Apple Container: %w", err)
+	}
 	if err := runtime.RequireServicesStopped(ctx); err != nil {
 		return err
 	}

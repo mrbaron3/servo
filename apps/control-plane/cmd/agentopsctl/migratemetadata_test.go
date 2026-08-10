@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -148,8 +151,9 @@ func TestRollbackNeverStopsTheRuntimeWhenThePlanDoesNotBind(t *testing.T) {
 	runner := &recordingRuntimeRunner{results: []lifecycle.CommandResult{
 		// ResolveMetadataHost: version probe and system status.
 		{Status: 0, Stdout: "container CLI version 1.1.0"},
-		{Status: 0, Stdout: "status running\napiserver 1.1.0\nappRoot " + appRoot + "\n"},
-		{Status: 0, Stdout: "status running\napiserver 1.1.0\nappRoot " + appRoot + "\n"},
+		{Status: 0, Stdout: "status running\n" +
+			"apiserver.version  container-apiserver version 1.1.0\n" +
+			"appRoot " + appRoot + "\n"},
 	}}
 	err := migrateLabelMetadata(
 		context.Background(),
@@ -187,5 +191,95 @@ func TestRollbackRejectsABlankPlanPath(t *testing.T) {
 	}
 	if runner.called {
 		t.Fatal("a blank rollback path reached the runtime")
+	}
+}
+
+// TestRollbackRestartsTheRuntimeEvenWhenTheStopFails pins the ordering that
+// keeps an operator's machine usable. A stop that fails partway has still taken
+// services down, so the restart has to be registered before the stop rather
+// than after it succeeds.
+func TestRollbackRestartsTheRuntimeEvenWhenTheStopFails(t *testing.T) {
+	root := t.TempDir()
+	appRoot := filepath.Join(root, "appRoot")
+	backups := filepath.Join(root, "backups")
+	document := filepath.Join(appRoot, "volumes", "vol-a", "entity.json")
+	backup := filepath.Join(backups, "volume", "vol-a", "entity.json")
+	for _, directory := range []string{filepath.Dir(document), filepath.Dir(backup)} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(backups, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := `{"name":"vol-a","labels":{"com.example.old":"v1"}}`
+	after := `{"name":"vol-a","labels":{"com.mrbaron3.servo.agentopsctl":"v1"}}`
+	if err := os.WriteFile(backup, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(document, []byte(after), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := func(body string) string {
+		digest := sha256.Sum256([]byte(body))
+		return hex.EncodeToString(digest[:])
+	}
+	plan := map[string]any{
+		"stage": "retire",
+		"applied": []map[string]any{{
+			"kind": "volume", "id": "vol-a",
+			"files": []map[string]any{{
+				"document":     "volumes/vol-a/entity.json",
+				"labelPath":    []string{"labels"},
+				"beforeSha256": sum(before),
+				"afterSha256":  sum(after),
+				"backupSha256": sum(before),
+			}},
+		}},
+		"locations": [][]map[string]string{{{"path": document, "backupPath": backup}}},
+		"labels": []map[string]map[string]string{{
+			"before": {"com.example.old": "v1"},
+			"after":  {"com.mrbaron3.servo.agentopsctl": "v1"},
+		}},
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(root, "rollback-plan.json")
+	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status := "status running\n" +
+		"apiserver.version  container-apiserver version 1.1.0 (build: release)\n" +
+		"appRoot " + appRoot + "\n"
+	runner := &recordingRuntimeRunner{results: []lifecycle.CommandResult{
+		{Status: 0, Stdout: "container CLI version 1.1.0"}, // version probe
+		{Status: 0, Stdout: status},                        // system status
+		{Status: 0, Stdout: `[]`},                          // containers
+		{Status: 0, Stdout: `[]`},                          // volumes
+		{Status: 0, Stdout: `[]`},                          // networks
+		{Status: 1, Stderr: "stop failed halfway"},         // system stop
+	}}
+	err = migrateLabelMetadata(
+		context.Background(),
+		[]string{"--rollback", planPath},
+		lifecycle.NewAppleRuntimeForTest(runner),
+	)
+	if err == nil {
+		t.Fatal("a failed stop was reported as success")
+	}
+
+	started := false
+	for _, args := range runner.args {
+		if len(args) >= 2 && args[0] == "system" && args[1] == "start" {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatalf(
+			"a failed stop returned without restarting the runtime: %#v",
+			runner.args,
+		)
 	}
 }

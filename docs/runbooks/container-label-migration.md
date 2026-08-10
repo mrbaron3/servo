@@ -608,6 +608,19 @@ P3B（旧 read の削除）へ進む条件と、その充足状況。
 rollback が旧 namespace へ戻した resource は `missing-label` になり分類では見えなくなるが、
 再開時にまさにそれらを書き換えるためである。
 
+**live document の検査も stop より前に 1 回行う。** 適用できない plan のために runtime を
+止めない。stop 後にもう一度同じ検査を行うのは冗長ではない——Apple Container は
+`system start`/`stop` を跨いで `volumes/*/entity.json` を書き直すので、実際に書き換える
+document は後者だからである。
+
+**backup path も 1 component ずつ検査する。** root だけを見ると `<root>/<kind>` を symlink に
+差し替えられる。rollback は backup を**読む**だけでなく created-since の copy を**書く**ので、
+document path と同じ扱いにする。
+
+**runtime の再起動は stop より前に登録する。** 途中で失敗した stop も service を落として
+いる可能性があり、その error path で復旧が登録されていなければ、operator の machine は
+container runtime を失ったまま残る。
+
 ### P3B でやらないこと
 
 - host への破壊的操作。P3B は code / test / docs だけの変更であり、

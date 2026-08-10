@@ -363,3 +363,49 @@ func TestBindToHostRefusesAScatteredOrWideOpenBackupRoot(t *testing.T) {
 		}
 	})
 }
+
+// TestBindToHostRefusesASymlinkedBackupIntermediate covers the backup path's
+// own components. Checking only the root leaves <root>/<kind> swappable, and
+// rollback both reads a recorded backup through that path and writes a new one
+// down it for a document that appeared since the migration.
+func TestBindToHostRefusesASymlinkedBackupIntermediate(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	plan := bindablePlan(t, root, backups)
+	// Move <root>/volume aside and symlink it, so every backup below still
+	// resolves to the same bytes and only the path shape changed.
+	kindDirectory := filepath.Join(backups, string(MetadataKindVolume))
+	elsewhere := filepath.Join(t.TempDir(), "volume")
+	if err := os.Rename(kindDirectory, elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, kindDirectory); err != nil {
+		t.Fatal(err)
+	}
+	err := plan.BindToHost(&MetadataHost{AppRoot: root, CLIVersion: "1.1.0"})
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("a symlinked backup intermediate was accepted: %v", err)
+	}
+}
+
+// TestBindToHostRefusesATargetItCannotRestore proves the live document is
+// verified before the runtime is stopped rather than only inside the restore.
+func TestBindToHostRefusesATargetItCannotRestore(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	plan := bindablePlan(t, root, backups)
+	// A non-label field changed since the migration, so the document is neither
+	// recorded shape and is not an acceptable re-serialisation either.
+	if err := os.WriteFile(
+		plan.Applied[0].Files[0].Path,
+		[]byte(`{"name":"vol-renamed","labels":{"`+CurrentManagedLabelKey+`":"v1"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := plan.BindToHost(&MetadataHost{
+		AppRoot: root, CLIVersion: "1.1.0",
+	}); err == nil {
+		t.Fatal("a plan whose target cannot be restored was bound to this host")
+	}
+}
