@@ -308,9 +308,12 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 		return report, err
 	}
 	migrated := make([]string, 0, len(targets))
+	verified := make(map[string]ContainerActual, len(plans))
 	var sweepErr error
 	for _, plan := range plans {
-		if stepErr := sweeper.migrateOne(ctx, plan, &report); stepErr != nil {
+		if stepErr := sweeper.migrateOne(
+			ctx, plan, &report, verified,
+		); stepErr != nil {
 			report.Halted = fmt.Sprintf(
 				"halted at container %s: %v", plan.Observed.ID, stepErr,
 			)
@@ -330,9 +333,10 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 	// The post-state is recorded even when the sweep halted. The case that
 	// matters is the dangerous one — some containers migrated and one did not —
 	// and that is exactly the case an empty post-state would hide.
-	after, planErr := sweeper.Plan(ctx, "post-migration")
+	containers, planErr := sweeper.Runtime.Containers(ctx)
 	if planErr == nil {
-		markMigrated(&after, migrated)
+		after := BuildMigrationAudit("post-migration", containers)
+		markMigrated(&after, migrated, verified, containers)
 		report.After = after
 	}
 	if sweepErr != nil {
@@ -344,16 +348,43 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 // markMigrated distinguishes a container this sweep migrated from one that was
 // already dual before it started. Both are "skipped" to a fresh inventory, and
 // only the sweep knows which is which.
-func markMigrated(audit *MigrationAudit, migrated []string) {
+// It rewrites a record only when the container still carrying that identity is
+// byte-for-byte the one that was verified. Anything else answering to the name
+// by now was not proven by this sweep, and relabelling it "proven equivalent"
+// would erase its real classification — a container that turned conflicting in
+// the meantime would have its conflict subtracted from the totals the Phase 3
+// gate is read from.
+func markMigrated(
+	audit *MigrationAudit,
+	migrated []string,
+	verified map[string]ContainerActual,
+	containers []ContainerActual,
+) {
 	if len(migrated) == 0 {
 		return
 	}
-	changed := make(map[string]bool, len(migrated))
+	final := make(map[string]ContainerActual, len(containers))
+	for _, container := range containers {
+		final[container.ID] = container
+	}
+	confirmed := make(map[string]bool, len(migrated))
 	for _, id := range migrated {
-		changed[id] = true
+		expected, proven := verified[id]
+		if !proven {
+			continue
+		}
+		current, present := final[id]
+		if !present {
+			continue
+		}
+		if equal, err := canonicallyEqual(expected, current); err != nil ||
+			!equal {
+			continue
+		}
+		confirmed[id] = true
 	}
 	for index := range audit.Records {
-		if !changed[audit.Records[index].ID] {
+		if !confirmed[audit.Records[index].ID] {
 			continue
 		}
 		audit.Totals[audit.Records[index].Disposition]--
@@ -403,6 +434,24 @@ func (sweeper *LabelSweeper) planReplacements(
 // recreate it from somebody else's configuration. The runtime-assigned status
 // beyond the lifecycle state is excluded: an address does not change identity.
 func requireUnchangedSincePlan(planned, fresh ContainerActual) error {
+	if err := requireConfigurationUnchanged(planned, fresh); err != nil {
+		return err
+	}
+	if planned.Status.State != fresh.Status.State {
+		return fmt.Errorf(
+			"container %s changed lifecycle state from %q to %q since the "+
+				"snapshot", planned.ID, planned.Status.State, fresh.Status.State,
+		)
+	}
+	return nil
+}
+
+// requireConfigurationUnchanged compares everything except the lifecycle state.
+// The state is separated out because the sweep changes it itself: by the time
+// it deletes a container it has already stopped it, so the useful question at
+// that point is not "is this the state I planned?" but "is this still the same
+// container, and is it stopped?".
+func requireConfigurationUnchanged(planned, fresh ContainerActual) error {
 	equal, err := canonicallyEqual(
 		planned.Configuration, fresh.Configuration,
 	)
@@ -416,12 +465,6 @@ func requireUnchangedSincePlan(planned, fresh ContainerActual) error {
 		return fmt.Errorf(
 			"container %s changed between the snapshot and this step; another "+
 				"actor is mutating it", planned.ID,
-		)
-	}
-	if planned.Status.State != fresh.Status.State {
-		return fmt.Errorf(
-			"container %s changed lifecycle state from %q to %q since the "+
-				"snapshot", planned.ID, planned.Status.State, fresh.Status.State,
 		)
 	}
 	return nil
@@ -461,24 +504,43 @@ func (sweeper *LabelSweeper) requireUnmovedImage(
 	return nil
 }
 
-// requireStillOwned re-resolves an exact identity and proves this binary still
-// owns it. It is called immediately before each destructive step so the gap
-// between decision and action stays as small as the runtime allows.
-func (sweeper *LabelSweeper) requireStillOwned(
+// requireStillPlanned re-resolves an exact identity immediately before a
+// destructive step and proves it is still the container the plan was built
+// from. Proving ownership alone is not enough: another agentopsctl instance
+// could have replaced this reusable name with a *different* managed container,
+// which would pass every label check while being something this sweep never
+// inspected. The full comparison is repeated rather than reused from
+// re-inspection, because the whole point is the gap between the two.
+func (sweeper *LabelSweeper) requireStillPlanned(
 	ctx context.Context,
-	id string,
+	planned ContainerActual,
+	expectedState string,
 ) error {
-	actual, err := sweeper.containerByID(ctx, id)
+	actual, err := sweeper.containerByID(ctx, planned.ID)
 	if err != nil {
 		return err
 	}
 	if actual == nil {
 		return fmt.Errorf(
 			"container %s vanished before this step; another actor is "+
-				"changing it", id,
+				"changing it", planned.ID,
 		)
 	}
-	return RequireManaged("container "+id, actual.Configuration.Labels)
+	if err := RequireManaged(
+		"container "+planned.ID, actual.Configuration.Labels,
+	); err != nil {
+		return err
+	}
+	if err := requireConfigurationUnchanged(planned, *actual); err != nil {
+		return err
+	}
+	if actual.Status.State != expectedState {
+		return fmt.Errorf(
+			"container %s is %q immediately before this step, not the %q this "+
+				"sweep left it in", planned.ID, actual.Status.State, expectedState,
+		)
+	}
+	return nil
 }
 
 // selectedTargets resolves Only against the planned targets. It fails closed in
@@ -528,6 +590,7 @@ func (sweeper *LabelSweeper) migrateOne(
 	ctx context.Context,
 	plan plannedMigration,
 	report *SweepReport,
+	verified map[string]ContainerActual,
 ) error {
 	id := plan.Observed.ID
 	// Stage 1: re-inspect. The plan may be seconds or minutes old, and the next
@@ -580,7 +643,9 @@ func (sweeper *LabelSweeper) migrateOne(
 	// but it is narrowed to a single call and the stop is refused outright when
 	// the name no longer resolves to something owned.
 	if wasRunning {
-		if err := sweeper.requireStillOwned(ctx, id); err != nil {
+		if err := sweeper.requireStillPlanned(
+			ctx, plan.Observed, plan.Observed.Status.State,
+		); err != nil {
 			return sweeper.fail(report, id, StageStop, err)
 		}
 		if err := sweeper.Runtime.Stop(
@@ -599,7 +664,7 @@ func (sweeper *LabelSweeper) migrateOne(
 	// vanished, which is not success here: something else is mutating the same
 	// container, and continuing would recreate a container from a snapshot of a
 	// world that no longer exists.
-	if err := sweeper.requireStillOwned(ctx, id); err != nil {
+	if err := sweeper.requireStillPlanned(ctx, plan.Observed, "stopped"); err != nil {
 		return sweeper.fail(report, id, StageDelete, err)
 	}
 	if err := sweeper.Runtime.DeleteExisting(ctx, id); err != nil {
@@ -662,6 +727,10 @@ func (sweeper *LabelSweeper) migrateOne(
 	}
 	sweeper.ok(report, id, StageVerify,
 		"replacement is equivalent and dual-labeled")
+	// The verified post-state is retained so the final audit can confirm the
+	// record still carrying this identity is the one that was proven, rather
+	// than relabelling whatever answers to the name by then.
+	verified[id] = *replacement
 	return nil
 }
 

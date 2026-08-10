@@ -41,6 +41,37 @@ func TestMigrationEvidenceRefusesToOverwriteAnExistingRecord(t *testing.T) {
 	}
 }
 
+// Loading the full configuration resolves broker capabilities and persists
+// them. A command whose default is a read-only inventory must not create state
+// on the host merely by being invoked, so it is dispatched before that happens.
+func TestMigrateLabelsCreatesNoCapabilityStateOnInvocation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AGENTOPSCTL_PROJECT_ROOT", t.TempDir())
+
+	// --apply without --only fails on the argument contract alone; reaching
+	// that error proves the command ran without loading the configuration.
+	err := run([]string{"migrate-labels", "--apply"})
+	if err == nil || !strings.Contains(err.Error(), "--only") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// -h must be equally inert.
+	_ = run([]string{"migrate-labels", "-h"})
+
+	entries, readErr := os.ReadDir(home)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), "agentops") {
+			t.Fatalf(
+				"invoking the inventory created %q in the home directory",
+				entry.Name(),
+			)
+		}
+	}
+}
+
 // Two runs must not collide on a file name in the first place.
 func TestEvidenceRunIdentitiesDiffer(t *testing.T) {
 	seen := make(map[string]bool, 32)

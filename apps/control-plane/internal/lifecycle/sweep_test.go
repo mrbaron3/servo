@@ -42,6 +42,10 @@ type fakeSweepRuntime struct {
 	// reported, modelling either this sweep's own debris or another actor
 	// taking the name — which Apple Container gives no way to distinguish.
 	recordOnBusy *ContainerActual
+	// swapOnStop replaces the container under the same name while it is being
+	// stopped, modelling another instance taking over a reusable identity in
+	// the window before the delete.
+	swapOnStop func() ContainerActual
 	// imageDigest overrides what the tag currently resolves to; empty means it
 	// still resolves to the digest the fixture container was created from.
 	imageDigest    string
@@ -148,6 +152,15 @@ func (runtime *fakeSweepRuntime) Stop(
 	for index := range runtime.containers {
 		if runtime.containers[index].ID == name {
 			runtime.containers[index].Status.State = "stopped"
+		}
+	}
+	if runtime.swapOnStop != nil {
+		substitute := runtime.swapOnStop()
+		runtime.swapOnStop = nil
+		for index := range runtime.containers {
+			if runtime.containers[index].ID == name {
+				runtime.containers[index] = substitute
+			}
 		}
 	}
 	return nil
@@ -713,7 +726,10 @@ func TestSweepAbortsWhenTheTargetChangedSincePlanning(t *testing.T) {
 		runtime.containers[0].Configuration.Labels,
 	)
 	report := SweepReport{}
-	err = sweeper.migrateOne(context.Background(), plans[0], &report)
+	err = sweeper.migrateOne(
+		context.Background(), plans[0], &report,
+		map[string]ContainerActual{},
+	)
 	if err == nil {
 		t.Fatal("the sweep deleted a container that was no longer a target")
 	}
@@ -746,7 +762,10 @@ func TestSweepAbortsWhenTheSameNameHoldsADifferentPendingContainer(t *testing.T)
 		distinctVolume("somebody-elses-data"), "",
 	)
 	report := SweepReport{}
-	err = sweeper.migrateOne(context.Background(), plans[0], &report)
+	err = sweeper.migrateOne(
+		context.Background(), plans[0], &report,
+		map[string]ContainerActual{},
+	)
 	if err == nil {
 		t.Fatal("the sweep migrated a container it had never inspected")
 	}
@@ -1203,6 +1222,88 @@ func TestReportStaysAppliedWhenAnEarlierTargetAlreadyMutated(t *testing.T) {
 	}
 	if len(report.Migrated) != 1 || report.Migrated[0] != "agentops-runner" {
 		t.Fatalf("migrated set = %v", report.Migrated)
+	}
+}
+
+// The gap that matters is between re-inspection and the delete. If another
+// instance swaps this reusable name for a different managed container in that
+// window, label checks alone accept it — so the full comparison is repeated
+// immediately before the delete.
+func TestSweepRefusesToDeleteASubstitutedContainer(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "running",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	// Stopping is the last thing before the delete, so that is where the
+	// substitution lands: same name, managed and owned, different container.
+	runtime.swapOnStop = func() ContainerActual {
+		return containerFixtureWithMounts(
+			t, "agentops-runner", "stopped",
+			legacyOnlyLabels("runner", fixtureSpecDigest),
+			distinctVolume("somebody-elses-data"), "",
+		)
+	}
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
+	if err == nil {
+		t.Fatal("a substituted container was deleted")
+	}
+	if len(runtime.deleted) != 0 {
+		t.Fatalf("the substituted container was deleted: %v", runtime.deleted)
+	}
+	last := report.Steps[len(report.Steps)-1]
+	if last.Stage != StageDelete || last.Outcome != "failed" {
+		t.Fatalf("the substitution was not caught at the delete: %#v", last)
+	}
+	if !strings.Contains(last.Detail, "another actor is mutating it") {
+		t.Fatalf("unexpected failure detail: %q", last.Detail)
+	}
+}
+
+// The final audit must not relabel whatever holds the identity by then. A
+// container that turned conflicting after verification would otherwise have its
+// conflict subtracted from the totals the Phase 3 gate is read from.
+func TestMarkMigratedLeavesAnUnrecognisedFinalRecordAlone(t *testing.T) {
+	verifiedActual := containerFixture(
+		t, "agentops-runner", "stopped",
+		dualLabels("runner", fixtureSpecDigest), "",
+	)
+	// Something else now holds the name, and it is conflicting.
+	replaced := containerFixture(t, "agentops-runner", "stopped", `{
+		"com.mrbaron3.workflow.agentopsctl": "v1",
+		"com.mrbaron3.servo.agentopsctl": "v2"
+	}`, "")
+	containers := []ContainerActual{replaced}
+	audit := BuildMigrationAudit("post-migration", containers)
+	if audit.Totals[MigrationConflicting] != 1 {
+		t.Fatalf("fixture is not conflicting: %#v", audit.Totals)
+	}
+	markMigrated(
+		&audit,
+		[]string{"agentops-runner"},
+		map[string]ContainerActual{"agentops-runner": verifiedActual},
+		containers,
+	)
+	if audit.Totals[MigrationConflicting] != 1 ||
+		audit.Totals[MigrationMigrated] != 0 {
+		t.Fatalf("a conflict was hidden by the migrated rewrite: %#v",
+			audit.Totals)
+	}
+	if audit.Records[0].Disposition != MigrationConflicting {
+		t.Fatalf("record disposition = %q", audit.Records[0].Disposition)
+	}
+	// The verified record itself is still relabelled.
+	confirmed := []ContainerActual{verifiedActual}
+	clean := BuildMigrationAudit("post-migration", confirmed)
+	markMigrated(
+		&clean,
+		[]string{"agentops-runner"},
+		map[string]ContainerActual{"agentops-runner": verifiedActual},
+		confirmed,
+	)
+	if clean.Totals[MigrationMigrated] != 1 {
+		t.Fatalf("a verified replacement was not marked migrated: %#v",
+			clean.Totals)
 	}
 }
 

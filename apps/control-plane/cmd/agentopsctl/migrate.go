@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,48 @@ type labelMigrationEvidence struct {
 	Plan                  lifecycle.MigrationAudit       `json:"plan"`
 	PlannedSpecs          []lifecycle.PlannedReplacement `json:"plannedSpecs,omitempty"`
 	Sweep                 *lifecycle.SweepReport         `json:"sweep,omitempty"`
+}
+
+// runMigrateLabels parses and runs the subcommand without loading the full
+// configuration. It resolves only the project root, which is the one thing the
+// default evidence location needs, and nothing here writes to the host unless
+// the operator asked for it.
+func runMigrateLabels(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("migrate-labels", flag.ContinueOnError)
+	// The read-only inventory is the default spelling because the mutating form
+	// deletes and recreates containers.
+	apply := flags.Bool(
+		"apply",
+		false,
+		"migrate old-only containers instead of only inventorying them",
+	)
+	evidenceDir := flags.String(
+		"evidence-dir",
+		"",
+		"where to write the durable inventory and sweep records",
+	)
+	only := flags.String(
+		"only",
+		"",
+		"comma separated exact container identities to migrate; "+
+			"required with --apply",
+	)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return usageError()
+	}
+	root, err := resolveProjectRoot()
+	if err != nil {
+		return err
+	}
+	manager := newManager(
+		config{ProjectRoot: root}, lifecycle.NewAppleRuntime(),
+	)
+	return manager.MigrateLabels(
+		ctx, *apply, *evidenceDir, splitIdentities(*only),
+	)
 }
 
 // splitIdentities turns a comma separated --only value into exact identities.

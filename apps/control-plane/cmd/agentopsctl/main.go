@@ -27,16 +27,23 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return usageError()
 	}
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
 		syscall.SIGTERM,
 	)
 	defer stop()
+	// migrate-labels is dispatched before loadConfig deliberately. Loading the
+	// configuration resolves broker capabilities and persists them, so going
+	// through it would make a command whose default is a read-only inventory
+	// create state on the host merely by being invoked — including for -h.
+	if args[0] == "migrate-labels" {
+		return runMigrateLabels(ctx, args[1:])
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
 	manager := newManager(cfg, lifecycle.NewAppleRuntime())
 	switch args[0] {
 	case "deploy":
@@ -107,35 +114,6 @@ func run(args []string) error {
 		return manager.RotatePostgresAdmin(
 			ctx,
 			commandID("rotate-postgres-admin", *requestID),
-		)
-	case "migrate-labels":
-		flags := flag.NewFlagSet("migrate-labels", flag.ContinueOnError)
-		// The read-only inventory is the default spelling because the mutating
-		// form deletes and recreates containers.
-		apply := flags.Bool(
-			"apply",
-			false,
-			"migrate old-only containers instead of only inventorying them",
-		)
-		evidenceDir := flags.String(
-			"evidence-dir",
-			"",
-			"where to write the durable inventory and sweep records",
-		)
-		only := flags.String(
-			"only",
-			"",
-			"comma separated exact container identities to migrate; "+
-				"required with --apply",
-		)
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		if flags.NArg() != 0 {
-			return usageError()
-		}
-		return manager.MigrateLabels(
-			ctx, *apply, *evidenceDir, splitIdentities(*only),
 		)
 	case "status":
 		flags := flag.NewFlagSet("status", flag.ContinueOnError)
