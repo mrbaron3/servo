@@ -195,11 +195,50 @@ func dualLabelMap(legacy map[string]string) map[string]string {
 	return mirrored
 }
 
-func testSweeper(runtime SweepRuntime) *LabelSweeper {
+// testSweeper builds a sweeper whose targets are always named, mirroring the
+// real contract: a sweep may only mutate containers the caller listed.
+func testSweeper(runtime SweepRuntime, only ...string) *LabelSweeper {
 	sweeper := NewLabelSweeper(runtime)
 	sweeper.ReleasePollInterval = time.Millisecond
 	sweeper.ReleaseTimeout = 250 * time.Millisecond
+	sweeper.Only = only
 	return sweeper
+}
+
+// "Every old-only container" is a selector whose meaning depends on what else
+// is on the host. Mutating on one is exactly what Issue #123 forbids.
+func TestSweepRefusesABroadSelector(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	report, err := testSweeper(runtime).Apply(context.Background())
+	if err == nil {
+		t.Fatal("a sweep with no named targets was allowed to mutate")
+	}
+	if report.Applied {
+		t.Fatal("report claims a broad sweep was applied")
+	}
+	if len(runtime.deleted) != 0 || len(runtime.createdSpec) != 0 {
+		t.Fatalf("a broad sweep mutated the host: %v", runtime.deleted)
+	}
+}
+
+// A repeated identity makes the intended target count ambiguous.
+func TestSweepRejectsDuplicateTargetIdentities(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	_, err := testSweeper(
+		runtime, "agentops-runner", "agentops-runner",
+	).Apply(context.Background())
+	if err == nil {
+		t.Fatal("a duplicated identity was accepted")
+	}
+	if len(runtime.deleted) != 0 {
+		t.Fatal("the sweep mutated despite an ambiguous target set")
+	}
 }
 
 // A partial migration anywhere means ownership is already ambiguous. The sweep
@@ -213,7 +252,8 @@ func TestSweepRefusesToMutateWhileAnyContainerConflicts(t *testing.T) {
 			"com.mrbaron3.servo.agentopsctl": "v2"
 		}`, ""),
 	)
-	report, err := testSweeper(runtime).Apply(context.Background())
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
 	if err == nil {
 		t.Fatal("the sweep ran while a conflicting container existed")
 	}
@@ -235,7 +275,8 @@ func TestSweepRecreatesAStoppedContainerWithoutStartingIt(t *testing.T) {
 		t, "agentops-runner", "stopped",
 		legacyOnlyLabels("runner", fixtureSpecDigest), "",
 	))
-	report, err := testSweeper(runtime).Apply(context.Background())
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
 	if err != nil {
 		t.Fatalf("sweep failed: %v (%+v)", err, report.Steps)
 	}
@@ -269,7 +310,8 @@ func TestSweepPreservesARunningContainersState(t *testing.T) {
 		t, "agentops-runner", "running",
 		legacyOnlyLabels("runner", fixtureSpecDigest), "",
 	))
-	if _, err := testSweeper(runtime).Apply(context.Background()); err != nil {
+	if _, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background()); err != nil {
 		t.Fatalf("sweep failed: %v", err)
 	}
 	if len(runtime.stopped) != 1 {
@@ -289,7 +331,8 @@ func TestSweepWaitsForVolumeReleaseBeforeReattaching(t *testing.T) {
 		legacyOnlyLabels("runner", fixtureSpecDigest), "",
 	))
 	runtime.deleteLinger = 3
-	report, err := testSweeper(runtime).Apply(context.Background())
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
 	if err != nil {
 		t.Fatalf("sweep failed: %v (%+v)", err, report.Steps)
 	}
@@ -315,7 +358,8 @@ func TestSweepFailsRatherThanReattachWhileVolumeIsHeld(t *testing.T) {
 	))
 	// A linger far longer than the timeout models a volume that never frees.
 	runtime.deleteLinger = 1_000_000
-	report, err := testSweeper(runtime).Apply(context.Background())
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
 	if err == nil {
 		t.Fatal("the sweep re-attached a volume that was never released")
 	}
@@ -334,7 +378,8 @@ func TestSweepFailsWhenANamedVolumeDisappears(t *testing.T) {
 		legacyOnlyLabels("runner", fixtureSpecDigest), "",
 	))
 	runtime.deleteVolume = "agentops-runner-workspace"
-	report, err := testSweeper(runtime).Apply(context.Background())
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
 	if err == nil {
 		t.Fatal("a destroyed named volume was accepted")
 	}
@@ -369,7 +414,9 @@ func TestSweepHaltsOnReplacementDriftAndLeavesTheRestUntouched(t *testing.T) {
 		drifted.Configuration.ReadOnly = false
 		return drifted
 	}
-	report, err := testSweeper(runtime).Apply(context.Background())
+	report, err := testSweeper(
+		runtime, "agentops-runner", "agentops-triage",
+	).Apply(context.Background())
 	if err == nil {
 		t.Fatal("a drifted replacement was accepted")
 	}
@@ -496,7 +543,8 @@ func TestSweepStopsAtDeleteFailure(t *testing.T) {
 		legacyOnlyLabels("runner", fixtureSpecDigest), "",
 	))
 	runtime.deleteErr = errors.New("container is not owned by agentopsctl")
-	report, err := testSweeper(runtime).Apply(context.Background())
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
 	if err == nil {
 		t.Fatal("a failing delete did not stop the sweep")
 	}

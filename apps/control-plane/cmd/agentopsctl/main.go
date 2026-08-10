@@ -126,7 +126,7 @@ func run(args []string) error {
 			"only",
 			"",
 			"comma separated exact container identities to migrate; "+
-				"empty migrates every old-only container",
+				"required with --apply",
 		)
 		if err := flags.Parse(args[1:]); err != nil {
 			return err

@@ -54,6 +54,17 @@ func (manager *manager) MigrateLabels(
 	evidenceDir string,
 	only []string,
 ) error {
+	// --apply must name its targets. "Every old-only container" is a broad
+	// selector whose meaning depends on what else happens to be on the host,
+	// and Issue #123 forbids mutating on one. The operator reads --only off the
+	// inventory they just looked at, which also makes the sweep's blast radius
+	// reviewable in the shell history.
+	if apply && len(only) == 0 {
+		return fmt.Errorf(
+			"migrate-labels --apply requires --only with the exact container " +
+				"identities to migrate; run without --apply to inventory them",
+		)
+	}
 	if err := manager.ensureRuntime(ctx); err != nil {
 		return err
 	}

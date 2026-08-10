@@ -94,14 +94,16 @@ type LabelSweeper struct {
 	// nothing changed: a migration whose evidence cannot be written is a
 	// migration nobody can audit or roll back.
 	SnapshotBeforeMutation func(MigrationAudit) error
-	// Only narrows the sweep to these exact container identities. It can only
-	// ever remove work: an identity listed here that is not a pending target is
-	// an error rather than a silent no-op, and an identity absent from here is
-	// never touched. Empty means every pending target.
+	// Only is the exact set of container identities this sweep may mutate. It
+	// is required: Issue #123 forbids acting on a broad or unresolved selector,
+	// and "every pending container" is exactly such a selector — its meaning
+	// depends on whatever else happens to be on the host at that moment.
+	// Naming the targets makes the blast radius a decision the operator wrote
+	// down rather than one the inventory made for them.
 	//
-	// This is what lets an operator migrate one container at a time, and what
-	// lets the grounded suite exercise the real runtime without going anywhere
-	// near a live managed topology on the same host.
+	// An identity listed here that is not a pending target is an error rather
+	// than a silent no-op, a duplicate is rejected, and an identity absent from
+	// here is never touched. Plan stays broad, because reading is safe.
 	Only []string
 }
 
@@ -183,23 +185,36 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 	return report, nil
 }
 
-// selectedTargets applies Only to the planned targets. A requested identity
-// that is not a pending target fails the sweep rather than being dropped: an
-// operator who named a container expects it migrated, and silently doing
-// nothing would read as success.
+// selectedTargets resolves Only against the planned targets. It fails closed in
+// three ways, each of which is a case where continuing would mutate more, or
+// something other, than the operator named:
+//
+//   - an empty set, which is the broad selector Issue #123 forbids;
+//   - an identity that is not a pending target, because an operator who named
+//     a container expects it migrated and a silent no-op reads as success;
+//   - a duplicate, because it makes the intended target count ambiguous.
 func (sweeper *LabelSweeper) selectedTargets(
 	audit MigrationAudit,
 ) ([]ContainerInventoryRecord, error) {
-	targets := audit.MigrationTargets()
 	if len(sweeper.Only) == 0 {
-		return targets, nil
+		return nil, fmt.Errorf(
+			"a sweep must name the exact containers it may mutate; " +
+				"refusing to act on a broad selector",
+		)
 	}
-	byID := make(map[string]ContainerInventoryRecord, len(targets))
-	for _, target := range targets {
+	byID := make(map[string]ContainerInventoryRecord, len(audit.Records))
+	for _, target := range audit.MigrationTargets() {
 		byID[target.ID] = target
 	}
+	seen := make(map[string]bool, len(sweeper.Only))
 	selected := make([]ContainerInventoryRecord, 0, len(sweeper.Only))
 	for _, id := range sweeper.Only {
+		if seen[id] {
+			return nil, fmt.Errorf(
+				"container %s is named more than once in the target set", id,
+			)
+		}
+		seen[id] = true
 		target, pending := byID[id]
 		if !pending {
 			return nil, fmt.Errorf(
