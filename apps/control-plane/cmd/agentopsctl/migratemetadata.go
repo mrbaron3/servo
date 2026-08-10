@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -124,7 +125,12 @@ func migrateLabelMetadata(
 			return fmt.Errorf("%s: %w", retired.name, errForwardMetadataSweepRetired)
 		}
 	}
-	if strings.TrimSpace(*rollback) == "" {
+	if *rollback != "" && strings.TrimSpace(*rollback) == "" {
+		// A path of only whitespace is a mistake worth naming, not the same
+		// thing as asking for the retired forward stage.
+		return fmt.Errorf("--rollback needs the path to a rollback plan")
+	}
+	if *rollback == "" {
 		// With no forward stage there is no useful default action, and defaulting
 		// to a mutating one would be the opposite of this command's convention
 		// that the safe spelling is the short one.
@@ -139,18 +145,7 @@ func migrateLabelMetadata(
 	if err != nil {
 		return err
 	}
-	inventory, err := lifecycle.TakeOwnershipInventory(ctx, runtime)
-	if err != nil {
-		return err
-	}
-	if running := inventory.RunningIdentifiableContainers(); len(running) > 0 {
-		return fmt.Errorf(
-			"%d container(s) this binary can identify are not stopped (%s); "+
-				"stop them before rolling back runtime metadata",
-			len(running), strings.Join(running, ", "),
-		)
-	}
-	return runMetadataRollback(ctx, runtime, host, *rollback)
+	return runMetadataRollback(ctx, runtime, host, strings.TrimSpace(*rollback))
 }
 
 // runMetadataRollback restores every document a recorded run rewrote.
@@ -174,6 +169,26 @@ func runMetadataRollback(
 	// then rewriting a document it has no business touching.
 	if err := plan.BindToHost(host); err != nil {
 		return fmt.Errorf("%s: %w", reportPath, err)
+	}
+	// The not-running gate is taken after the plan is known, so it can name the
+	// plan's own targets as well as the containers this binary can classify. A
+	// resumed rollback's earlier resources are already back on the retired
+	// namespace and unclassifiable, and they are exactly the ones about to be
+	// rewritten again.
+	inventory, err := lifecycle.TakeOwnershipInventory(ctx, runtime)
+	if err != nil {
+		return err
+	}
+	running := append(
+		inventory.RunningIdentifiableContainers(),
+		inventory.RunningNamed(plan.ContainerTargets())...,
+	)
+	if unique := distinctSorted(running); len(unique) > 0 {
+		return fmt.Errorf(
+			"%d container(s) are not stopped (%s); stop them before rolling "+
+				"back runtime metadata",
+			len(unique), strings.Join(unique, ", "),
+		)
 	}
 	fmt.Printf("stopping Apple Container services\n")
 	if err := runtime.StopSystem(ctx); err != nil {
@@ -211,6 +226,16 @@ func runMetadataRollback(
 		"restored %d resource(s) to their pre-migration labels\n",
 		len(plan.Applied),
 	)
+	// The deferred restart above reports a failure on stderr but cannot change
+	// the exit status from inside a defer. Re-proving the runtime is up here is
+	// what keeps "the rollback succeeded" from being printed by a process that
+	// exits 0 with the operator's container runtime down.
+	if capability := runtime.Capability(ctx); !capability.ServiceRunning {
+		return fmt.Errorf(
+			"the rollback completed but Apple Container is not running again; " +
+				"start it with `container system start`",
+		)
+	}
 	// The restored labels may be in the namespace this binary no longer reads,
 	// in which case it can no longer see the resources it just restored. Saying
 	// so here is the difference between a deliberate one-way boundary and an
@@ -221,4 +246,20 @@ func runMetadataRollback(
 		lifecycle.CurrentLabelNamespace,
 	)
 	return nil
+}
+
+// distinctSorted removes the overlap between the two not-running checks, which
+// deliberately cover intersecting sets.
+func distinctSorted(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, already := seen[value]; already {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	sort.Strings(unique)
+	return unique
 }

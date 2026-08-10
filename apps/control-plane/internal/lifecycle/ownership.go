@@ -139,10 +139,18 @@ func ReadSpecLabel(labels map[string]string) (string, LabelPresence) {
 // with another deployment has to be distinguishable from ownership.
 func ClassifyOwnership(labels map[string]string) OwnershipClass {
 	value, presence := ReadOwnershipLabel(labels, CurrentManagedLabelKey)
-	switch presence {
-	case LabelBlank:
+	if presence == LabelBlank {
 		return OwnershipMalformed
-	case LabelAbsent:
+	}
+	// A blank ancillary label is checked BEFORE the marker's value is judged, and
+	// the order is the point. A resource carrying an unknown marker beside a
+	// half-written role used to classify as unmanaged — "somebody else's name" —
+	// which is the one reading a half-written resource must never get, and which
+	// also dropped it out of the pre-stop gate.
+	if carriesBlankOwnershipLabel(labels) {
+		return OwnershipMalformed
+	}
+	if presence == LabelAbsent {
 		// A resource carrying this namespace's role or specification digest but
 		// no ownership marker was labelled by this binary and then interrupted.
 		// Reporting it as missing-label would make it indistinguishable from a
@@ -163,6 +171,17 @@ func ClassifyOwnership(labels map[string]string) OwnershipClass {
 func carriesOwnershipLabel(labels map[string]string) bool {
 	for _, key := range []string{CurrentRoleLabelKey, CurrentSpecLabelKey} {
 		if _, present := labels[key]; present {
+			return true
+		}
+	}
+	return false
+}
+
+// carriesBlankOwnershipLabel reports whether an ancillary ownership key is
+// written with an empty value, which no writer does deliberately.
+func carriesBlankOwnershipLabel(labels map[string]string) bool {
+	for _, key := range []string{CurrentRoleLabelKey, CurrentSpecLabelKey} {
+		if _, presence := ReadOwnershipLabel(labels, key); presence == LabelBlank {
 			return true
 		}
 	}
@@ -195,14 +214,16 @@ func RequireOwned(subject string, labels map[string]string) error {
 }
 
 // RequireManaged is the gate for stopping, signalling, or deleting a container.
-// It proves ownership and additionally proves that no ownership label is
-// half-written: a container whose role or specification label is blank is as
-// incomplete as one whose marker is, and a destructive path is exactly where
-// that has to stop the caller.
+// It proves ownership, which since Phase 3B also proves that no ownership label
+// is half-written: ClassifyOwnership treats a blank role or specification label
+// as malformed whatever the marker says, so a destructive path cannot be reached
+// by a resource whose labels are incomplete.
+//
+// The per-label loop below is therefore redundant with the classifier and is
+// kept deliberately: it names WHICH label is at fault, and a caller reading
+// "ownership labels are incomplete" on a container with a valid marker has no
+// other way to find out.
 func RequireManaged(subject string, labels map[string]string) error {
-	if err := RequireOwned(subject, labels); err != nil {
-		return err
-	}
 	for _, label := range []struct{ kind, key string }{
 		{"role", CurrentRoleLabelKey},
 		{"specification digest", CurrentSpecLabelKey},
@@ -215,7 +236,7 @@ func RequireManaged(subject string, labels map[string]string) error {
 			)
 		}
 	}
-	return nil
+	return RequireOwned(subject, labels)
 }
 
 // RequireRole returns nil when the resource carries the wanted runtime role.

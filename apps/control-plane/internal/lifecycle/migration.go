@@ -57,14 +57,15 @@ type VolumeAttachment struct {
 // act on, the ownership evidence behind the verdict, and the volume
 // attachments a replacement has to reproduce.
 type ContainerInventoryRecord struct {
-	ID              string               `json:"id"`
-	State           string               `json:"state"`
-	Image           string               `json:"image"`
-	ImageDigest     string               `json:"imageDigest"`
-	Ownership       OwnershipClass       `json:"ownership"`
-	Role            string               `json:"role"`
+	ID          string         `json:"id"`
+	State       string         `json:"state"`
+	Image       string         `json:"image"`
+	ImageDigest string         `json:"imageDigest"`
+	Ownership   OwnershipClass `json:"ownership"`
+	// RolePresence and SpecPresence replace the role and digest VALUES this
+	// record used to carry. Those were observed text, and no observed text is
+	// published; presence is what the fail-closed rules actually turn on.
 	RolePresence    LabelPresence        `json:"rolePresence"`
-	SpecDigest      string               `json:"specDigest"`
 	SpecPresence    LabelPresence        `json:"specPresence"`
 	OwnershipLabels map[string]string    `json:"ownershipLabels"`
 	NamedVolumes    []VolumeAttachment   `json:"namedVolumes"`
@@ -109,17 +110,15 @@ func BuildMigrationAudit(
 // InventoryContainer reaches exactly one verdict for one container.
 func InventoryContainer(actual ContainerActual) ContainerInventoryRecord {
 	labels := actual.Configuration.Labels
-	role, rolePresence := ReadRoleLabel(labels)
-	specDigest, specPresence := ReadSpecLabel(labels)
+	_, rolePresence := ReadRoleLabel(labels)
+	_, specPresence := ReadSpecLabel(labels)
 	record := ContainerInventoryRecord{
 		ID:              actual.ID,
 		State:           actual.Status.State,
 		Image:           actual.Configuration.Image.Reference,
 		ImageDigest:     actual.Configuration.Image.Descriptor.Digest,
 		Ownership:       ClassifyOwnership(labels),
-		Role:            publishedValue(CurrentRoleLabelKey, role, rolePresence),
 		RolePresence:    rolePresence,
-		SpecDigest:      publishedValue(CurrentSpecLabelKey, specDigest, specPresence),
 		SpecPresence:    specPresence,
 		OwnershipLabels: ownershipLabelSubset(labels),
 		NamedVolumes:    NamedVolumeAttachments(actual),
@@ -318,87 +317,76 @@ func numericField(value any) (int, bool) {
 	}
 }
 
-// UnrecognizedLabelValue replaces an ownership label value that does not have
-// the shape this binary writes.
+// An ownership label is not trusted input. Anyone who can create a container can
+// put `com.mrbaron3.servo.role` on it with any text they like, and that text
+// reaches operator terminals and durable evidence — which redacts only the
+// credentials it already knows about. Publishing it verbatim would be an
+// attacker-chosen channel into an audit trail read weeks later by someone who
+// was not there.
 //
-// It exists because an ownership label is not trusted input. Anyone who can
-// create a container can put `com.mrbaron3.servo.role` on it with any text they
-// like, and that text reaches operator terminals and durable evidence — which
-// redacts only the credentials it already knows about. Publishing it verbatim
-// would be an unbounded, attacker-chosen channel into an audit trail that is
-// read weeks later by someone who was not there.
-const UnrecognizedLabelValue = "unrecognized-value"
+// So nothing observed is ever published. Every ownership label renders as one of
+// the fixed tokens below, chosen to keep the distinctions the diagnostics are
+// actually used for — is this ours, is it somebody else's, is it half-written,
+// is the digest even digest-shaped — while carrying no bits the resource chose.
+//
+// A shape bound was tried first and rejected: a 32-character role or a
+// 64-character digest still passes observed content through, and "bounded" was
+// not the requirement.
+const (
+	// ManagedLabelToken means the marker names this binary.
+	ManagedLabelToken = "managed"
+	// PresentLabelToken means the label is written with some readable value.
+	// Which value it is deliberately does not reach the reader.
+	PresentLabelToken = "present"
+	// DigestShapedLabelToken means the specification label has the exact shape
+	// of a SHA-256 digest, which is the only thing this binary writes there.
+	DigestShapedLabelToken = "digest-shaped"
+	// UnrecognizedLabelToken means the label is written with something this
+	// binary does not produce.
+	UnrecognizedLabelToken = "unrecognized-value"
+	// BlankLabelToken means the label is written with an empty value, which is
+	// how a half-written label appears.
+	BlankLabelToken = "blank"
+)
 
-// BlankLabelValue replaces a present-but-empty ownership label value, which is
-// how a half-written label appears.
-const BlankLabelValue = "blank"
-
-// managedLabelStatus is what the ownership marker renders as when it names this
-// binary. The literal value is not echoed even though it is a constant, so that
-// every published ownership value comes from this file rather than from a
-// resource.
-const managedLabelStatus = "managed"
-
-// roleLabelShape is the conservative shape a role has to match to be published
-// verbatim: lowercase alphanumeric and hyphens, at most 32 characters. Every
-// role this binary writes — control, triage, runner, postgres, github-broker,
-// volume-init — matches it, so the useful semantics survive; a host path, a
-// credential, or a sentence does not.
-var roleLabelShape = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
-
-// specDigestShape is the exact shape of a SHA-256 digest, which is the only
-// thing this binary ever writes into the specification label.
+// specDigestShape is the exact shape of a SHA-256 digest.
 var specDigestShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// boundedOwnershipValue renders one ownership label value for publication. The
-// value is returned unchanged only when it has the shape this binary writes;
-// anything else is reduced to a fixed token.
-//
-// The bound is on the shape rather than on an enumerated list because roles are
-// chosen by the caller, not by this package. What it buys is that a published
-// value is always short, lowercase, and drawn from an alphabet that cannot
-// carry a path, a URL, or a token — not that it is one of a known set.
-func boundedOwnershipValue(key, value string) string {
-	if strings.TrimSpace(value) == "" {
-		return BlankLabelValue
+// ownershipLabelToken renders one ownership label for publication. Every branch
+// returns a constant declared in this file, so no argument can reach the result.
+func ownershipLabelToken(key, value string, presence LabelPresence) string {
+	switch presence {
+	case LabelAbsent:
+		return ""
+	case LabelBlank:
+		return BlankLabelToken
 	}
 	switch key {
 	case CurrentManagedLabelKey:
 		if value == ManagedLabelValue {
-			return managedLabelStatus
+			return ManagedLabelToken
 		}
 	case CurrentRoleLabelKey:
-		if roleLabelShape.MatchString(value) {
-			return value
-		}
+		return PresentLabelToken
 	case CurrentSpecLabelKey:
 		if specDigestShape.MatchString(value) {
-			return value
+			return DigestShapedLabelToken
 		}
 	}
-	return UnrecognizedLabelValue
+	return UnrecognizedLabelToken
 }
 
-// publishedValue renders a read label for publication. An absent label has no
-// value to render, and rendering one would make "absent" and "blank"
-// indistinguishable in the audit trail — which is exactly the distinction the
-// fail-closed rules turn on.
-func publishedValue(key, value string, presence LabelPresence) string {
-	if presence == LabelAbsent {
-		return ""
-	}
-	return boundedOwnershipValue(key, value)
-}
-
-// ownershipLabelSubset renders the ownership labels a record publishes. Keys are
-// this binary's own and are safe to name; values pass through
-// boundedOwnershipValue, so no resource can choose what an audit trail says.
+// ownershipLabelSubset renders the ownership labels a record publishes. The keys
+// are this binary's own and are safe to name; every value is a token, so no
+// resource can choose what an audit trail says.
 func ownershipLabelSubset(labels map[string]string) map[string]string {
 	subset := make(map[string]string, len(ownershipLabelKeys))
 	for _, key := range ownershipLabelKeys {
-		if value, present := labels[key]; present {
-			subset[key] = boundedOwnershipValue(key, value)
+		value, presence := ReadOwnershipLabel(labels, key)
+		if presence == LabelAbsent {
+			continue
 		}
+		subset[key] = ownershipLabelToken(key, value, presence)
 	}
 	return subset
 }

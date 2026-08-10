@@ -165,7 +165,6 @@ func (manager *manager) MigrateLabels(
 		)
 	}
 	sweeper := lifecycle.NewLabelSweeper(manager.runtime)
-	sweeper.Only = only
 	// A random run id, not just the clock and pid: two runs can share a second,
 	// and a pid is reused. Combined with O_EXCL on the write, a collision fails
 	// the run instead of overwriting another run's evidence.

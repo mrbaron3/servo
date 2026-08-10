@@ -132,15 +132,41 @@ func labelTextIsPortable(text string) bool {
 }
 
 // encodeJSONString renders one portable JSON string.
+//
+// The refusal deliberately does not echo the text. This is reached with label
+// keys AND values — a foreign label's value is arbitrary third-party text, and
+// rollback calls this path through inspectMetadataFile — so reproducing it here
+// would put attacker-chosen bytes on an operator's terminal from the one command
+// still allowed to touch runtime metadata. What an operator needs in order to
+// act is which character is unportable and where, and both survive redaction.
 func encodeJSONString(text string) ([]byte, error) {
 	if !labelTextIsPortable(text) {
 		return nil, fmt.Errorf(
-			"metadata text %q contains characters this migration will not "+
-				"re-encode; resolve it by hand",
-			text,
+			"metadata text contains %s, which this migration will not "+
+				"re-encode; inspect the document by hand to find it",
+			describeUnportableText(text),
 		)
 	}
 	return []byte(`"` + text + `"`), nil
+}
+
+// describeUnportableText names the first character a portable encoding cannot
+// carry, by class and position, without reproducing the text around it.
+func describeUnportableText(text string) string {
+	for index, character := range text {
+		if labelTextIsPortable(string(character)) {
+			continue
+		}
+		switch {
+		case character < 0x20 || character == 0x7f:
+			return fmt.Sprintf("a control character at byte %d", index)
+		case character > 0x7f:
+			return fmt.Sprintf("a non-ASCII character at byte %d", index)
+		default:
+			return fmt.Sprintf("the character %q at byte %d", character, index)
+		}
+	}
+	return "an unportable character"
 }
 
 // parseLabelMap decodes one labels object, requiring every value to be a

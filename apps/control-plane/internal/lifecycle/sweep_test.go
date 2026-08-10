@@ -27,7 +27,6 @@ func (runtime *countingSweepRuntime) Containers(
 func TestApplyRefusesBeforeTouchingTheRuntime(t *testing.T) {
 	runtime := &countingSweepRuntime{}
 	sweeper := NewLabelSweeper(runtime)
-	sweeper.Only = []string{"agentops-runner"}
 	report, err := sweeper.Apply(context.Background())
 	if err == nil {
 		t.Fatal("the retired sweep applied something")

@@ -410,9 +410,10 @@ metadata document を書き換えること**だけである。これは特権的
 「listing は変わったのに片割れが旧 label のまま」または「書いたのに listing が変わらない」に
 なるので、**存在する document を全部書き、全部が一致していることを事前に要求する**。
 
-### 安全装置
+### 安全装置（**P3A の設計記録**。現行は下記「P3B の rollback safety」）
 
-`migrate-label-metadata` は次を全部通らなければ実行されない。
+`migrate-label-metadata --stage` は次を全部通らなければ実行されなかった。**stage は撤去済み**
+なので、以下は当時の設計記録である。
 
 - **appRoot は `container system status` から取る**（hardcode しない）。version は
   CLI・apiserver とも **`1.1.0` の exact allowlist**。layout は公開契約ではないので、
@@ -435,6 +436,12 @@ metadata document を書き換えること**だけである。これは特権的
 
 ### backup は credential store である（repository に置かない）
 
+> **P3B での変更**: `--backup-dir` / `AGENTOPS_LABEL_BACKUP_ROOT` / `$XDG_STATE_HOME` 既定は
+> `ResolveBackupRoot` ごと撤去された（forward run が無いので backup root を*選ぶ*処理も無い）。
+> 現行の rollback は plan から backup root を導き、`RollbackPlan.BindToHost` が
+> **0700・現 user 所有・git work tree の外・symlink でない**ことを確認する。下記の規則は
+> 「どこに置くべきか」としてそのまま有効であり、強制する場所が変わっただけである。
+
 **`containers/<id>/config.json` は `initProcess.environment` を値ごと持つ。** 本 project の topology では
 `POSTGRES_PASSWORD` がここに入る。backup はその document の**逐語コピー**なので、backup directory は
 artifact ではなく **credential store** である。したがって:
@@ -449,7 +456,7 @@ artifact ではなく **credential store** である。したがって:
 
 | | 置き場所 | 中身 | commit するか |
 | --- | --- | --- | --- |
-| **evidence** | `--evidence-dir`（既定 `evidence/label-p3a/`） | identity・ownership class・6 つの label key・digest・**appRoot / backup root からの相対 path** | **する** |
+| **evidence** | `--evidence-dir`（既定 `evidence/label-p3a/`） | identity・ownership class・**3 つ**の label key と**固定 token 化した値**（`managed` / `present` / `digest-shaped` / `unrecognized-value` / `blank`）・digest・**appRoot / backup root からの相対 path** | **する** |
 | **rollback plan** | backup root の中（0600） | rollback に必要な**絶対 path** | **しない** |
 
 **sanitize した evidence では rollback できない**（絶対 path を持たないため）。だから 2 つに分ける。
@@ -576,13 +583,30 @@ P3B（旧 read の削除）へ進む条件と、その充足状況。
   `migrate-label-metadata --stage` は P3B で撤去された。両方とも runtime に触れる前に拒否する。
 - **`migrate-label-metadata --rollback` は残る。** label key を一切解釈せず、記録済みの label map を
   逐語で書き戻すだけなので、このbinaryが読めない namespace でも正しく復元できる。
-- **plan は host に束縛してから実行する。** plan の path は file から逐語で読んだ絶対 path なので、
-  `RollbackPlan.BindToHost` が **service を止める前に**次を全部証明する: kind が既知であること、
-  identity が directory を脱出しないこと、各 document の path が
-  `<appRoot>/<kind directory>/<id>/<既知の document 名>` を再構成したものと**完全一致**すること、
-  label path を plan からではなく layout から取ること、appRoot からの各 component が symlink で
-  ないこと、backup root が git work tree の外にあること（symlink 祖先も解決して確認する）。
-  古い・改竄された plan が Apple Container を止めたうえで無関係な JSON を書き換える経路を塞ぐ。
+
+### P3B の rollback safety
+
+**plan は host に束縛してから実行する。** plan の path・digest・label map はすべて file から
+逐語で読んだ値であり、「内部整合している」ことは偽造 plan がまさに満たす条件である。
+`RollbackPlan.BindToHost` が **service を止める前に**次を全部証明する。
+
+- kind が既知で、identity が directory を脱出しないこと。
+- 各 document の path が `<appRoot>/<kind directory>/<id>/<既知の document 名>` を
+  **再構成したもの**と完全一致すること（比較ではなく再構成である）。
+- label path を plan からではなく layout から取ること
+  （偽造 labelPath で labels 以外の field を書き換えさせない）。
+- appRoot からの各 component が symlink でないこと。
+- **全 backup が単一の canonical root の下**の同じ `kind/id/document` 位置にあること。
+  その root が **0700・現 user 所有・git work tree の外・symlink でない**こと。
+- 各 backup の **bytes を hash し**、plan が記録した digest と一致し、かつ plan が復元すると
+  主張する `BeforeLabels` を実際に含んでいること。
+- **記録された before→after 変換を再導出**し、backup へ `AfterLabels` を書いたものが
+  plan の `AfterSHA256` を再現すること（digest の自己言及を破る唯一の検査）。
+- resource と document の重複を拒否すること（触る件数が曖昧な run をしない）。
+
+さらに、**stop する前の not-running 検査は plan の対象 container を名前で見る**。中断した
+rollback が旧 namespace へ戻した resource は `missing-label` になり分類では見えなくなるが、
+再開時にまさにそれらを書き換えるためである。
 
 ### P3B でやらないこと
 
@@ -603,6 +627,11 @@ go test ./apps/control-plane/internal/lifecycle/ -run AppleContainer -v -count=1
 
 実行結果は `evidence/label-p3b/grounded-<stamp>.json` に残す（identity・分類・state・
 volume attachment だけを記録し、host path も環境変数値も raw な label 値も入れない）。
+**この suite が接地しないこと**も同じ file に書く: binding 失敗が `StopSystem` より前に
+起きることは、suite が既に runtime を止めた後に bind するため接地できない。順序の証明は
+command test `TestRollbackNeverStopsTheRuntimeWhenThePlanDoesNotBind` が持つ。
+`legacyKeysPresent: 0` は **P3B の binary の分類では出せない**（legacy-only と missing-label は
+設計上区別できない）ので、read-only listing から key を直接数えた結果として記録する。
 
 P3B が実機で証明すること:
 

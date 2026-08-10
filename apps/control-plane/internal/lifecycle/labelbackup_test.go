@@ -255,3 +255,111 @@ func TestBindToHostFollowsASymlinkedAncestorIntoAWorkTree(t *testing.T) {
 		t.Fatalf("a symlinked ancestor was not resolved and refused: %v", err)
 	}
 }
+
+// TestBindToHostRefusesASymlinkedIntermediateDirectory covers the one case
+// openDirectory's O_NOFOLLOW cannot: it protects the resource directory and the
+// document, but not an intermediate like <appRoot>/volumes. requireNoSymlinkInPath
+// is the only guard that walks the whole path, and this is what pins it.
+func TestBindToHostRefusesASymlinkedIntermediateDirectory(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	plan := bindablePlan(t, root, backups)
+	// Move volumes/ aside and put a symlink in its place, so every path below it
+	// still resolves to the same files.
+	elsewhere := filepath.Join(t.TempDir(), "volumes")
+	if err := os.Rename(filepath.Join(root, "volumes"), elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(root, "volumes")); err != nil {
+		t.Fatal(err)
+	}
+	err := plan.BindToHost(&MetadataHost{AppRoot: root, CLIVersion: "1.1.0"})
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("a symlinked intermediate directory was accepted: %v", err)
+	}
+}
+
+// The plan supplies both the backup and the digests it should match, so those
+// digests agree with themselves by construction. What makes them mean anything
+// is re-deriving the migrated form from the backup and requiring it to equal the
+// digest the plan recorded for the live document. These cases pin that.
+func TestBindToHostVerifiesTheBackupAgainstThePlansOwnClaims(t *testing.T) {
+	for name, corrupt := range map[string]func(*testing.T, *RollbackPlan){
+		"a backup that is not what the plan hashed": func(t *testing.T, p *RollbackPlan) {
+			if err := os.WriteFile(
+				p.Applied[0].Files[0].BackupPath,
+				[]byte(`{"name":"vol-a","labels":{"com.example.other":"x"}}`),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a backup that does not carry the labels it restores": func(t *testing.T, p *RollbackPlan) {
+			// Self-consistent digests, but the labels the plan claims to restore
+			// are not the ones inside the backup it points at.
+			p.Applied[0].BeforeLabels = map[string]string{"com.example.other": "x"}
+			p.Applied[0].Files[0].BeforeLabels = p.Applied[0].BeforeLabels
+		},
+		"a migration that cannot be reproduced from the backup": func(t *testing.T, p *RollbackPlan) {
+			p.Applied[0].Files[0].AfterSHA256 = digestOf([]byte("not this document"))
+		},
+		"a backup readable by other accounts": func(t *testing.T, p *RollbackPlan) {
+			if err := os.Chmod(p.Applied[0].Files[0].BackupPath, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := seedAppRoot(t)
+			backups := filepath.Join(t.TempDir(), "private-backups")
+			plan := bindablePlan(t, root, backups)
+			corrupt(t, plan)
+			if err := plan.BindToHost(&MetadataHost{
+				AppRoot: root, CLIVersion: "1.1.0",
+			}); err == nil {
+				t.Fatalf("a plan with %s was bound to this host", name)
+			}
+		})
+	}
+}
+
+func TestBindToHostRefusesAScatteredOrWideOpenBackupRoot(t *testing.T) {
+	t.Run("backups spread across two roots", func(t *testing.T) {
+		root := seedAppRoot(t)
+		backups := filepath.Join(t.TempDir(), "private-backups")
+		plan := bindablePlan(t, root, backups)
+		second := phase3ARecord(
+			t, MetadataKindNetwork, "net-a", root,
+			filepath.Join(t.TempDir(), "other-backups"), legacyTriple(),
+		)
+		plan.Applied = append(plan.Applied, second)
+		if err := plan.BindToHost(&MetadataHost{
+			AppRoot: root, CLIVersion: "1.1.0",
+		}); err == nil {
+			t.Fatal("a plan naming two backup roots was accepted")
+		}
+	})
+	t.Run("a backup root other accounts can read", func(t *testing.T) {
+		root := seedAppRoot(t)
+		backups := filepath.Join(t.TempDir(), "private-backups")
+		plan := bindablePlan(t, root, backups)
+		if err := os.Chmod(backups, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := plan.BindToHost(&MetadataHost{AppRoot: root, CLIVersion: "1.1.0"})
+		if err == nil || !strings.Contains(err.Error(), "0700") {
+			t.Fatalf("a world-readable backup root was accepted: %v", err)
+		}
+	})
+	t.Run("the same resource named twice", func(t *testing.T) {
+		root := seedAppRoot(t)
+		backups := filepath.Join(t.TempDir(), "private-backups")
+		plan := bindablePlan(t, root, backups)
+		plan.Applied = append(plan.Applied, plan.Applied[0])
+		if err := plan.BindToHost(&MetadataHost{
+			AppRoot: root, CLIVersion: "1.1.0",
+		}); err == nil {
+			t.Fatal("a plan naming one resource twice was accepted")
+		}
+	})
+}

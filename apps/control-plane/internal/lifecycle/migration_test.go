@@ -273,7 +273,7 @@ func TestInventoryPublishesNoLegacyOwnershipLabels(t *testing.T) {
 	}
 	// The marker is published as a bounded status rather than as its literal
 	// value: see boundedOwnershipValue.
-	if record.OwnershipLabels[CurrentManagedLabelKey] != "managed" {
+	if record.OwnershipLabels[CurrentManagedLabelKey] != ManagedLabelToken {
 		t.Fatalf("the inventory lost the current labels: %v", record.OwnershipLabels)
 	}
 }
@@ -318,7 +318,8 @@ func TestInventoryNeverPublishesUntrustedLabelText(t *testing.T) {
 					)
 				}
 			}
-			if !strings.Contains(string(encoded), UnrecognizedLabelValue) {
+			if !strings.Contains(string(encoded), UnrecognizedLabelToken) &&
+				!strings.Contains(string(encoded), PresentLabelToken) {
 				t.Fatalf(
 					"the untrusted value was dropped without a marker:\n%s",
 					encoded,
@@ -328,21 +329,36 @@ func TestInventoryNeverPublishesUntrustedLabelText(t *testing.T) {
 	}
 }
 
-// The bound must not cost the diagnostics their meaning: a well-formed role and
-// digest still read exactly as written.
-func TestInventoryPublishesWellFormedValuesVerbatim(t *testing.T) {
+// Nothing observed is published, not even a well-formed value: the tokens carry
+// the distinctions the diagnostics are used for and no bits the resource chose.
+func TestInventoryPublishesTokensRatherThanObservedValues(t *testing.T) {
 	record := InventoryContainer(containerFixture(
 		t, "agentops-runner", "stopped",
 		currentLabels("github-broker", fixtureSpecDigest), "",
 	))
-	if record.Role != "github-broker" {
-		t.Fatalf("a well-formed role was mangled: %q", record.Role)
+	labels := record.OwnershipLabels
+	if labels[CurrentManagedLabelKey] != ManagedLabelToken {
+		t.Fatalf("the marker published as %q", labels[CurrentManagedLabelKey])
 	}
-	if record.SpecDigest != fixtureSpecDigest {
-		t.Fatalf("a well-formed digest was mangled: %q", record.SpecDigest)
+	if labels[CurrentRoleLabelKey] != PresentLabelToken {
+		t.Fatalf("the role published as %q", labels[CurrentRoleLabelKey])
 	}
-	if record.OwnershipLabels[CurrentRoleLabelKey] != "github-broker" {
-		t.Fatalf("published labels lost the role: %v", record.OwnershipLabels)
+	if labels[CurrentSpecLabelKey] != DigestShapedLabelToken {
+		t.Fatalf("the digest published as %q", labels[CurrentSpecLabelKey])
+	}
+	// Even a value this binary itself wrote must not appear.
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, observed := range []string{"github-broker", fixtureSpecDigest} {
+		if strings.Contains(string(encoded), observed) {
+			t.Fatalf("an observed value reached the record: %s", encoded)
+		}
+	}
+	// The presence fields carry what the fail-closed rules turn on.
+	if record.RolePresence != LabelPresent || record.SpecPresence != LabelPresent {
+		t.Fatalf("presence = %q/%q", record.RolePresence, record.SpecPresence)
 	}
 }
 
@@ -353,8 +369,8 @@ func TestInventoryDistinguishesAbsentFromBlankInPublishedValues(t *testing.T) {
 		t, "agentops-runner", "stopped",
 		`{"com.mrbaron3.servo.agentopsctl": "v1"}`, "",
 	))
-	if absent.Role != "" || absent.RolePresence != LabelAbsent {
-		t.Fatalf("an absent role published as %q/%q", absent.Role, absent.RolePresence)
+	if absent.RolePresence != LabelAbsent {
+		t.Fatalf("an absent role published as %q", absent.RolePresence)
 	}
 	if _, published := absent.OwnershipLabels[CurrentRoleLabelKey]; published {
 		t.Fatalf("an absent role reached the published labels: %v", absent.OwnershipLabels)
@@ -364,8 +380,15 @@ func TestInventoryDistinguishesAbsentFromBlankInPublishedValues(t *testing.T) {
 		t, "agentops-runner", "stopped",
 		`{"com.mrbaron3.servo.agentopsctl": "v1", "com.mrbaron3.servo.role": ""}`, "",
 	))
-	if blank.Role != BlankLabelValue || blank.RolePresence != LabelBlank {
-		t.Fatalf("a blank role published as %q/%q", blank.Role, blank.RolePresence)
+	if blank.RolePresence != LabelBlank {
+		t.Fatalf("a blank role published as %q", blank.RolePresence)
+	}
+	if blank.OwnershipLabels[CurrentRoleLabelKey] != BlankLabelToken {
+		t.Fatalf("a blank role published as %q", blank.OwnershipLabels[CurrentRoleLabelKey])
+	}
+	// A blank ancillary label now outranks the marker: the resource is malformed.
+	if blank.Ownership != OwnershipMalformed {
+		t.Fatalf("a blank role classified as %q", blank.Ownership)
 	}
 }
 
@@ -455,6 +478,12 @@ func TestInventoryTreatsABlankRoleOrSpecAsMalformed(t *testing.T) {
 					testCase.name, record.Disposition,
 				)
 			}
+			if record.Ownership != OwnershipMalformed {
+				t.Fatalf(
+					"a blank %s classified as %q, want malformed",
+					testCase.name, record.Ownership,
+				)
+			}
 			audit := BuildMigrationAudit("t", []ContainerActual{
 				containerFixture(
 					t, "agentops-runner", "stopped", testCase.labels, "",
@@ -484,9 +513,6 @@ func TestInventorySkipsAContainerWhoseObsoleteLegacyLabelsDisagree(t *testing.T)
 			"a container with obsolete legacy labels reported %q",
 			record.Disposition,
 		)
-	}
-	if record.Role != "runner" || record.SpecDigest != fixtureSpecDigest {
-		t.Fatalf("the inventory read the obsolete legacy values: %#v", record)
 	}
 	if record.RolePresence != LabelPresent || record.SpecPresence != LabelPresent {
 		t.Fatalf("presence = %q, %q", record.RolePresence, record.SpecPresence)

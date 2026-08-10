@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // This file is the operator-facing shape of what survives Phase 3A's sweep: an
@@ -116,6 +117,43 @@ func (inventory *OwnershipInventory) add(record OwnershipInventoryRecord) {
 	}
 }
 
+// ContainerTargets lists the container identities a plan will rewrite. The
+// rollback gate needs these by name: a resource an interrupted rollback already
+// reverted classifies as missing-label, so a gate keyed on classification alone
+// stops seeing exactly the containers a resumed run is about to touch.
+func (plan *RollbackPlan) ContainerTargets() []string {
+	targets := make([]string, 0, len(plan.Applied))
+	for _, application := range plan.Applied {
+		if application.Kind == MetadataKindContainer {
+			targets = append(targets, application.ID)
+		}
+	}
+	return targets
+}
+
+// RunningNamed lists identities from `names` that the inventory reports as a
+// container in any state other than stopped, whatever this binary makes of its
+// labels.
+func (inventory *OwnershipInventory) RunningNamed(names []string) []string {
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[name] = struct{}{}
+	}
+	running := make([]string, 0)
+	for _, record := range inventory.Records {
+		if record.Kind != MetadataKindContainer {
+			continue
+		}
+		if _, want := wanted[record.ID]; !want {
+			continue
+		}
+		if record.State != "stopped" {
+			running = append(running, record.ID)
+		}
+	}
+	return running
+}
+
 // RunningIdentifiableContainers lists containers that are not stopped and that
 // this binary has some claim on: owned, or incompletely labelled in the current
 // namespace.
@@ -126,13 +164,17 @@ func (inventory *OwnershipInventory) add(record OwnershipInventoryRecord) {
 // classifies as malformed, and leaving it out would let a rollback stop the
 // runtime underneath a container it is about to rewrite.
 //
-// Missing-label and unmanaged are still excluded, and that is not an oversight:
-// stopping Apple Container affects the whole host, but blocking on `buildkit` or
-// on another deployment's container would make rollback impossible on any real
-// machine. This gate is therefore a courtesy check over containers this binary
-// can identify — RequireServicesStopped, which demands two independent signals
-// that the runtime is down, is what actually proves no document is rewritten
-// under a live apiserver.
+// Missing-label and unmanaged are still excluded here, and that is not an
+// oversight: stopping Apple Container affects the whole host, but blocking on
+// `buildkit` or on another deployment's container would make rollback impossible
+// on any real machine. The containers a plan actually targets are covered
+// separately and by name, through RunningNamed — which is what catches a resumed
+// rollback whose earlier resources are already back on the retired namespace and
+// therefore unclassifiable.
+//
+// Both are courtesy checks. RequireServicesStopped, which demands two
+// independent signals that the runtime is down, is what actually proves no
+// document is rewritten under a live apiserver.
 func (inventory *OwnershipInventory) RunningIdentifiableContainers() []string {
 	running := make([]string, 0)
 	for _, record := range inventory.Records {
@@ -255,59 +297,83 @@ func ParseRollbackPlan(raw []byte) (*RollbackPlan, error) {
 // BindToHost proves a decoded plan describes documents belonging to this host,
 // and nothing else, before any of it is acted on.
 //
-// This is the plan's trust boundary and it has to be drawn here. `ParseRollbackPlan`
+// This is the plan's trust boundary and it has to be drawn here. ParseRollbackPlan
 // checks only that the plan is internally consistent — counts that line up, label
-// maps that exist — and every path it carries is an absolute location read
-// verbatim out of a file. A stale, hand-edited, or substituted plan would
-// otherwise stop Apple Container and then rewrite any JSON file this user can
-// write whose digests happened to match, selecting the field to overwrite
-// through its own `labelPath`.
+// maps that exist — and every path, digest, and label map it carries comes out of
+// a file. A plan that is merely self-consistent can name a legitimate document,
+// supply a backup it chose along with matching self-authored digests, and have
+// rollback rewrite a real resource's ownership metadata. Internal consistency is
+// exactly what a forged plan has.
 //
-// The check is a reconstruction rather than a comparison: each document's path is
-// rebuilt from the resolved application root plus the plan's own kind and
-// identity, and the plan must agree with what was rebuilt. A plan cannot
-// therefore name a location the layout does not put a document at, whatever its
-// path field says.
+// So the binding is a reconstruction and a verification, not a comparison:
 //
-// It runs before StopSystem. A rollback that refuses must not first take the
-// operator's container runtime down.
+//   - Every location is rebuilt from the resolved application root plus the
+//     plan's own kind and identity, and the plan must agree with what was built.
+//     A plan cannot name a place the layout does not put a document.
+//   - Every backup sits beneath ONE canonical private root, at the same
+//     kind/id/document shape, and that root must be a 0700 directory this user
+//     owns outside any git work tree. A plan cannot scatter verbatim copies of a
+//     container's environment across the filesystem.
+//   - Every backup's bytes are hashed and must match the digests the plan
+//     recorded AND decode to the BeforeLabels it claims. A plan cannot assert a
+//     restoration target its own backup does not contain.
+//   - The recorded before-to-after transform is re-derived: rewriting the backup
+//     with the plan's AfterLabels must reproduce the AfterSHA256 it recorded. A
+//     plan cannot claim a migration that never happened.
+//   - Duplicate resources and duplicate documents are refused, so the number of
+//     things a run touches cannot be ambiguous.
+//
+// All of it runs before StopSystem. A rollback that refuses must not first take
+// the operator's container runtime down.
 func (plan *RollbackPlan) BindToHost(host *MetadataHost) error {
 	if host == nil || strings.TrimSpace(host.AppRoot) == "" {
 		return fmt.Errorf("rollback requires a resolved Apple Container host")
 	}
+	backupRoot, err := plan.canonicalBackupRoot()
+	if err != nil {
+		return err
+	}
+	if err := requirePrivateBackupRoot(backupRoot); err != nil {
+		return err
+	}
+	seenResources := make(map[string]struct{}, len(plan.Applied))
 	for _, application := range plan.Applied {
 		layout, err := layoutFor(application.Kind)
 		if err != nil {
 			return err
 		}
-		// The identity indexes a directory, so it may not be able to escape one.
 		identity := application.ID
-		if identity == "" || identity == "." || identity == ".." ||
-			strings.ContainsRune(identity, os.PathSeparator) ||
-			strings.ContainsRune(identity, '/') ||
-			identity != filepath.Clean(identity) {
-			return fmt.Errorf(
-				"%q is not an exact %s identity", identity, application.Kind,
-			)
+		if err := requireExactIdentity(identity, application.Kind); err != nil {
+			return err
 		}
+		resource := string(application.Kind) + "/" + identity
+		if _, duplicate := seenResources[resource]; duplicate {
+			return fmt.Errorf("rollback plan names %s more than once", resource)
+		}
+		seenResources[resource] = struct{}{}
+
 		directory := filepath.Join(host.AppRoot, layout.directory, identity)
 		if err := requireNoSymlinkInPath(directory, host.AppRoot); err != nil {
 			return err
 		}
+		seenDocuments := make(map[string]struct{}, len(application.Files))
 		for _, file := range application.Files {
 			name := filepath.Base(file.Path)
 			labelPath, known := layout.documents[name]
 			if !known {
 				return fmt.Errorf(
-					"%s %s: %q is not a document this migration knows about",
-					application.Kind, identity, name,
+					"%s: %q is not a document this migration knows about",
+					resource, name,
 				)
 			}
-			expected := filepath.Join(directory, name)
-			if file.Path != expected {
+			if _, duplicate := seenDocuments[name]; duplicate {
+				return fmt.Errorf("%s names %s more than once", resource, name)
+			}
+			seenDocuments[name] = struct{}{}
+			if file.Path != filepath.Join(directory, name) {
 				return fmt.Errorf(
-					"%s %s: the plan names %s, which is not where this host keeps "+
-						"that document", application.Kind, identity, file.Path,
+					"%s: the plan names %s, which is not where this host keeps "+
+						"that document", resource, name,
 				)
 			}
 			// The label path decides which field is overwritten. Taking it from
@@ -315,14 +381,22 @@ func (plan *RollbackPlan) BindToHost(host *MetadataHost) error {
 			// plan from rewriting a non-label field.
 			if !equalStringSlices(file.LabelPath, labelPath) {
 				return fmt.Errorf(
-					"%s %s: the plan puts %s's labels somewhere this host does not",
-					application.Kind, identity, name,
+					"%s: the plan puts %s's labels somewhere this host does not",
+					resource, name,
 				)
 			}
 			if err := requireNoSymlinkInPath(file.Path, host.AppRoot); err != nil {
 				return err
 			}
-			if err := requireBackupRootIsPrivate(file.BackupPath); err != nil {
+			if file.BackupPath != filepath.Join(
+				backupRoot, string(application.Kind), identity, name,
+			) {
+				return fmt.Errorf(
+					"%s: %s's backup is not where this plan's backup root keeps it",
+					resource, name,
+				)
+			}
+			if err := verifyRecordedBackup(resource, name, file); err != nil {
 				return err
 			}
 		}
@@ -330,20 +404,149 @@ func (plan *RollbackPlan) BindToHost(host *MetadataHost) error {
 	return nil
 }
 
-// requireBackupRootIsPrivate refuses a backup location inside a git work tree.
-// Rollback writes new backups of its own — a document that appeared after the
-// migration is copied before it is brought back in line — so this is not a check
-// on somebody else's past behaviour but on where this run is about to write a
-// verbatim copy of a container's environment.
-func requireBackupRootIsPrivate(backupPath string) error {
-	if strings.TrimSpace(backupPath) == "" {
-		return fmt.Errorf("the plan records a document with no backup location")
+// canonicalBackupRoot derives the single root every backup in the plan must sit
+// beneath, and refuses a plan whose backups are spread across more than one.
+func (plan *RollbackPlan) canonicalBackupRoot() (string, error) {
+	root := ""
+	for _, application := range plan.Applied {
+		for _, file := range application.Files {
+			if strings.TrimSpace(file.BackupPath) == "" {
+				return "", fmt.Errorf(
+					"%s %s: the plan records a document with no backup location",
+					application.Kind, application.ID,
+				)
+			}
+			// <root>/<kind>/<id>/<document>
+			candidate := filepath.Dir(filepath.Dir(filepath.Dir(file.BackupPath)))
+			if root == "" {
+				root = candidate
+				continue
+			}
+			if candidate != root {
+				return "", fmt.Errorf(
+					"rollback plan spreads its backups across more than one root",
+				)
+			}
+		}
 	}
-	resolved, err := resolveExistingAncestor(filepath.Dir(backupPath))
+	if root == "" {
+		return "", fmt.Errorf("rollback plan records no backup location")
+	}
+	return root, nil
+}
+
+// requireExactIdentity refuses an identity that could index anything other than
+// one directory.
+func requireExactIdentity(identity string, kind MetadataResourceKind) error {
+	if identity == "" || identity == "." || identity == ".." ||
+		strings.ContainsRune(identity, os.PathSeparator) ||
+		strings.ContainsRune(identity, '/') ||
+		identity != filepath.Clean(identity) {
+		return fmt.Errorf("%q is not an exact %s identity", identity, kind)
+	}
+	return nil
+}
+
+// requirePrivateBackupRoot refuses a backup root that is not a private directory
+// this user owns.
+//
+// A backup is a verbatim copy of an Apple Container metadata document, and a
+// container's config.json carries initProcess.environment with values —
+// POSTGRES_PASSWORD among them on this project's own topology. Rollback writes
+// new backups into this root for documents that appeared after the migration, so
+// this is a check on where THIS run is about to copy a credential, not on
+// somebody else's past behaviour.
+func requirePrivateBackupRoot(root string) error {
+	resolved, err := resolveExistingAncestor(root)
 	if err != nil {
 		return err
 	}
-	return requireOutsideGitWorkTree(resolved)
+	if err := requireOutsideGitWorkTree(resolved); err != nil {
+		return err
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		return fmt.Errorf("inspect backup root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("the backup root is a symbolic link")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("the backup root is not a directory")
+	}
+	if info.Mode().Perm() != 0o700 {
+		return fmt.Errorf(
+			"the backup root is mode %v; a directory holding copies of "+
+				"container configuration must be 0700", info.Mode().Perm(),
+		)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("the backup root has no owner information")
+	}
+	if int(stat.Uid) != os.Getuid() {
+		return fmt.Errorf(
+			"the backup root is owned by uid %d, not the current user %d",
+			stat.Uid, os.Getuid(),
+		)
+	}
+	return nil
+}
+
+// verifyRecordedBackup proves one document's backup actually contains what the
+// plan says it contains, and that the plan's account of the migration is
+// reproducible from it.
+//
+// Without this the digests are self-referential: a plan supplies both the backup
+// and the hashes it should match, so they always agree. What makes them mean
+// something is deriving the migrated form from the backup and requiring it to
+// equal the digest the plan recorded for the live document.
+func verifyRecordedBackup(
+	resource, name string,
+	file *metadataFileApplication,
+) error {
+	info, _, _, err := statMetadataFile(file.BackupPath)
+	if err != nil {
+		return fmt.Errorf("%s: %s's backup: %w", resource, name, err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf(
+			"%s: %s's backup is readable by other accounts (%v)",
+			resource, name, info.Mode().Perm(),
+		)
+	}
+	backup, err := os.ReadFile(file.BackupPath)
+	if err != nil {
+		return fmt.Errorf("%s: read %s's backup: %w", resource, name, err)
+	}
+	digest := digestOf(backup)
+	if digest != file.BackupSHA256 || digest != file.BeforeSHA256 {
+		return fmt.Errorf(
+			"%s: %s's backup does not match the digests the plan recorded",
+			resource, name,
+		)
+	}
+	recorded, err := readLabelsAtPath(backup, file.LabelPath)
+	if err != nil {
+		return fmt.Errorf("%s: %s's backup: %w", resource, name, err)
+	}
+	if !sameLabels(recorded, file.BeforeLabels) {
+		return fmt.Errorf(
+			"%s: %s's backup does not carry the labels the plan restores",
+			resource, name,
+		)
+	}
+	migrated, err := rewriteLabels(backup, file.LabelPath, file.AfterLabels)
+	if err != nil {
+		return fmt.Errorf("%s: %s: %w", resource, name, err)
+	}
+	if digestOf(migrated) != file.AfterSHA256 {
+		return fmt.Errorf(
+			"%s: %s's recorded migration cannot be reproduced from its backup",
+			resource, name,
+		)
+	}
+	return nil
 }
 
 func equalStringSlices(first, second []string) bool {

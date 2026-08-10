@@ -490,10 +490,18 @@ func writeThroughDirectory(
 	// reporting it as an ordinary failure would make the caller drop the record
 	// it needs to unwind — leaving a multi-document resource half-migrated with
 	// nothing to roll back from.
-	if err := directory.sync(); err != nil {
+	if err := syncDirectoryEntry(directory); err != nil {
 		return errDurabilityUncertain{err: err}
 	}
 	return nil
+}
+
+// syncDirectoryEntry is the seam a test uses to make a write land without being
+// durable. That state is unreachable otherwise — it needs an fsync to fail after
+// a rename has succeeded — and it is precisely the state whose mishandling
+// leaves a container half-reverted, so it has to be exercisable.
+var syncDirectoryEntry = func(directory *directoryHandle) error {
+	return directory.sync()
 }
 
 // errDurabilityUncertain marks a write whose rename succeeded but whose
@@ -650,6 +658,15 @@ func restoreMetadataFile(
 		if err := writeFileAtomically(
 			application.Path, backup, mode, uid, gid,
 		); err != nil {
+			// A write whose rename succeeded but whose directory entry could not
+			// be flushed HAS replaced the document. Returning the outcome
+			// alongside the error is what lets the caller record it and unwind
+			// it; discarding it leaves this document rolled back while its
+			// siblings are pushed forward again — a half-reverted resource, on
+			// the document the listing prefers.
+			if WriteLanded(err) {
+				return RestoreExactBytes, err
+			}
 			return "", err
 		}
 		restored, err := os.ReadFile(application.Path)
@@ -711,6 +728,9 @@ func restoreMetadataFile(
 	if err := writeFileAtomically(
 		application.Path, relabelled, mode, uid, gid,
 	); err != nil {
+		if WriteLanded(err) {
+			return RestoreRelabelled, err
+		}
 		return "", err
 	}
 	// Read the file back rather than the buffer that was just written to it.

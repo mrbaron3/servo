@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -123,4 +125,67 @@ func (runner *recordingRuntimeRunner) Run(
 		return result
 	}
 	return lifecycle.CommandResult{Status: 1, Stderr: "no canned result"}
+}
+
+// TestRollbackNeverStopsTheRuntimeWhenThePlanDoesNotBind is the command-level
+// half of the binding guarantee. The lifecycle tests prove BindToHost's
+// verdicts; only this one proves the verdict arrives before Apple Container is
+// taken down, which is the property an operator actually depends on.
+func TestRollbackNeverStopsTheRuntimeWhenThePlanDoesNotBind(t *testing.T) {
+	directory := t.TempDir()
+	planPath := filepath.Join(directory, "rollback-plan.json")
+	// A plan that parses and is internally consistent, but names a document
+	// under an application root this host does not have.
+	plan := `{"stage":"retire","applied":[{"kind":"volume","id":"vol-a",` +
+		`"files":[{"document":"volumes/vol-a/entity.json","labelPath":["labels"]}]}],` +
+		`"locations":[[{"path":"/nowhere/volumes/vol-a/entity.json",` +
+		`"backupPath":"/nowhere/backups/volume/vol-a/entity.json"}]],` +
+		`"labels":[{"before":{"a":"b"},"after":{"c":"d"}}]}`
+	if err := os.WriteFile(planPath, []byte(plan), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appRoot := t.TempDir()
+	runner := &recordingRuntimeRunner{results: []lifecycle.CommandResult{
+		// ResolveMetadataHost: version probe and system status.
+		{Status: 0, Stdout: "container CLI version 1.1.0"},
+		{Status: 0, Stdout: "status running\napiserver 1.1.0\nappRoot " + appRoot + "\n"},
+		{Status: 0, Stdout: "status running\napiserver 1.1.0\nappRoot " + appRoot + "\n"},
+	}}
+	err := migrateLabelMetadata(
+		context.Background(),
+		[]string{"--rollback", planPath},
+		lifecycle.NewAppleRuntimeForTest(runner),
+	)
+	if err == nil {
+		t.Fatal("a plan that does not describe this host was accepted")
+	}
+	for _, args := range runner.args {
+		if len(args) >= 2 && args[0] == "system" &&
+			(args[1] == "stop" || args[1] == "start") {
+			t.Fatalf(
+				"the runtime was stopped or started despite a binding failure: %#v",
+				runner.args,
+			)
+		}
+	}
+}
+
+func TestRollbackRejectsABlankPlanPath(t *testing.T) {
+	runner := &refusingRuntimeRunner{t: t}
+	err := migrateLabelMetadata(
+		context.Background(),
+		[]string{"--rollback", "   "},
+		lifecycle.NewAppleRuntimeForTest(runner),
+	)
+	if err == nil {
+		t.Fatal("a blank rollback path was accepted")
+	}
+	// A whitespace-only path is a mistake worth naming, not the same thing as
+	// asking for the retired forward stage.
+	if errors.Is(err, errForwardMetadataSweepRetired) {
+		t.Fatalf("a blank path was reported as the retired stage: %v", err)
+	}
+	if runner.called {
+		t.Fatal("a blank rollback path reached the runtime")
+	}
 }

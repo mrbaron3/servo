@@ -224,8 +224,11 @@ func TestAppleContainerMetadataRollbackRestoresExactlyAndEndsTheReadPath(t *test
 		t.Fatalf("parse the reconstructed plan: %v", err)
 	}
 	// The plan carries absolute paths read out of a file, so it is bound to the
-	// host it will be applied to before anything is written — the same order the
-	// command uses, where the binding precedes StopSystem.
+	// host it will be applied to before anything is written. This grounds the
+	// binding's VERDICTS against a real appRoot; the ordering claim — that a
+	// refusal precedes StopSystem — is a property of the command and is pinned
+	// by TestRollbackNeverStopsTheRuntimeWhenThePlanDoesNotBind, because this
+	// suite has already stopped the runtime by the time it gets here.
 	if err := parsed.BindToHost(host); err != nil {
 		t.Fatalf("bind the reconstructed plan to this host: %v", err)
 	}

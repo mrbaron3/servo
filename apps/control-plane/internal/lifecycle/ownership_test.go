@@ -1,13 +1,16 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -42,96 +45,102 @@ const labelValueSentinel = "zzz-label-value-must-not-leak-zzz"
 // namespace is not reachable at all, so a future edit cannot reintroduce a read
 // through a constant no behavioural test happens to cover.
 //
-// In Go source it inspects string literals rather than raw bytes, which is the
-// difference between "no code names the retired namespace" and "nobody may write
-// the word". Comments are expected to name it — this phase is a compatibility
-// boundary, and a boundary nobody is allowed to describe is one the next reader
-// has to rediscover.
+// It scans every tracked file that is not obviously binary rather than an
+// allowlist of extensions. An allowlist missed exactly the file most able to
+// write a container label: `deploy/Containerfile` has no extension and carries a
+// real LABEL directive, and so do `githooks/*` and the `.toml`/`.md` files
+// outside `docs/`.
 //
-// It walks the whole repository rather than one package, because the claim is
-// about the product and not about `apps/control-plane`. Three directories are
-// excluded by name and each for its own reason: `evidence/` is the migration's
-// own audit trail, `docs/` is where the compatibility history is deliberately
-// written down, and `_test.go` files pin the behaviour of resources that still
-// carry the retired namespace. Everything else — the TypeScript application,
-// `deploy/`, `db/` — is scanned as text, because a legacy key in a script or a
-// manifest is just as live a reference as one in Go.
+// In Go it checks each string literal AND the concatenation of every literal in
+// the file, so a key split across `"com.mrbaron3." + "workflow.agentopsctl"` is
+// caught too. Go comments are exempt: this phase is a compatibility boundary,
+// and a boundary nobody may describe is one the next reader has to rediscover.
+//
+// Three directories are excluded by name and each for its own reason:
+// `evidence/` is the migration's own audit trail, `docs/` is where the
+// compatibility history is deliberately written down, and `_test.go` files pin
+// the behaviour of resources that still carry the retired namespace.
 func TestNoProductionCodeReferencesTheLegacyNamespace(t *testing.T) {
 	root := repositoryRootForTest(t)
-	fileSet := token.NewFileSet()
-	skipDirectories := map[string]struct{}{
-		".git": {}, "node_modules": {}, "evidence": {}, "docs": {},
+	tracked, err := exec.Command(
+		"git", "-C", root, "ls-files", "-z",
+	).Output()
+	if err != nil {
+		t.Fatalf("list tracked files: %v", err)
 	}
+	skipDirectories := map[string]struct{}{
+		"evidence": {}, "docs": {},
+	}
+	fileSet := token.NewFileSet()
 	scannedGo, scannedText := 0, 0
-	err := filepath.WalkDir(
-		root,
-		func(path string, entry os.DirEntry, err error) error {
+	for _, relative := range strings.Split(string(tracked), "\x00") {
+		if relative == "" || strings.HasSuffix(relative, "_test.go") {
+			continue
+		}
+		if _, skip := skipDirectories[strings.SplitN(relative, "/", 2)[0]]; skip {
+			continue
+		}
+		path := filepath.Join(root, relative)
+		source, err := os.ReadFile(path)
+		if err != nil {
+			// A tracked path that is not a readable regular file (a submodule,
+			// a symlink to nowhere) is not source this test can speak about.
+			continue
+		}
+		// "Not obviously binary" rather than an extension allowlist: a NUL byte
+		// is the same signal git itself uses.
+		if bytes.IndexByte(source, 0) >= 0 {
+			continue
+		}
+		if filepath.Ext(path) == ".go" {
+			parsed, err := parser.ParseFile(fileSet, path, source, 0)
 			if err != nil {
-				return err
+				t.Fatalf("%s: %v", relative, err)
 			}
-			if entry.IsDir() {
-				if _, skip := skipDirectories[entry.Name()]; skip {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if strings.HasSuffix(path, "_test.go") {
-				return nil
-			}
-			relative, relErr := filepath.Rel(root, path)
-			if relErr != nil {
-				relative = path
-			}
-			if filepath.Ext(path) == ".go" {
-				parsed, err := parser.ParseFile(fileSet, path, nil, 0)
-				if err != nil {
-					return err
-				}
-				scannedGo++
-				ast.Inspect(parsed, func(node ast.Node) bool {
-					literal, ok := node.(*ast.BasicLit)
-					if !ok || literal.Kind != token.STRING {
-						return true
-					}
-					if strings.Contains(literal.Value, legacyLabelNamespace) {
-						t.Errorf(
-							"%s:%d has the string literal %s, which names the "+
-								"retired namespace",
-							relative, fileSet.Position(literal.Pos()).Line,
-							literal.Value,
-						)
-					}
+			scannedGo++
+			var joined strings.Builder
+			ast.Inspect(parsed, func(node ast.Node) bool {
+				literal, ok := node.(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
 					return true
-				})
-				return nil
-			}
-			switch filepath.Ext(path) {
-			case ".ts", ".tsx", ".js", ".mjs", ".json", ".yaml", ".yml", ".sh", ".sql":
-			default:
-				return nil
-			}
-			source, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			scannedText++
-			if strings.Contains(string(source), legacyLabelNamespace) {
+				}
+				if unquoted, err := strconv.Unquote(literal.Value); err == nil {
+					joined.WriteString(unquoted)
+				} else {
+					joined.WriteString(literal.Value)
+				}
+				if strings.Contains(literal.Value, legacyLabelNamespace) {
+					t.Errorf(
+						"%s:%d has the string literal %s, which names the "+
+							"retired namespace",
+						relative, fileSet.Position(literal.Pos()).Line,
+						literal.Value,
+					)
+				}
+				return true
+			})
+			// A key assembled from adjacent literals is still a reference.
+			if strings.Contains(joined.String(), legacyLabelNamespace) {
 				t.Errorf(
-					"%s references the retired namespace %q",
-					relative, legacyLabelNamespace,
+					"%s builds the retired namespace out of separate string "+
+						"literals", relative,
 				)
 			}
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
+			continue
+		}
+		scannedText++
+		if strings.Contains(string(source), legacyLabelNamespace) {
+			t.Errorf(
+				"%s references the retired namespace %q",
+				relative, legacyLabelNamespace,
+			)
+		}
 	}
-	// A walk that silently stopped reaching the tree would make this test pass
+	// A scan that silently stopped reaching the tree would make this test pass
 	// for the worst possible reason.
 	if scannedGo == 0 || scannedText == 0 {
 		t.Fatalf(
-			"scanned %d Go and %d text files; the walk is not reaching the tree",
+			"scanned %d Go and %d text files; the scan is not reaching the tree",
 			scannedGo, scannedText,
 		)
 	}
@@ -398,6 +407,42 @@ func TestClassifyOwnershipReadsTheCurrentNamespaceAlone(t *testing.T) {
 			name:     "unmanaged current value",
 			labels:   map[string]string{CurrentManagedLabelKey: "v2"},
 			expected: OwnershipUnmanaged,
+		},
+		{
+			// An unknown marker used to win outright, which reported a
+			// half-written resource as somebody else's name and dropped it out
+			// of the pre-stop gate. The blank label decides first now.
+			name: "unknown marker beside a blank role is malformed",
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v2",
+				CurrentRoleLabelKey:    "",
+			},
+			expected: OwnershipMalformed,
+		},
+		{
+			name: "unknown marker beside a blank digest is malformed",
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v2",
+				CurrentSpecLabelKey:    "   ",
+			},
+			expected: OwnershipMalformed,
+		},
+		{
+			name: "managed marker beside a blank role is malformed",
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v1",
+				CurrentRoleLabelKey:    "",
+			},
+			expected: OwnershipMalformed,
+		},
+		{
+			// A legacy marker cannot rescue a blank current label either.
+			name: "legacy marker beside a blank current role is malformed",
+			labels: map[string]string{
+				legacyManagedLabelKey: "v1",
+				CurrentRoleLabelKey:   "",
+			},
+			expected: OwnershipMalformed,
 		},
 		{
 			// A legacy marker alongside a foreign-looking current one is read
@@ -926,9 +971,12 @@ func TestRequireManagedRefusesBlankSecondaryLabels(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			labels := map[string]string{CurrentManagedLabelKey: "v1", key: ""}
-			// Ownership alone still reads as owned, which is exactly the trap.
-			if err := RequireOwned("container agentops-runner", labels); err != nil {
-				t.Fatalf("%s fixture is not ownership-clean: %v", name, err)
+			// A blank ancillary label outranks the marker, so ownership itself
+			// now fails closed rather than leaving the trap to RequireManaged.
+			if err := RequireOwned(
+				"container agentops-runner", labels,
+			); !errors.Is(err, ErrMalformedOwnershipLabels) {
+				t.Fatalf("a blank %s did not fail ownership closed: %v", name, err)
 			}
 			err := RequireManaged("container agentops-runner", labels)
 			if err == nil {

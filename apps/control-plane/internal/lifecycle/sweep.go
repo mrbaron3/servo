@@ -22,8 +22,11 @@ import (
 // unexercised delete-and-recreate path sitting next to a live migration is an
 // invitation to re-enable it without re-deriving why it was withdrawn.
 //
-// `agentopsctl migrate-label-metadata` replaces it: two reviewable stages that
-// move the same labels and delete nothing.
+// `agentopsctl migrate-label-metadata` replaced it with two reviewable stages
+// that moved the same labels and deleted nothing. Phase 3B retired those stages
+// too, because both existed to compare the two namespaces. No forward container
+// label migration remains in this binary; what remains is that command's
+// `--rollback`.
 
 // SweepRuntime is what the read-only inventory needs. It was much wider while
 // the sweep could mutate; everything the mutation required has gone with it.
@@ -127,12 +130,14 @@ type PlannedReplacement struct {
 }
 
 // LabelSweeper takes the Phase 2 inventory. Its mutating half is retired.
+//
+// It carried an `Only` field through Phase 3A so a caller narrowing a sweep
+// would reach the refusal rather than a compile error. Nothing reads it: the CLI
+// rejects a non-empty `--only` before it would be assigned, so the field was
+// always the empty slice, and a field that cannot hold a value is not a
+// migration aid.
 type LabelSweeper struct {
 	Runtime SweepRuntime
-	// Only narrowed a sweep to exact identities. No sweep remains to narrow, and
-	// the field is kept solely so a caller that still sets it fails at the
-	// refusal below rather than at a compile error whose cause is unclear.
-	Only []string
 }
 
 func NewLabelSweeper(runtime SweepRuntime) *LabelSweeper {

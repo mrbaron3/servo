@@ -394,3 +394,100 @@ func TestRollbackRestoresLabelsThisBinaryCannotRead(t *testing.T) {
 		t.Fatalf("a rolled-back resource still classifies as %q", class)
 	}
 }
+
+// A write whose rename succeeded but whose directory entry could not be flushed
+// has already replaced the document. It is the one state that can leave a
+// container half-reverted — one document rolled back, its sibling pushed
+// forward — and it is unreachable without forcing an fsync failure after a
+// successful rename. These cases force it.
+
+// failDirectorySyncAfter makes the Nth directory sync fail, counting from one.
+func failDirectorySyncAfter(t *testing.T, n int) {
+	t.Helper()
+	original := syncDirectoryEntry
+	calls := 0
+	syncDirectoryEntry = func(directory *directoryHandle) error {
+		calls++
+		if calls == n {
+			return errors.New("injected directory sync failure")
+		}
+		return original(directory)
+	}
+	t.Cleanup(func() { syncDirectoryEntry = original })
+}
+
+// TestRollbackUnwindsALandedRecordedWrite covers the primary path: a recorded
+// document is restored, its directory sync fails, and the resource must end
+// wholly migrated rather than partly reverted.
+func TestRollbackUnwindsALandedRecordedWrite(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	before := legacyTriple()
+	record := phase3ARecord(
+		t, MetadataKindContainer, "ctr-started", root, backups, before,
+	)
+	if len(record.Files) != 2 {
+		t.Fatalf("fixture recorded %d documents, want 2", len(record.Files))
+	}
+	// The first restore in the loop is the last file; fail its sync.
+	failDirectorySyncAfter(t, 1)
+	err := rollbackMetadataApplication(record)
+	if err == nil {
+		t.Fatal("a durability-uncertain restore was reported as success")
+	}
+	// Every document must be back at what the migration wrote. A document left
+	// at the pre-migration labels while its sibling holds the migrated ones is
+	// the half-reverted container this path exists to prevent.
+	for _, file := range record.Files {
+		labels := labelsOnDisk(t, file.Path, file.LabelPath)
+		if !sameLabels(labels, record.AfterLabels) {
+			t.Fatalf(
+				"%s ended at %v, want the migrated labels %v",
+				file.Document, labels, record.AfterLabels,
+			)
+		}
+	}
+}
+
+// TestRollbackUnwindsALandedCreatedSinceWrite covers the created-since path,
+// whose record runs the opposite way round: applyMetadataFile records "what I
+// found" and "what I wrote", so handing it to reapply unswapped would rewrite
+// the rollback destination that is already on disk.
+func TestRollbackUnwindsALandedCreatedSinceWrite(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	before := legacyTriple()
+	record := phase3ARecord(
+		t, MetadataKindContainer, "ctr-created", root, backups, before,
+	)
+	if len(record.Files) != 1 {
+		t.Fatalf("fixture recorded %d documents, want 1", len(record.Files))
+	}
+	created := filepath.Join(root, "containers", "ctr-created", "config.json")
+	if err := os.WriteFile(
+		created,
+		[]byte(`{"id":"ctr-created","labels":{"`+CurrentManagedLabelKey+`":"v1"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// Sync 1 is the recorded document's restore; sync 2 is the created-since
+	// write, which is the one whose record direction was wrong.
+	failDirectorySyncAfter(t, 2)
+	err := rollbackMetadataApplication(record)
+	if err == nil {
+		t.Fatal("a durability-uncertain reconciliation was reported as success")
+	}
+	for path, labelPath := range map[string][]string{
+		created:              {"labels"},
+		record.Files[0].Path: record.Files[0].LabelPath,
+	} {
+		labels := labelsOnDisk(t, path, labelPath)
+		if !sameLabels(labels, record.AfterLabels) {
+			t.Fatalf(
+				"%s ended at %v, want the migrated labels %v",
+				filepath.Base(path), labels, record.AfterLabels,
+			)
+		}
+	}
+}

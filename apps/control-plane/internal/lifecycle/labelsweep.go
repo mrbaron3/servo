@@ -144,13 +144,16 @@ type MetadataApplication struct {
 	Kind MetadataResourceKind `json:"kind"`
 	ID   string               `json:"id"`
 	// Stage is the Phase 3A stage name recorded by the binary that wrote this
-	// plan. It is displayed, never matched against.
+	// plan. Nothing reads it: it is carried so the record stays complete and so a
+	// human reading the plan file can see which stage it undoes. It is never
+	// matched against, and it is never printed — it is plan-controlled text.
 	Stage      string `json:"stage"`
 	Directory  string `json:"-"`
 	BackupRoot string `json:"-"`
 	// ClassBefore and ClassAfter are the ownership classes the Phase 3A binary
 	// recorded. They are strings rather than OwnershipClass precisely because
-	// they may hold classes this binary no longer defines.
+	// they may hold classes this binary no longer defines. Like Stage they are
+	// carried, not read, and not printed.
 	ClassBefore string   `json:"classBefore"`
 	ClassAfter  string   `json:"classAfter"`
 	ChangedKeys []string `json:"changedKeys"`
@@ -197,26 +200,37 @@ func rollbackMetadataApplication(application *MetadataApplication) error {
 	for index := len(application.Files) - 1; index >= 0; index-- {
 		file := application.Files[index]
 		outcome, err := restoreMetadataFile(file)
+		if outcome != "" {
+			// Recorded before the error is handled: restoreMetadataFile returns
+			// an outcome alongside a durability-uncertain error precisely because
+			// the document was changed, and a document that changed has to be in
+			// the unwind set.
+			file.RestoredAs = outcome
+			restored = append(restored, file)
+		}
 		if err != nil {
 			// Put back what this rollback already undid, so a failure leaves the
 			// resource in the state it was found in rather than between two.
 			return errors.Join(err, reapply(restored))
 		}
-		file.RestoredAs = outcome
-		restored = append(restored, file)
 	}
 	for _, pending := range created {
 		applied, err := applyMetadataFile(
 			pending.state, application.BeforeLabels, pending.backupPath,
 		)
 		if applied != nil {
-			// A write whose rename succeeded but whose directory entry could not
-			// be flushed HAS changed the document. Recording it before handling
-			// the error is what lets the unwind below put it back — discarding it
-			// would leave config.json holding the pre-migration labels while the
-			// recorded documents were reapplied to their migrated ones, which is
-			// the half-reverted container this function exists to prevent, on the
-			// document the listing prefers.
+			// This record's label maps run the opposite way to every other record
+			// in `restored`, and the difference is easy to miss because both are
+			// called Before/After. applyMetadataFile records them from ITS point
+			// of view — "what I found" and "what I wrote" — so its AfterLabels is
+			// the pre-migration map, the rollback destination. Every plan record's
+			// AfterLabels is the migrated map. `reapply` writes AfterLabels, so
+			// handing it this record unswapped would rewrite the rollback
+			// destination that is already on disk while the recorded documents
+			// were pushed forward — the half-reverted container this function
+			// exists to prevent, on the document the listing prefers.
+			applied.BeforeLabels, applied.AfterLabels =
+				applied.AfterLabels, applied.BeforeLabels
 			restored = append(restored, applied)
 			application.Reconciled = append(application.Reconciled, pending.name)
 		}
