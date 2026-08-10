@@ -180,11 +180,26 @@ type Resource struct {
 	} `json:"configuration"`
 }
 
+// ContainerMount is one mount as Apple Container reports it. It is a named
+// type because callers construct and compare mounts directly; an anonymous
+// struct forces every construction site to restate the whole shape, which
+// silently breaks the moment the runtime reports one more field.
+type ContainerMount struct {
+	Destination string `json:"destination"`
+	Source      string `json:"source"`
+	// Options carries Apple Container's per-mount flags. "ro" here is the only
+	// record that a credential volume is mounted read-only, so a migration
+	// that ignores it silently widens access to that credential.
+	Options []string       `json:"options"`
+	Type    map[string]any `json:"type"`
+}
+
 type ContainerActual struct {
 	ID            string `json:"id"`
 	Configuration struct {
 		Labels   map[string]string `json:"labels"`
 		ReadOnly bool              `json:"readOnly"`
+		UseInit  bool              `json:"useInit"`
 		CapAdd   []string          `json:"capAdd"`
 		CapDrop  []string          `json:"capDrop"`
 		Image    struct {
@@ -195,7 +210,15 @@ type ContainerActual struct {
 		} `json:"image"`
 		InitProcess struct {
 			Environment []string `json:"environment"`
-			User        struct {
+			// Executable, Arguments, and WorkingDirectory are read back only to
+			// prove a migrated replacement kept the image's entrypoint. They are
+			// never rebuilt from: the observed executable is frequently a
+			// relative image default ("node"), which no specification field can
+			// express, so the migration leaves them to the image and verifies.
+			Executable       string   `json:"executable"`
+			Arguments        []string `json:"arguments"`
+			WorkingDirectory string   `json:"workingDirectory"`
+			User             struct {
 				ID struct {
 					UID int `json:"uid"`
 					GID int `json:"gid"`
@@ -207,11 +230,15 @@ type ContainerActual struct {
 		} `json:"initProcess"`
 		PublishedPorts []map[string]any `json:"publishedPorts"`
 		PublishedSock  []map[string]any `json:"publishedSockets"`
-		Mounts         []struct {
-			Destination string         `json:"destination"`
-			Source      string         `json:"source"`
-			Type        map[string]any `json:"type"`
-		} `json:"mounts"`
+		Mounts         []ContainerMount `json:"mounts"`
+		// Resources is defaulted by Apple Container rather than requested by any
+		// specification. It is compared across a migration so a replacement that
+		// landed on different defaults is caught instead of accepted.
+		Resources struct {
+			CPUs          int     `json:"cpus"`
+			MemoryInBytes int64   `json:"memoryInBytes"`
+			CPUOverhead   float64 `json:"cpuOverhead"`
+		} `json:"resources"`
 		Networks []struct {
 			Network string `json:"network"`
 		} `json:"networks"`
@@ -298,17 +325,29 @@ func (runtime *AppleRuntime) EnsureNetwork(
 	return runtime.command(ctx, append(args, name), nil)
 }
 
+// Volumes lists every named volume Apple Container knows about. It is
+// read-only, and the Phase 2 label sweep depends on it: after deleting a
+// container that held a volume exclusively, the sweep proves the volume still
+// exists before attaching it to the replacement.
+func (runtime *AppleRuntime) Volumes(ctx context.Context) ([]Resource, error) {
+	result := runtime.runner.Run(ctx, []string{"volume", "list", "--format", "json"})
+	if result.Status != 0 {
+		return nil, runtimeError(result, nil)
+	}
+	var resources []Resource
+	if err := json.Unmarshal([]byte(result.Stdout), &resources); err != nil {
+		return nil, fmt.Errorf("parse Apple Container volume list: %w", err)
+	}
+	return resources, nil
+}
+
 func (runtime *AppleRuntime) EnsureVolume(ctx context.Context, name string) error {
 	if err := validateResourceName(name); err != nil {
 		return err
 	}
-	result := runtime.runner.Run(ctx, []string{"volume", "list", "--format", "json"})
-	if result.Status != 0 {
-		return runtimeError(result, nil)
-	}
-	var resources []Resource
-	if err := json.Unmarshal([]byte(result.Stdout), &resources); err != nil {
-		return fmt.Errorf("parse Apple Container volume list: %w", err)
+	resources, err := runtime.Volumes(ctx)
+	if err != nil {
+		return err
 	}
 	for _, resource := range resources {
 		resourceName := resource.ID
@@ -446,7 +485,34 @@ func (runtime *AppleRuntime) RunContainer(
 	ctx context.Context,
 	spec ContainerSpec,
 ) (string, error) {
-	args, secrets, err := buildContainerArgs(spec)
+	return runtime.materializeContainer(ctx, "run", spec)
+}
+
+// CreateContainer materializes a container without starting it. The Phase 2
+// label migration uses this so a container an operator deliberately left
+// stopped is replaced in the same stopped state: relabelling is not a reason to
+// start a topology, and starting one would begin real work.
+func (runtime *AppleRuntime) CreateContainer(
+	ctx context.Context,
+	spec ContainerSpec,
+) (string, error) {
+	return runtime.materializeContainer(ctx, "create", spec)
+}
+
+// Start starts an existing container that was materialized earlier.
+func (runtime *AppleRuntime) Start(ctx context.Context, name string) error {
+	if err := validateResourceName(name); err != nil {
+		return err
+	}
+	return runtime.command(ctx, []string{"start", name}, nil)
+}
+
+func (runtime *AppleRuntime) materializeContainer(
+	ctx context.Context,
+	verb string,
+	spec ContainerSpec,
+) (string, error) {
+	args, secrets, err := containerArgs(verb, spec)
 	if err != nil {
 		return "", err
 	}
@@ -463,6 +529,19 @@ func (runtime *AppleRuntime) RunContainer(
 }
 
 func buildContainerArgs(spec ContainerSpec) ([]string, []string, error) {
+	return containerArgs("run", spec)
+}
+
+// containerArgs renders the argv for one managed container. Apple Container
+// 1.1.0 accepts the identical flag surface for `run` and `create`, and the verb
+// decides only whether the container starts. Keeping both on one builder is
+// what lets the Phase 2 label migration recreate a stopped container without
+// starting it: every hardening flag, mount, and label is rendered by the same
+// code that produced the original.
+func containerArgs(
+	verb string,
+	spec ContainerSpec,
+) ([]string, []string, error) {
 	if err := validateResourceName(spec.Name); err != nil {
 		return nil, nil, err
 	}
@@ -488,7 +567,7 @@ func buildContainerArgs(spec ContainerSpec) ([]string, []string, error) {
 			"added capabilities are restricted to removable volume initialization",
 		)
 	}
-	args := []string{"run"}
+	args := []string{verb}
 	if spec.Detach {
 		args = append(args, "--detach")
 	}
