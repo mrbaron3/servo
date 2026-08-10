@@ -223,8 +223,13 @@ func TestAppleContainerSweepMigratesLegacyOnlyContainerAndPreservesVolumeData(
 	if err := runtime.Stop(ctx, name, 10); err != nil {
 		t.Fatalf("stop the replacement: %v", err)
 	}
-	if err := runtime.Start(ctx, name); err != nil {
-		t.Fatalf("restart the replacement: %v", err)
+	// The raw CLI is used deliberately: starting a container is an operator
+	// action, not something the sweep or its runtime adapter ever does, and the
+	// production surface should not grow a verb only a test calls.
+	if result := runtime.runner.Run(
+		ctx, []string{"start", name},
+	); result.Status != 0 {
+		t.Fatalf("restart the replacement: %s", result.Stderr)
 	}
 	running, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()

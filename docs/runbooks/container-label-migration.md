@@ -163,7 +163,7 @@ label 移行ではなく再 deploy になる。再構築できない container �
 # 1. dry-run。ここで対象の exact id を確定する。host は変わらない。
 agentopsctl migrate-labels
 
-# 2. conflicting が 1 件でもあれば、ここで止める（下記「conflicting の解消」へ）。
+# 2. conflicting が 1 件でもあれば、ここで止める（上記「conflicting の解消」へ）。
 
 # 3. exact id を明示して移行する。--only は --apply に必須である。
 agentopsctl migrate-labels --apply --only <id1>,<id2>,...
@@ -187,10 +187,10 @@ sweep は container ごとに次の順で進む。**どの段階で中断して�
 | --- | --- | --- | --- |
 | `re-inspect` | exact id を取り直し、ownership/role/spec が conflict でないことを**削除直前に**再検証する | 何も変わっていない | 不要。再実行するだけ |
 | `stop` | running のときだけ graceful stop。**stopped のものは起動しない** | 元の container が stopped で残る（まだ legacy-only） | `container start <id>` |
-| `delete` | exact id の container を削除。volume は触らない | **container が存在しない唯一の窓**。volume と data は無傷 | snapshot（`pre-mutation-*.json`）を見て再作成する |
+| `delete` | exact id の container を削除。volume は触らない | **container が存在しない唯一の窓**。volume と data は無傷 | `pre-mutation-*.json` の `plannedSpecs[]` から再作成する（下記） |
 | `volume-release` | 削除した container が listing から消え、どの container も当該 volume を掴んでいないことを polling で証明し、volume が今も存在することを確認する | read-only。位置は `delete` と同じ | 同上 |
-| `recreate` | 観測どおりの replacement を作る（**元が stopped なら stopped のまま作る**） | replacement が存在する | replacement を削除し snapshot から作り直す |
-| `verify` | 元と replacement が label 以外すべて一致し、新旧両 namespace を持つことを証明する | drift 検出時は sweep 全体を停止し、以降の container に触れない | **自動修復しない。** operator の判断事項として escalate する |
+| `recreate` | 観測どおりの replacement を作る（**元が stopped なら stopped のまま作る**） | replacement が存在する | replacement を削除し `plannedSpecs[]` から作り直す |
+| `verify` | 元と replacement が label 以外すべて一致し、新旧両 namespace を持つことを証明する | drift 検出時は sweep 全体を停止し、以降の container に触れない | **自動修復しない。** running だった場合は replacement を **stop して隔離**し（削除はしない＝その構成の唯一の複製のため）、operator の判断事項として escalate する |
 
 `verify` が失敗した replacement を自動で作り直さないのは意図的である。「同一だと証明できない」状態は
 機械が繕ってよい状態ではない。
@@ -211,15 +211,38 @@ sweep は container 単位で冪等である。中断したら **dry-run を取�
 exact id だけを `--only` に渡して再開する。既に `dual` になったものは `skipped` になるので、
 同じ id を二度渡しても作り直しは起きない。
 
-### 保全する evidence
+### 中断後の再作成（`plannedSpecs`）
+
+`pre-mutation-<stamp>.json` の `plannedSpecs[]` には、**対象ごとの replacement を作り直すのに必要な
+構成**が入っている: image と digest、role、spec digest、network、named volume の mount（read-only
+含む）、tmpfs、publish、user、entrypoint と command、readOnly / capDropAll / init、観測時の state と
+再作成 verb（`create` か `run`）。sweep は**どれか 1 つでも再構築できなければ、1 件も mutate せずに停止する**
+ので、この配列は常に全対象ぶん揃っている。
+
+**環境変数は key だけが記録され、値は記録されない**（durable な evidence に credential を残さないため）。
+手で作り直すときは値を運用側の設定から補う。値を補えない状態で `container run` を組み立てないこと。
+
+### P2 の evidence 保全
 
 `--apply` は**最初の mutation より前に** `pre-mutation-<stamp>.json` を書く。書けなければ sweep は
 実行されない（監査も rollback もできない移行を始めないため）。sweep 後に `sweep-<stamp>.json` を
 書く。**失敗した sweep でも書く**——どの段階で止まったかが必要になるのはその場合だからである。
+halt した場合でも事後 inventory を書くので、「3 件移行して 4 件目で止まった」状態が evidence から読める。
+
+引数なしの `migrate-labels` は既定では**何も書かない**。durable な控えが要るときだけ
+`-evidence-dir <dir>` を渡す（read-only を名乗るものが worktree に file を落とさないため）。
 
 evidence には secret 値・host path・環境変数値を入れない。記録するのは container の exact id、
 state、image と digest、ownership/role/spec label、named volume の**名前**と mount 先、tmpfs、
 network、分類と理由だけである（volume の host path は記録しない）。
+
+### 残る race（設計上の限界）
+
+Apple Container の container は**再利用可能な名前**で識別され、世代 id が無い。sweep は
+stop と delete の**直前に毎回** exact id を引き直して所有を再証明するが、その 1 呼び出しぶんの窓は
+消せない。同様に volume の release 証明も「listing 上どの container も掴んでいない」ことの証明であり、
+attach の予約ではない。**sweep の実行中に別の actor が同じ host の managed resource を触らないこと**
+を前提とする。破れた場合は recreate が Apple Container 側で失敗し、sweep はそこで停止する。
 
 ## P3 の entry gate
 

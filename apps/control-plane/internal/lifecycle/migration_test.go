@@ -10,7 +10,34 @@ import (
 // decode real listing shapes rather than composing the nested anonymous structs
 // by hand, so a JSON tag that stops matching Apple Container fails a test here
 // instead of silently emptying a migration decision.
+// defaultFixtureMounts is one tmpfs and one named volume, the shape every
+// managed container in this topology has.
+const defaultFixtureMounts = `[
+		{"destination": "/tmp", "source": "tmpfs", "type": {"tmpfs": {}}},
+		{
+			"destination": "/workspace",
+			"source": "/Users/operator/Library/volumes/agentops-runner-workspace/volume.img",
+			"type": {"volume": {"name": "agentops-runner-workspace", "format": "ext4"}}
+		}
+	]`
+
 func containerFixture(t *testing.T, id, state, labels, extra string) ContainerActual {
+	t.Helper()
+	return containerFixtureWithMounts(
+		t, id, state, labels, defaultFixtureMounts, extra,
+	)
+}
+
+// containerFixtureWithMounts takes the mount list explicitly rather than
+// letting a caller override it through `extra`. Repeating a key in the JSON
+// does not replace the earlier value for a map field: Go's decoder merges into
+// the map it already populated, so a second "mounts" array would produce a
+// mount whose type was {"tmpfs":{},"volume":{...}} — a shape the real runtime
+// never emits, and one that quietly satisfies checks it should fail.
+func containerFixtureWithMounts(
+	t *testing.T,
+	id, state, labels, mounts, extra string,
+) ContainerActual {
 	t.Helper()
 	raw := `{
 		"id": "` + id + `",
@@ -35,14 +62,7 @@ func containerFixture(t *testing.T, id, state, labels, extra string) ContainerAc
 			"publishedPorts": [],
 			"publishedSockets": [],
 			"resources": {"cpus": 4, "memoryInBytes": 1073741824, "cpuOverhead": 1},
-			"mounts": [
-				{"destination": "/tmp", "source": "tmpfs", "type": {"tmpfs": {}}},
-				{
-					"destination": "/workspace",
-					"source": "/Users/operator/Library/volumes/agentops-runner-workspace/volume.img",
-					"type": {"volume": {"name": "agentops-runner-workspace", "format": "ext4"}}
-				}
-			],
+			"mounts": ` + mounts + `,
 			"networks": [{"network": "agentops-internal"}]
 			` + extra + `
 		},
@@ -263,7 +283,7 @@ func TestRebuiltSpecPreservesObservedConfigurationAndDualWrites(t *testing.T) {
 		legacyOnlyLabels("runner", fixtureSpecDigest),
 		"",
 	)
-	spec, err := RebuildMigratedSpec(actual)
+	spec, err := RebuildMigratedSpec(actual, nil)
 	if err != nil {
 		t.Fatalf("rebuild rejected a faithful container: %v", err)
 	}
@@ -339,6 +359,18 @@ func TestRebuildRefusesConfigurationItCannotExpress(t *testing.T) {
 				"containerPort": 8080, "proto": "tcp"
 			}]`,
 		},
+		{
+			// CapDropAll is one bit; a specific drop would come back as none.
+			name:  "specific dropped capability cannot be restated",
+			extra: `,"capDrop": ["CAP_NET_RAW"]`,
+		},
+		{
+			name: "published protocol other than tcp cannot be restated",
+			extra: `,"publishedPorts": [{
+				"hostAddress": "127.0.0.1", "hostPort": 8080,
+				"containerPort": 8080, "proto": "udp"
+			}]`,
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			actual := containerFixture(
@@ -348,7 +380,7 @@ func TestRebuildRefusesConfigurationItCannotExpress(t *testing.T) {
 				legacyOnlyLabels("runner", fixtureSpecDigest),
 				testCase.extra,
 			)
-			if _, err := RebuildMigratedSpec(actual); err == nil {
+			if _, err := RebuildMigratedSpec(actual, nil); err == nil {
 				t.Fatal("an inexpressible container was accepted for rebuild")
 			}
 			record := InventoryContainer(actual)
@@ -362,6 +394,145 @@ func TestRebuildRefusesConfigurationItCannotExpress(t *testing.T) {
 	}
 }
 
+// A mount the specification cannot restate must block the container. A bind
+// mount reaches the host filesystem, and dropping one silently is the worst
+// outcome this code could produce.
+func TestRebuildRefusesMountShapesItCannotRestate(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		mounts string
+	}{
+		{
+			name: "host bind mount",
+			mounts: `[{
+				"destination": "/host", "source": "/Users/operator/data",
+				"type": {"bind": {}}
+			}]`,
+		},
+		{
+			name: "mount option beyond read-only",
+			mounts: `[{
+				"destination": "/workspace", "source": "/redacted",
+				"options": ["rw", "nosuid"],
+				"type": {"volume": {"name": "agentops-runner-workspace"}}
+			}]`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			actual := containerFixtureWithMounts(
+				t, "agentops-runner", "stopped",
+				legacyOnlyLabels("runner", fixtureSpecDigest),
+				testCase.mounts, "",
+			)
+			if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+				t.Fatal("an inexpressible mount was accepted for rebuild")
+			}
+			if record := InventoryContainer(actual); record.Disposition !=
+				MigrationBlocked {
+				t.Fatalf("disposition = %q, want blocked", record.Disposition)
+			}
+		})
+	}
+}
+
+// The writer emits only the six managed keys, so a container carrying anything
+// else would come back without it — and the operator would find out after the
+// original had already been deleted.
+func TestRebuildRefusesAContainerCarryingUnmanagedLabels(t *testing.T) {
+	actual := containerFixture(t, "agentops-runner", "stopped", `{
+		"com.mrbaron3.workflow.agentopsctl": "v1",
+		"com.mrbaron3.workflow.role": "runner",
+		"com.example.team": "platform"
+	}`, "")
+	if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+		t.Fatal("a container with an unreproducible label was accepted")
+	}
+	if record := InventoryContainer(actual); record.Disposition !=
+		MigrationBlocked {
+		t.Fatalf("disposition = %q, want blocked", record.Disposition)
+	}
+}
+
+// Only settled states can be reproduced deliberately; a transitional one would
+// otherwise be silently treated as "stopped".
+func TestRebuildRefusesATransitionalLifecycleState(t *testing.T) {
+	actual := containerFixture(
+		t, "agentops-runner", "stopping",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	)
+	if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+		t.Fatal("a container in a transitional state was accepted")
+	}
+}
+
+// A role or specification pair that disagrees is just as partially migrated as
+// a disagreeing ownership marker. Reporting it as skipped would let the Phase 3
+// gate read zero conflicts with one still on the host.
+func TestInventoryTreatsRoleAndSpecDisagreementAsConflicting(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		labels string
+	}{
+		{
+			name: "role",
+			labels: `{
+				"com.mrbaron3.workflow.agentopsctl": "v1",
+				"com.mrbaron3.servo.agentopsctl": "v1",
+				"com.mrbaron3.workflow.role": "runner",
+				"com.mrbaron3.servo.role": "triage"
+			}`,
+		},
+		{
+			name: "specification digest",
+			labels: `{
+				"com.mrbaron3.workflow.agentopsctl": "v1",
+				"com.mrbaron3.servo.agentopsctl": "v1",
+				"com.mrbaron3.workflow.spec-sha256": "` + fixtureSpecDigest + `",
+				"com.mrbaron3.servo.spec-sha256": "deadbeef"
+			}`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			record := InventoryContainer(containerFixture(
+				t, "agentops-runner", "stopped", testCase.labels, "",
+			))
+			if record.Disposition != MigrationConflicting {
+				t.Fatalf(
+					"%s disagreement reported as %q, want conflicting",
+					testCase.name, record.Disposition,
+				)
+			}
+			audit := BuildMigrationAudit("t", []ContainerActual{
+				containerFixture(
+					t, "agentops-runner", "stopped", testCase.labels, "",
+				),
+			})
+			if !audit.HasConflicts() {
+				t.Fatal("the audit did not surface the partial migration")
+			}
+		})
+	}
+}
+
+// The equivalence gate is the last defence against a dropped mount, so it has
+// to compare the whole mount list rather than only the shapes the rebuild can
+// produce.
+func TestEquivalenceDetectsADroppedMount(t *testing.T) {
+	before := containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	)
+	after := containerFixtureWithMounts(
+		t, "agentops-runner", "stopped",
+		dualLabels("runner", fixtureSpecDigest),
+		`[{"destination": "/tmp", "source": "tmpfs", "type": {"tmpfs": {}}}]`,
+		"",
+	)
+	if err := VerifyMigrationEquivalence(before, after); err == nil {
+		t.Fatal("a replacement that lost its named volume was accepted")
+	}
+}
+
 // A container whose role or specification namespaces disagree is partially
 // migrated. Rebuilding it would pick one side of a disagreement it cannot
 // adjudicate.
@@ -371,7 +542,7 @@ func TestRebuildRefusesPartiallyMigratedLabelPairs(t *testing.T) {
 		"com.mrbaron3.workflow.role": "runner",
 		"com.mrbaron3.servo.role": "triage"
 	}`, "")
-	if _, err := RebuildMigratedSpec(actual); err == nil {
+	if _, err := RebuildMigratedSpec(actual, nil); err == nil {
 		t.Fatal("a conflicting role pair was rebuilt")
 	}
 }

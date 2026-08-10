@@ -37,6 +37,7 @@ import (
 type SweepRuntime interface {
 	Containers(ctx context.Context) ([]ContainerActual, error)
 	Volumes(ctx context.Context) ([]Resource, error)
+	ImageEnvironment(ctx context.Context, image string) ([]string, error)
 	Stop(ctx context.Context, name string, seconds int) error
 	Delete(ctx context.Context, name string) error
 	CreateContainer(ctx context.Context, spec ContainerSpec) (string, error)
@@ -79,7 +80,77 @@ type SweepReport struct {
 	After   MigrationAudit       `json:"after"`
 	Steps   []SweepStep          `json:"steps"`
 	Volumes []VolumePreservation `json:"volumes"`
-	Halted  string               `json:"halted,omitempty"`
+	// Migrated names the containers this sweep actually replaced, which a
+	// post-sweep inventory cannot tell apart from ones that were already dual.
+	Migrated []string `json:"migrated"`
+	Halted   string   `json:"halted,omitempty"`
+	// PlannedSpecs records, per target, the configuration needed to recreate it
+	// if the sweep is interrupted after the delete. Environment values are
+	// reduced to their keys: the runbook's rollback needs to know which
+	// variables existed, and durable evidence must never carry their values.
+	PlannedSpecs []PlannedReplacement `json:"plannedSpecs"`
+}
+
+// PlannedReplacement is the redacted, durable form of a rebuilt specification.
+// It exists so the pre-mutation snapshot can actually drive the rollback the
+// runbook prescribes; an inventory record alone cannot, because it omits
+// everything the replacement needs.
+type PlannedReplacement struct {
+	Name             string        `json:"name"`
+	Role             string        `json:"role"`
+	Image            string        `json:"image"`
+	ImageDigest      string        `json:"imageDigest"`
+	SpecDigest       string        `json:"specDigest"`
+	Networks         []string      `json:"networks"`
+	Mounts           []Mount       `json:"mounts"`
+	Tmpfs            []string      `json:"tmpfs"`
+	Publish          []Publication `json:"publish"`
+	EnvironmentKeys  []string      `json:"environmentKeys"`
+	ReadOnly         bool          `json:"readOnly"`
+	CapDropAll       bool          `json:"capDropAll"`
+	Init             bool          `json:"init"`
+	User             string        `json:"user"`
+	Entrypoint       string        `json:"entrypoint"`
+	Command          []string      `json:"command"`
+	ObservedState    string        `json:"observedState"`
+	RecreateVerb     string        `json:"recreateVerb"`
+	WorkingDirectory string        `json:"workingDirectory"`
+}
+
+// RedactedReplacement converts a rebuilt specification into its durable form.
+func RedactedReplacement(
+	spec ContainerSpec,
+	actual ContainerActual,
+) PlannedReplacement {
+	keys := make([]string, 0, len(spec.Environment))
+	for key := range spec.Environment {
+		keys = append(keys, key)
+	}
+	verb := "create"
+	if actual.Status.State == "running" {
+		verb = "run"
+	}
+	return PlannedReplacement{
+		Name:             spec.Name,
+		Role:             spec.Role,
+		Image:            spec.Image,
+		ImageDigest:      actual.Configuration.Image.Descriptor.Digest,
+		SpecDigest:       spec.SpecDigest,
+		Networks:         spec.Networks,
+		Mounts:           spec.Mounts,
+		Tmpfs:            spec.Tmpfs,
+		Publish:          spec.Publish,
+		EnvironmentKeys:  sortedStrings(keys),
+		ReadOnly:         spec.ReadOnly,
+		CapDropAll:       spec.CapDropAll,
+		Init:             spec.Init,
+		User:             spec.User,
+		Entrypoint:       spec.Entrypoint,
+		Command:          spec.Command,
+		ObservedState:    actual.Status.State,
+		RecreateVerb:     verb,
+		WorkingDirectory: actual.Configuration.InitProcess.WorkingDirectory,
+	}
 }
 
 // LabelSweeper migrates old-only containers to dual labels.
@@ -93,7 +164,7 @@ type LabelSweeper struct {
 	// the first mutation, so returning an error here aborts the sweep with
 	// nothing changed: a migration whose evidence cannot be written is a
 	// migration nobody can audit or roll back.
-	SnapshotBeforeMutation func(MigrationAudit) error
+	SnapshotBeforeMutation func(MigrationAudit, []PlannedReplacement) error
 	// Only is the exact set of container identities this sweep may mutate. It
 	// is required: Issue #123 forbids acting on a broad or unresolved selector,
 	// and "every pending container" is exactly such a selector — its meaning
@@ -154,8 +225,18 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 		report.Halted = err.Error()
 		return report, err
 	}
+	// Every target is rebuilt before any of them is mutated. A target that
+	// cannot be reproduced then stops the sweep while all of them are still
+	// alive, instead of stopping it after the earlier ones have been replaced.
+	planned, err := sweeper.planReplacements(ctx, targets)
+	if err != nil {
+		report.Applied = false
+		report.Halted = err.Error()
+		return report, err
+	}
+	report.PlannedSpecs = planned
 	if sweeper.SnapshotBeforeMutation != nil {
-		if err := sweeper.SnapshotBeforeMutation(before); err != nil {
+		if err := sweeper.SnapshotBeforeMutation(before, planned); err != nil {
 			report.Applied = false
 			report.Halted = "pre-mutation snapshot could not be recorded"
 			return report, fmt.Errorf(
@@ -167,22 +248,108 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 	if err != nil {
 		return report, err
 	}
+	migrated := make([]string, 0, len(targets))
+	var sweepErr error
 	for _, target := range targets {
 		if stepErr := sweeper.migrateOne(ctx, target, &report); stepErr != nil {
 			report.Halted = fmt.Sprintf(
 				"halted at container %s: %v", target.ID, stepErr,
 			)
-			report.Volumes = sweeper.preservation(ctx, volumesBefore)
-			return report, stepErr
+			sweepErr = stepErr
+			break
 		}
+		migrated = append(migrated, target.ID)
 	}
+	report.Migrated = migrated
 	report.Volumes = sweeper.preservation(ctx, volumesBefore)
-	after, err := sweeper.Plan(ctx, "post-migration")
-	if err != nil {
-		return report, err
+	// The post-state is recorded even when the sweep halted. The case that
+	// matters is the dangerous one — some containers migrated and one did not —
+	// and that is exactly the case an empty post-state would hide.
+	after, planErr := sweeper.Plan(ctx, "post-migration")
+	if planErr == nil {
+		markMigrated(&after, migrated)
+		report.After = after
 	}
-	report.After = after
-	return report, nil
+	if sweepErr != nil {
+		return report, sweepErr
+	}
+	return report, planErr
+}
+
+// markMigrated distinguishes a container this sweep migrated from one that was
+// already dual before it started. Both are "skipped" to a fresh inventory, and
+// only the sweep knows which is which.
+func markMigrated(audit *MigrationAudit, migrated []string) {
+	if len(migrated) == 0 {
+		return
+	}
+	changed := make(map[string]bool, len(migrated))
+	for _, id := range migrated {
+		changed[id] = true
+	}
+	for index := range audit.Records {
+		if !changed[audit.Records[index].ID] {
+			continue
+		}
+		audit.Totals[audit.Records[index].Disposition]--
+		audit.Records[index].Disposition = MigrationMigrated
+		audit.Records[index].Reason =
+			"migrated by this sweep and proven equivalent"
+		audit.Totals[MigrationMigrated]++
+	}
+}
+
+// planReplacements rebuilds every target's specification up front and reduces
+// each to its durable, redacted form.
+func (sweeper *LabelSweeper) planReplacements(
+	ctx context.Context,
+	targets []ContainerInventoryRecord,
+) ([]PlannedReplacement, error) {
+	planned := make([]PlannedReplacement, 0, len(targets))
+	for _, target := range targets {
+		actual, err := sweeper.containerByID(ctx, target.ID)
+		if err != nil {
+			return nil, err
+		}
+		if actual == nil {
+			return nil, fmt.Errorf(
+				"container %s disappeared between planning and rebuild",
+				target.ID,
+			)
+		}
+		imageEnvironment, err := sweeper.Runtime.ImageEnvironment(
+			ctx, actual.Configuration.Image.Reference,
+		)
+		if err != nil {
+			return nil, err
+		}
+		spec, err := RebuildMigratedSpec(*actual, imageEnvironment)
+		if err != nil {
+			return nil, err
+		}
+		planned = append(planned, RedactedReplacement(spec, *actual))
+	}
+	return planned, nil
+}
+
+// requireStillOwned re-resolves an exact identity and proves this binary still
+// owns it. It is called immediately before each destructive step so the gap
+// between decision and action stays as small as the runtime allows.
+func (sweeper *LabelSweeper) requireStillOwned(
+	ctx context.Context,
+	id string,
+) error {
+	actual, err := sweeper.containerByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if actual == nil {
+		return fmt.Errorf(
+			"container %s vanished before this step; another actor is "+
+				"changing it", id,
+		)
+	}
+	return RequireManaged("container "+id, actual.Configuration.Labels)
 }
 
 // selectedTargets resolves Only against the planned targets. It fails closed in
@@ -251,7 +418,13 @@ func (sweeper *LabelSweeper) migrateOne(
 			"container is now %q, not a migration target", current.Disposition,
 		))
 	}
-	spec, err := RebuildMigratedSpec(*actual)
+	imageEnvironment, err := sweeper.Runtime.ImageEnvironment(
+		ctx, actual.Configuration.Image.Reference,
+	)
+	if err != nil {
+		return sweeper.fail(report, planned.ID, StageReinspect, err)
+	}
+	spec, err := RebuildMigratedSpec(*actual, imageEnvironment)
 	if err != nil {
 		return sweeper.fail(report, planned.ID, StageReinspect, err)
 	}
@@ -264,7 +437,18 @@ func (sweeper *LabelSweeper) migrateOne(
 
 	// Stage 2: stop. Skipped when the container is already stopped, so a
 	// deliberately stopped topology is never started by a relabelling.
+	//
+	// Ownership is re-proven immediately before stopping. Apple Container
+	// identifies containers by a reusable name, so between the re-inspection
+	// above and this call another actor could have replaced the name with a
+	// container this binary does not own. The window cannot be closed entirely
+	// without an immutable generation identifier the runtime does not expose,
+	// but it is narrowed to a single call and the stop is refused outright when
+	// the name no longer resolves to something owned.
 	if wasRunning {
+		if err := sweeper.requireStillOwned(ctx, planned.ID); err != nil {
+			return sweeper.fail(report, planned.ID, StageStop, err)
+		}
 		if err := sweeper.Runtime.Stop(
 			ctx, planned.ID, sweeper.StopTimeoutSeconds,
 		); err != nil {
@@ -277,7 +461,13 @@ func (sweeper *LabelSweeper) migrateOne(
 
 	// Stage 3: delete the exact resolved identity. Delete re-proves ownership
 	// itself, so a container that changed underneath us still cannot be
-	// removed by this path.
+	// removed by this path. It is also a no-op when the name has already
+	// vanished, which is not success here: something else is mutating the same
+	// container, and continuing would recreate a container from a snapshot of a
+	// world that no longer exists.
+	if err := sweeper.requireStillOwned(ctx, planned.ID); err != nil {
+		return sweeper.fail(report, planned.ID, StageDelete, err)
+	}
 	if err := sweeper.Runtime.Delete(ctx, planned.ID); err != nil {
 		return sweeper.fail(report, planned.ID, StageDelete, err)
 	}
@@ -320,6 +510,23 @@ func (sweeper *LabelSweeper) migrateOne(
 		))
 	}
 	if err := VerifyMigrationEquivalence(*actual, *replacement); err != nil {
+		// Not repairing an unprovable replacement is deliberate, but it is not
+		// the same as leaving it running. A replacement that cannot be proven
+		// equivalent is quarantined so it cannot serve traffic or hold its
+		// volume while an operator decides what to do; it is never deleted,
+		// because it is the only remaining copy of that configuration.
+		if wasRunning {
+			if stopErr := sweeper.Runtime.Stop(
+				ctx, planned.ID, sweeper.StopTimeoutSeconds,
+			); stopErr != nil {
+				return sweeper.fail(report, planned.ID, StageVerify, fmt.Errorf(
+					"%w; the unproven replacement could not be quarantined: %v",
+					err, stopErr,
+				))
+			}
+			sweeper.ok(report, planned.ID, StageVerify,
+				"unproven replacement stopped pending an operator decision")
+		}
 		return sweeper.fail(report, planned.ID, StageVerify, err)
 	}
 	sweeper.ok(report, planned.ID, StageVerify,

@@ -25,11 +25,12 @@ import (
 // field is derived from already-redacted structures: no environment value, no
 // credential, and no host path reaches this file.
 type labelMigrationEvidence struct {
-	GeneratedAt           string                   `json:"generatedAt"`
-	Mode                  string                   `json:"mode"`
-	AppleContainerVersion string                   `json:"appleContainerVersion"`
-	Plan                  lifecycle.MigrationAudit `json:"plan"`
-	Sweep                 *lifecycle.SweepReport   `json:"sweep,omitempty"`
+	GeneratedAt           string                         `json:"generatedAt"`
+	Mode                  string                         `json:"mode"`
+	AppleContainerVersion string                         `json:"appleContainerVersion"`
+	Plan                  lifecycle.MigrationAudit       `json:"plan"`
+	PlannedSpecs          []lifecycle.PlannedReplacement `json:"plannedSpecs,omitempty"`
+	Sweep                 *lifecycle.SweepReport         `json:"sweep,omitempty"`
 }
 
 // splitIdentities turns a comma separated --only value into exact identities.
@@ -65,10 +66,29 @@ func (manager *manager) MigrateLabels(
 				"identities to migrate; run without --apply to inventory them",
 		)
 	}
-	if err := manager.ensureRuntime(ctx); err != nil {
-		return err
-	}
+	// The inventory promises not to change the host, and starting the Apple
+	// Container system service would break that promise before the operator has
+	// chosen --apply. Only the mutating path may start the runtime.
 	capability := manager.runtime.Capability(ctx)
+	if !apply {
+		if !capability.Available || !capability.ServiceRunning {
+			return fmt.Errorf(
+				"Apple Container is not running; start it with " +
+					"`container system start` before taking inventory, which " +
+					"never starts it for you",
+			)
+		}
+	} else {
+		if err := manager.ensureRuntime(ctx); err != nil {
+			return err
+		}
+		capability = manager.runtime.Capability(ctx)
+	}
+	// A bare inventory writes nothing unless the operator asked for a durable
+	// copy: it is run repeatedly, often from inside the repository, and
+	// silently dropping files into a worktree somebody is about to commit from
+	// is not what "read-only" should mean.
+	writeInventory := strings.TrimSpace(evidenceDir) != ""
 	if evidenceDir == "" {
 		evidenceDir = filepath.Join(
 			manager.config.ProjectRoot, "evidence", "label-p2",
@@ -83,21 +103,23 @@ func (manager *manager) MigrateLabels(
 		if err != nil {
 			return err
 		}
-		path, err := writeLabelMigrationEvidence(
-			evidenceDir,
-			fmt.Sprintf("inventory-%s.json", stamp),
-			labelMigrationEvidence{
-				GeneratedAt:           stamp,
-				Mode:                  "dry-run",
-				AppleContainerVersion: capability.Version,
-				Plan:                  audit,
-			},
-		)
-		if err != nil {
-			return err
-		}
 		printLabelMigrationAudit(audit)
-		fmt.Printf("\nevidence: %s\n", path)
+		if writeInventory {
+			path, err := writeLabelMigrationEvidence(
+				evidenceDir,
+				fmt.Sprintf("inventory-%s.json", stamp),
+				labelMigrationEvidence{
+					GeneratedAt:           stamp,
+					Mode:                  "dry-run",
+					AppleContainerVersion: capability.Version,
+					Plan:                  audit,
+				},
+			)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("\nevidence: %s\n", path)
+		}
 		if audit.HasConflicts() {
 			fmt.Println(
 				"\nconflicting containers are present; resolve them before " +
@@ -111,6 +133,7 @@ func (manager *manager) MigrateLabels(
 	// is about to act on, and a write failure aborts before anything mutates.
 	sweeper.SnapshotBeforeMutation = func(
 		audit lifecycle.MigrationAudit,
+		planned []lifecycle.PlannedReplacement,
 	) error {
 		path, err := writeLabelMigrationEvidence(
 			evidenceDir,
@@ -120,6 +143,7 @@ func (manager *manager) MigrateLabels(
 				Mode:                  "pre-mutation",
 				AppleContainerVersion: capability.Version,
 				Plan:                  audit,
+				PlannedSpecs:          planned,
 			},
 		)
 		if err == nil {

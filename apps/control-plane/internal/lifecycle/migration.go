@@ -166,6 +166,28 @@ func disposition(
 	actual ContainerActual,
 	class OwnershipClass,
 ) (MigrationDisposition, string) {
+	// A partial migration is not only a disagreement between the ownership
+	// markers. An owned container whose role or specification namespaces
+	// disagree is just as partially migrated, and reporting it as "skipped"
+	// would let the Phase 3 entry gate read zero conflicts while one is still
+	// sitting on the host.
+	if class.Owned() {
+		for _, pair := range []struct {
+			kind string
+			read func(map[string]string) (string, LabelAgreement)
+		}{
+			{"role", ReadRoleLabel},
+			{"specification digest", ReadSpecLabel},
+		} {
+			if _, agreement := pair.read(
+				actual.Configuration.Labels,
+			); agreement == LabelConflicting {
+				return MigrationConflicting, pair.kind +
+					" labels disagree between the two namespaces; " +
+					"resolve the partial migration before sweeping"
+			}
+		}
+	}
 	switch class {
 	case OwnershipConflicting:
 		return MigrationConflicting, "ownership namespaces disagree; " +
@@ -179,7 +201,10 @@ func disposition(
 	case OwnershipCurrentOnly:
 		return MigrationSkipped, "already past the legacy namespace"
 	case OwnershipLegacyOnly:
-		if _, err := RebuildMigratedSpec(actual); err != nil {
+		// Classification asks only whether a faithful replacement is
+		// expressible, which does not depend on the image's declared
+		// environment, so the inventory does not need to read the image.
+		if _, err := RebuildMigratedSpec(actual, nil); err != nil {
 			return MigrationBlocked, "cannot rebuild an identical replacement: " +
 				err.Error()
 		}
@@ -195,7 +220,10 @@ func disposition(
 // RebuildMigratedSpec reconstructs the specification that recreates one
 // container unchanged except for its ownership labels. It refuses anything it
 // cannot express, because the caller's next step deletes the original.
-func RebuildMigratedSpec(actual ContainerActual) (ContainerSpec, error) {
+func RebuildMigratedSpec(
+	actual ContainerActual,
+	imageEnvironment []string,
+) (ContainerSpec, error) {
 	labels := actual.Configuration.Labels
 	if err := RequireManaged("container "+actual.ID, labels); err != nil {
 		return ContainerSpec{}, err
@@ -212,19 +240,10 @@ func RebuildMigratedSpec(actual ContainerActual) (ContainerSpec, error) {
 			"container %s has conflicting specification digest labels", actual.ID,
 		)
 	}
-	if len(actual.Configuration.PublishedSock) > 0 {
-		return ContainerSpec{}, fmt.Errorf(
-			"container %s publishes a socket, which no managed specification "+
-				"expresses", actual.ID,
-		)
+	if err := reproducibleShape(actual); err != nil {
+		return ContainerSpec{}, err
 	}
-	if len(actual.Configuration.CapAdd) > 0 {
-		return ContainerSpec{}, fmt.Errorf(
-			"container %s adds Linux capabilities, which are restricted to "+
-				"removable volume initialization", actual.ID,
-		)
-	}
-	environment, err := environmentMap(actual)
+	environment, err := environmentMap(actual, imageEnvironment)
 	if err != nil {
 		return ContainerSpec{}, err
 	}
@@ -290,6 +309,98 @@ func RebuildMigratedSpec(actual ContainerActual) (ContainerSpec, error) {
 	return spec, nil
 }
 
+// reproducibleShape refuses every observed configuration the specification
+// cannot restate. It exists because the caller's next step deletes the
+// original: a difference discovered by VerifyMigrationEquivalence afterwards is
+// discovered too late to prevent, so anything knowable in advance is blocked
+// here instead.
+func reproducibleShape(actual ContainerActual) error {
+	configuration := actual.Configuration
+	if len(configuration.PublishedSock) > 0 {
+		return fmt.Errorf(
+			"container %s publishes a socket, which no managed specification "+
+				"expresses", actual.ID,
+		)
+	}
+	if len(configuration.CapAdd) > 0 {
+		return fmt.Errorf(
+			"container %s adds Linux capabilities, which are restricted to "+
+				"removable volume initialization", actual.ID,
+		)
+	}
+	// The specification has one capability control: drop everything or drop
+	// nothing. A container dropping a specific capability would silently come
+	// back with none dropped.
+	if len(configuration.CapDrop) > 0 &&
+		!(len(configuration.CapDrop) == 1 && configuration.CapDrop[0] == "ALL") {
+		return fmt.Errorf(
+			"container %s drops specific Linux capabilities, which the managed "+
+				"specification cannot restate", actual.ID,
+		)
+	}
+	// Only two lifecycle states can be reproduced deliberately. A transitional
+	// or unknown state would otherwise be silently treated as "stopped".
+	if state := actual.Status.State; state != "running" && state != "stopped" {
+		return fmt.Errorf(
+			"container %s is in transitional state %q; migrate it from a "+
+				"settled state", actual.ID, state,
+		)
+	}
+	// Every label has to survive the replacement, but the writer emits only the
+	// six managed ownership keys. A container carrying anything else would come
+	// back without it, and the operator would find out after the delete.
+	managed := make(map[string]bool, len(ownershipLabelKeys))
+	for _, key := range ownershipLabelKeys {
+		managed[key] = true
+	}
+	for key := range configuration.Labels {
+		if !managed[key] {
+			return fmt.Errorf(
+				"container %s carries label %s, which the managed "+
+					"specification cannot rewrite onto the replacement",
+				actual.ID, key,
+			)
+		}
+	}
+	for _, mount := range configuration.Mounts {
+		_, isVolume := mount.Type["volume"]
+		_, isTmpfs := mount.Type["tmpfs"]
+		if !isVolume && !isTmpfs {
+			// A bind mount reaches the container's filesystem from the host.
+			// Dropping one silently is the worst outcome this file can have.
+			return fmt.Errorf(
+				"container %s has a mount at %s that is neither a named volume "+
+					"nor tmpfs", actual.ID, mount.Destination,
+			)
+		}
+		for _, option := range mount.Options {
+			if option != "ro" {
+				return fmt.Errorf(
+					"container %s mounts %s with option %q, which the managed "+
+						"specification cannot restate",
+					actual.ID, mount.Destination, option,
+				)
+			}
+		}
+	}
+	for _, published := range configuration.PublishedPorts {
+		if proto, _ := published["proto"].(string); proto != "" &&
+			proto != "tcp" {
+			return fmt.Errorf(
+				"container %s publishes a %s port, which the managed "+
+					"specification cannot restate", actual.ID, proto,
+			)
+		}
+		if count, ok := numericField(published["count"]); ok && count != 1 {
+			return fmt.Errorf(
+				"container %s publishes a port range, which the managed "+
+					"specification cannot restate", actual.ID,
+			)
+		}
+	}
+	return nil
+}
+
 // VerifyMigrationEquivalence proves a replacement differs from the original
 // only by gaining the current ownership namespace. It runs after the
 // replacement exists and is the gate that turns a delete-and-recreate into a
@@ -337,11 +448,14 @@ func VerifyMigrationEquivalence(before, after ContainerActual) error {
 		{"published sockets", before.Configuration.PublishedSock,
 			after.Configuration.PublishedSock},
 		{"networks", containerNetworks(before), containerNetworks(after)},
-		{"named volumes", NamedVolumeAttachments(before),
-			NamedVolumeAttachments(after)},
-		{"tmpfs mounts", tmpfsDestinations(before), tmpfsDestinations(after)},
+		// The whole mount list is compared, not just the named volumes and
+		// tmpfs targets the rebuild understands. Comparing only the shapes the
+		// rebuild can produce would make a dropped mount invisible to the one
+		// check that exists to catch a dropped mount.
+		{"mounts", before.Configuration.Mounts, after.Configuration.Mounts},
 		{"resources", before.Configuration.Resources,
 			after.Configuration.Resources},
+		{"lifecycle state", before.Status.State, after.Status.State},
 	} {
 		equal, err := canonicallyEqual(comparison.before, comparison.after)
 		if err != nil {
@@ -434,7 +548,25 @@ func containerNetworks(actual ContainerActual) []string {
 // environmentMap turns the observed environment back into specification form.
 // The values are carried so the replacement behaves identically; they reach the
 // child process environment rather than argv, exactly as the original did.
-func environmentMap(actual ContainerActual) (map[string]string, error) {
+// Apple Container reports the *effective* environment: the values the original
+// specification supplied plus whatever the image itself declares. Handing an
+// image default back would over-specify the replacement, and because these
+// values are injected into the `container` CLI's own process environment so it
+// can pass `--env KEY` without putting secrets in argv, an image's PATH or HOME
+// would displace the host's for that invocation. Subtracting the image's own
+// declarations recovers the operator-supplied set, which is what the original
+// specification actually carried. imageEnvironment may be nil, in which case
+// the full observed set is used.
+func environmentMap(
+	actual ContainerActual,
+	imageEnvironment []string,
+) (map[string]string, error) {
+	declared := make(map[string]string, len(imageEnvironment))
+	for _, entry := range imageEnvironment {
+		if key, value, present := strings.Cut(entry, "="); present {
+			declared[key] = value
+		}
+	}
 	environment := make(
 		map[string]string,
 		len(actual.Configuration.InitProcess.Environment),
@@ -453,6 +585,10 @@ func environmentMap(actual ContainerActual) (map[string]string, error) {
 				"container %s declares environment key %s twice with "+
 					"different values", actual.ID, key,
 			)
+		}
+		if value == declared[key] {
+			// The image supplies this one; the replacement inherits it.
+			continue
 		}
 		environment[key] = value
 	}

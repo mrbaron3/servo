@@ -26,6 +26,9 @@ type fakeSweepRuntime struct {
 	createdSpec []ContainerSpec
 
 	deleteErr error
+	// imageEnvironment is what the probe image declares for itself.
+	imageEnvironment []string
+	imageEnvErr      error
 	// synthesize builds the replacement. Tests override it to inject drift.
 	synthesize func(ContainerSpec, ContainerActual) ContainerActual
 	// deleteVolume simulates a runtime that destroys a volume on delete, which
@@ -39,6 +42,9 @@ func newFakeSweepRuntime(containers ...ContainerActual) *fakeSweepRuntime {
 		volumes:    map[string]bool{},
 		pending:    map[string]int{},
 		originals:  map[string]ContainerActual{},
+		// The fixture's PATH is an image default; everything else on it is
+		// specification-supplied.
+		imageEnvironment: []string{"PATH=/usr/bin"},
 	}
 	for _, container := range containers {
 		for _, attachment := range NamedVolumeAttachments(container) {
@@ -88,6 +94,13 @@ func (runtime *fakeSweepRuntime) Volumes(
 		resources = append(resources, resource)
 	}
 	return resources, nil
+}
+
+func (runtime *fakeSweepRuntime) ImageEnvironment(
+	_ context.Context,
+	_ string,
+) ([]string, error) {
+	return runtime.imageEnvironment, runtime.imageEnvErr
 }
 
 func (runtime *fakeSweepRuntime) Stop(
@@ -151,23 +164,142 @@ func (runtime *fakeSweepRuntime) materialize(
 	runtime.createdVerb = append(runtime.createdVerb, verb)
 	runtime.createdSpec = append(runtime.createdSpec, spec)
 	previous := runtime.originals[spec.Name]
-	replacement := previous
+	replacement := synthesizeFromSpec(spec, previous, runtime.imageEnvironment)
 	if runtime.synthesize != nil {
 		replacement = runtime.synthesize(spec, previous)
-	} else {
-		replacement.Configuration.Labels = dualLabelMap(
-			previous.Configuration.Labels,
-		)
 	}
 	replacement.Status.State = state
 	runtime.containers = append(runtime.containers, replacement)
 	return spec.Name, nil
 }
 
-// distinctVolume overrides a fixture's mounts so two containers in one test do
-// not accidentally share a named volume.
+// synthesizeFromSpec models what Apple Container would materialize from a
+// specification. It deliberately builds the replacement from the SPEC rather
+// than copying the pre-delete record: copying would make every field the
+// rebuild forgot reappear for free, so a rebuild that silently dropped a mount,
+// a capability, or an environment variable would still pass every equivalence
+// test. Fields the runtime defaults rather than the specification supplies
+// (image digest, resources, image-default entrypoint) are carried over, because
+// that is what the real runtime does.
+func synthesizeFromSpec(
+	spec ContainerSpec,
+	previous ContainerActual,
+	imageEnvironment []string,
+) ContainerActual {
+	replacement := previous
+	labels := map[string]string{
+		LegacyManagedLabelKey:  ManagedLabelValue,
+		CurrentManagedLabelKey: ManagedLabelValue,
+		LegacyRoleLabelKey:     spec.Role,
+		CurrentRoleLabelKey:    spec.Role,
+	}
+	if spec.SpecDigest != "" {
+		labels[LegacySpecLabelKey] = spec.SpecDigest
+		labels[CurrentSpecLabelKey] = spec.SpecDigest
+	}
+	replacement.Configuration.Labels = labels
+	replacement.Configuration.ReadOnly = spec.ReadOnly
+	replacement.Configuration.UseInit = spec.Init
+	// Apple Container reports these as empty arrays rather than omitting them,
+	// so the fake has to as well; a nil here would look like drift.
+	replacement.Configuration.CapAdd = append([]string{}, spec.CapAdd...)
+	replacement.Configuration.CapDrop = []string{}
+	if spec.CapDropAll {
+		replacement.Configuration.CapDrop = []string{"ALL"}
+	}
+	replacement.Configuration.Image.Reference = spec.Image
+	replacement.Configuration.InitProcess.User.Raw.UserString = spec.User
+	if spec.Entrypoint != "" {
+		replacement.Configuration.InitProcess.Executable = spec.Entrypoint
+		replacement.Configuration.InitProcess.Arguments =
+			append([]string(nil), spec.Command...)
+	}
+
+	// The effective environment is what the image declares plus what the
+	// specification supplies.
+	environment := append([]string(nil), imageEnvironment...)
+	declared := make(map[string]bool, len(imageEnvironment))
+	for _, entry := range imageEnvironment {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			declared[key] = true
+		}
+	}
+	keys := make([]string, 0, len(spec.Environment))
+	for key := range spec.Environment {
+		keys = append(keys, key)
+	}
+	for _, key := range sortedStrings(keys) {
+		if declared[key] {
+			continue
+		}
+		environment = append(environment, key+"="+spec.Environment[key])
+	}
+	replacement.Configuration.InitProcess.Environment = environment
+
+	// Mounts, networks, and publications are kept in their observed order but
+	// only when the specification still asks for them, so anything the rebuild
+	// dropped is simply absent from the replacement.
+	wantedTmpfs := make(map[string]bool, len(spec.Tmpfs))
+	for _, target := range spec.Tmpfs {
+		wantedTmpfs[target] = true
+	}
+	wantedVolumes := make(map[string]Mount, len(spec.Mounts))
+	for _, mount := range spec.Mounts {
+		wantedVolumes[mount.Target] = mount
+	}
+	mounts := make([]ContainerMount, 0, len(previous.Configuration.Mounts))
+	for _, mount := range previous.Configuration.Mounts {
+		if _, isTmpfs := mount.Type["tmpfs"]; isTmpfs {
+			if wantedTmpfs[mount.Destination] {
+				mounts = append(mounts, mount)
+			}
+			continue
+		}
+		if _, isVolume := mount.Type["volume"]; isVolume {
+			wanted, present := wantedVolumes[mount.Destination]
+			if !present {
+				continue
+			}
+			rebuilt := mount
+			rebuilt.Options = nil
+			if wanted.ReadOnly {
+				rebuilt.Options = []string{"ro"}
+			}
+			mounts = append(mounts, rebuilt)
+		}
+		// Anything else was never expressible, so it does not come back.
+	}
+	replacement.Configuration.Mounts = mounts
+
+	wantedNetworks := make(map[string]bool, len(spec.Networks))
+	for _, network := range spec.Networks {
+		wantedNetworks[network] = true
+	}
+	networks := replacement.Configuration.Networks[:0:0]
+	for _, network := range previous.Configuration.Networks {
+		if wantedNetworks[network.Network] {
+			networks = append(networks, network)
+		}
+	}
+	replacement.Configuration.Networks = networks
+
+	published := make([]map[string]any, 0, len(spec.Publish))
+	for _, publication := range spec.Publish {
+		for _, observed := range previous.Configuration.PublishedPorts {
+			if port, ok := numericField(observed["containerPort"]); ok &&
+				port == publication.ContainerPort {
+				published = append(published, observed)
+			}
+		}
+	}
+	replacement.Configuration.PublishedPorts = published
+	return replacement
+}
+
+// distinctVolume renders a mount list so two containers in one test do not
+// accidentally share a named volume.
 func distinctVolume(name string) string {
-	return `,"mounts": [
+	return `[
 		{"destination": "/tmp", "source": "tmpfs", "type": {"tmpfs": {}}},
 		{
 			"destination": "/workspace",
@@ -287,9 +419,24 @@ func TestSweepRecreatesAStoppedContainerWithoutStartingIt(t *testing.T) {
 		t.Fatalf("an already-stopped container was stopped again: %v",
 			runtime.stopped)
 	}
+	// The post-sweep audit must say this sweep migrated it, not merely that it
+	// is dual now: a fresh inventory cannot tell those apart.
 	if report.After.Totals[MigrationPending] != 0 ||
-		report.After.Totals[MigrationSkipped] != 1 {
+		report.After.Totals[MigrationMigrated] != 1 {
 		t.Fatalf("post-sweep inventory is not clean: %#v", report.After.Totals)
+	}
+	if len(report.Migrated) != 1 || report.Migrated[0] != "agentops-runner" {
+		t.Fatalf("migrated set = %v", report.Migrated)
+	}
+	if len(report.PlannedSpecs) != 1 ||
+		report.PlannedSpecs[0].Name != "agentops-runner" {
+		t.Fatalf("planned replacements = %#v", report.PlannedSpecs)
+	}
+	// The durable plan carries environment keys, never their values.
+	for _, key := range report.PlannedSpecs[0].EnvironmentKeys {
+		if strings.Contains(key, "=") || strings.Contains(key, "secret") {
+			t.Fatalf("planned replacement leaked an environment value: %q", key)
+		}
 	}
 	// The replacement carries both namespaces, so the pre-migration binary can
 	// still discover it.
@@ -401,9 +548,9 @@ func TestSweepHaltsOnReplacementDriftAndLeavesTheRestUntouched(t *testing.T) {
 	runtime := newFakeSweepRuntime(
 		containerFixture(t, "agentops-runner", "stopped",
 			legacyOnlyLabels("runner", fixtureSpecDigest), ""),
-		containerFixture(t, "agentops-triage", "stopped",
+		containerFixtureWithMounts(t, "agentops-triage", "stopped",
 			legacyOnlyLabels("triage", fixtureSpecDigest),
-			distinctVolume("agentops-triage-credentials")),
+			distinctVolume("agentops-triage-credentials"), ""),
 	)
 	runtime.synthesize = func(
 		_ ContainerSpec,
@@ -494,9 +641,9 @@ func TestSweepOnlyTouchesTheNamedIdentities(t *testing.T) {
 	runtime := newFakeSweepRuntime(
 		containerFixture(t, "agentops-runner", "stopped",
 			legacyOnlyLabels("runner", fixtureSpecDigest), ""),
-		containerFixture(t, "agentops-triage", "stopped",
+		containerFixtureWithMounts(t, "agentops-triage", "stopped",
 			legacyOnlyLabels("triage", fixtureSpecDigest),
-			distinctVolume("agentops-triage-credentials")),
+			distinctVolume("agentops-triage-credentials"), ""),
 	)
 	sweeper := testSweeper(runtime)
 	sweeper.Only = []string{"agentops-triage"}
@@ -532,6 +679,102 @@ func TestSweepRejectsAnOnlyIdentityThatIsNotPending(t *testing.T) {
 	}
 	if len(runtime.deleted) != 0 {
 		t.Fatal("the sweep mutated despite an invalid selection")
+	}
+}
+
+// A migration nobody can audit or roll back must not start. This guard is
+// load-bearing in both the runbook and the PR, so it is tested rather than
+// asserted.
+func TestSweepRefusesToMutateWhenTheSnapshotCannotBeWritten(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	sweeper := testSweeper(runtime, "agentops-runner")
+	sweeper.SnapshotBeforeMutation = func(
+		MigrationAudit, []PlannedReplacement,
+	) error {
+		return errors.New("evidence directory is read-only")
+	}
+	report, err := sweeper.Apply(context.Background())
+	if err == nil {
+		t.Fatal("the sweep ran without durable evidence")
+	}
+	if report.Applied {
+		t.Fatal("report claims the sweep was applied")
+	}
+	if len(runtime.deleted) != 0 || len(runtime.createdSpec) != 0 ||
+		len(runtime.stopped) != 0 {
+		t.Fatalf("the sweep mutated before its snapshot: %v", runtime.deleted)
+	}
+}
+
+// The snapshot has to carry enough to drive the documented rollback, and the
+// plan is built for every target before any of them is touched.
+func TestSnapshotCarriesEveryPlannedReplacementBeforeMutating(t *testing.T) {
+	runtime := newFakeSweepRuntime(
+		containerFixture(t, "agentops-runner", "stopped",
+			legacyOnlyLabels("runner", fixtureSpecDigest), ""),
+		containerFixtureWithMounts(t, "agentops-triage", "stopped",
+			legacyOnlyLabels("triage", fixtureSpecDigest),
+			distinctVolume("agentops-triage-credentials"), ""),
+	)
+	sweeper := testSweeper(runtime, "agentops-runner", "agentops-triage")
+	var captured []PlannedReplacement
+	var mutationsAtSnapshot int
+	sweeper.SnapshotBeforeMutation = func(
+		_ MigrationAudit, planned []PlannedReplacement,
+	) error {
+		captured = planned
+		mutationsAtSnapshot = len(runtime.deleted) + len(runtime.createdSpec)
+		return nil
+	}
+	if _, err := sweeper.Apply(context.Background()); err != nil {
+		t.Fatalf("sweep failed: %v", err)
+	}
+	if mutationsAtSnapshot != 0 {
+		t.Fatal("the snapshot was taken after mutation had begun")
+	}
+	if len(captured) != 2 {
+		t.Fatalf("planned replacements = %d, want 2", len(captured))
+	}
+	for _, planned := range captured {
+		if planned.Image == "" || planned.Role == "" ||
+			planned.RecreateVerb == "" || planned.ObservedState == "" {
+			t.Fatalf("planned replacement is not actionable: %#v", planned)
+		}
+	}
+}
+
+// A target that cannot be reproduced must stop the sweep while every container
+// is still alive, not after the earlier ones have been replaced.
+func TestSweepBlocksAllTargetsBeforeMutatingAnyOfThem(t *testing.T) {
+	runtime := newFakeSweepRuntime(
+		containerFixture(t, "agentops-runner", "stopped",
+			legacyOnlyLabels("runner", fixtureSpecDigest), ""),
+		// The second target carries a label the writer cannot reproduce.
+		containerFixtureWithMounts(t, "agentops-triage", "stopped", `{
+			"com.mrbaron3.workflow.agentopsctl": "v1",
+			"com.mrbaron3.workflow.role": "triage",
+			"com.example.team": "platform"
+		}`, distinctVolume("agentops-triage-credentials"), ""),
+	)
+	_, err := testSweeper(
+		runtime, "agentops-runner",
+	).Apply(context.Background())
+	if err != nil {
+		t.Fatalf("the reproducible target should still migrate: %v", err)
+	}
+	// Now include the unreproducible one; nothing further may be mutated.
+	deletionsBefore := len(runtime.deleted)
+	_, err = testSweeper(
+		runtime, "agentops-triage",
+	).Apply(context.Background())
+	if err == nil {
+		t.Fatal("an unreproducible target was swept")
+	}
+	if len(runtime.deleted) != deletionsBefore {
+		t.Fatal("the sweep mutated an unreproducible target")
 	}
 }
 

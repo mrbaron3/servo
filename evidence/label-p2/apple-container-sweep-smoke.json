@@ -122,6 +122,58 @@
     "restartReconciliation": {
       "container": "agentops-postgres",
       "observed": "started after migration, reported dual ownership and role labels, re-attached agentops-postgres-data at /var/lib/postgresql, and its PostgreSQL 18 data cluster (PG_VERSION=18) was intact; returned to stopped"
+    },
+    "observationWindow": {
+      "requirement": "at least 20 minutes and at least three samples: immediately after migration, after restart/reconcile, and at window close",
+      "startedAt": "2026-08-10T05:17:00Z",
+      "closedAt": "2026-08-10T05:49:37Z",
+      "durationMinutes": 32.6,
+      "samples": [
+        {
+          "at": "2026-08-10T05:17:00Z",
+          "kind": "immediately after migration",
+          "file": "evidence/label-p2/inventory-20260810T051700Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        },
+        {
+          "at": "2026-08-10T05:18:11Z",
+          "kind": "after restart/reconcile of agentops-postgres",
+          "file": "evidence/label-p2/inventory-20260810T051811Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        },
+        {
+          "at": "2026-08-10T05:31:37Z",
+          "kind": "intermediate",
+          "file": "evidence/label-p2/inventory-20260810T053137Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        },
+        {
+          "at": "2026-08-10T05:35:31Z",
+          "kind": "intermediate",
+          "file": "evidence/label-p2/inventory-20260810T053531Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        },
+        {
+          "at": "2026-08-10T05:49:37Z",
+          "kind": "window close",
+          "file": "evidence/label-p2/inventory-20260810T054937Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        }
+      ],
+      "regressions": {
+        "ownership": 0,
+        "attachment": 0,
+        "lifecycleState": 0,
+        "detail": "all five managed containers reported dual ownership at every sample, each with the same named volumes at the same destinations and the same read-only flags, and all remained stopped"
+      }
+    }
+  },
+  "postReviewHardening": {
+    "note": "review round 1 (fresh Codex + fresh Claude) found defects in the implementation that produced the migration above. The confirmed ones were fixed and the grounded suite was re-run against the hardened code; the already-migrated containers were not re-swept, because they are dual and no longer migration targets.",
+    "groundedRerun": {
+      "command": "AGENTOPS_TEST_APPLE_CONTAINER=1 AGENTOPS_TEST_APPLE_IMAGE=agentops-postgres:ciso07-078330f go test ./apps/control-plane/internal/lifecycle/ -run AppleContainerSweep -v -count=1",
+      "result": "ok github.com/mrbaron3/servo/apps/control-plane/internal/lifecycle 52.856s",
+      "residueAfterRerun": { "containers": 0, "volumes": 0, "networks": 0 }
     }
   },
   "rollback": {

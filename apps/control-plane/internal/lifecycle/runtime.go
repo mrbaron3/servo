@@ -405,6 +405,78 @@ func (runtime *AppleRuntime) ImageDigest(
 	return digest, nil
 }
 
+// ImageEnvironment returns the environment an image declares for itself. The
+// Phase 2 label migration subtracts it from a container's observed environment
+// to recover the values the original specification actually supplied: Apple
+// Container reports only the merged result, and carrying an image's own PATH or
+// HOME onto the replacement would both over-specify it and displace the host's
+// values in the `container` CLI process that creates it.
+//
+// Variants that disagree are refused rather than guessed between, because
+// picking the wrong one would silently change the replacement's environment.
+func (runtime *AppleRuntime) ImageEnvironment(
+	ctx context.Context,
+	image string,
+) ([]string, error) {
+	result := runtime.runner.Run(ctx, []string{"image", "inspect", image})
+	if result.Status != 0 {
+		return nil, runtimeError(result, nil)
+	}
+	type inspection struct {
+		Variants []struct {
+			Config struct {
+				Config struct {
+					Env []string `json:"Env"`
+				} `json:"config"`
+			} `json:"config"`
+		} `json:"variants"`
+	}
+	body := bytes.TrimSpace([]byte(result.Stdout))
+	var items []inspection
+	if len(body) > 0 && body[0] == '[' {
+		if err := json.Unmarshal(body, &items); err != nil {
+			return nil, fmt.Errorf("parse Apple Container image inspect: %w", err)
+		}
+	} else {
+		var item inspection
+		if err := json.Unmarshal(body, &item); err != nil {
+			return nil, fmt.Errorf("parse Apple Container image inspect: %w", err)
+		}
+		items = []inspection{item}
+	}
+	var declared []string
+	seen := false
+	for _, item := range items {
+		for _, variant := range item.Variants {
+			environment := variant.Config.Config.Env
+			if !seen {
+				declared = append([]string(nil), environment...)
+				seen = true
+				continue
+			}
+			if !equalStrings(declared, environment) {
+				return nil, fmt.Errorf(
+					"image %s declares different environments per variant",
+					image,
+				)
+			}
+		}
+	}
+	return declared, nil
+}
+
+func equalStrings(first, second []string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func (runtime *AppleRuntime) BuildImage(
 	ctx context.Context,
 	image, target, containerfile, root string,
@@ -497,14 +569,6 @@ func (runtime *AppleRuntime) CreateContainer(
 	spec ContainerSpec,
 ) (string, error) {
 	return runtime.materializeContainer(ctx, "create", spec)
-}
-
-// Start starts an existing container that was materialized earlier.
-func (runtime *AppleRuntime) Start(ctx context.Context, name string) error {
-	if err := validateResourceName(name); err != nil {
-		return err
-	}
-	return runtime.command(ctx, []string{"start", name}, nil)
 }
 
 func (runtime *AppleRuntime) materializeContainer(
