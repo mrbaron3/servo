@@ -16,13 +16,16 @@ import (
 	"github.com/mrbaron3/servo/apps/control-plane/internal/lifecycle"
 )
 
-// The `migrate-labels` subcommand is the operator surface for Phase 2 of Issue
-// #123. It defaults to a read-only inventory because the mutating form deletes
-// and recreates containers: the safe spelling has to be the short one.
+// The `migrate-labels` subcommand was the operator surface for Phase 2 of Issue
+// #123. Phase 3A retires its mutating half and keeps the read-only inventory,
+// which is still how an operator reads the phase gate.
 //
-// Evidence is written before the first mutation rather than after the last one.
-// A sweep that crashes halfway is exactly the case where the snapshot matters,
-// and a snapshot written at the end would not exist for it.
+// The sweep migrated a container by deleting it and recreating it from its own
+// observed specification. That was safe while the writer emitted both
+// namespaces, because a legacy-only container came back dual. It is not safe
+// now: the same code would take a legacy-only container to current-only in one
+// destructive step, which is the jump Issue #123 forbids. `--apply` therefore
+// refuses before touching anything and names the staged replacement.
 
 // labelMigrationEvidence is the durable record of one inventory or sweep. Every
 // field is derived from already-redacted structures: no environment value, no
@@ -47,7 +50,7 @@ func runMigrateLabels(ctx context.Context, args []string) error {
 	apply := flags.Bool(
 		"apply",
 		false,
-		"migrate old-only containers instead of only inventorying them",
+		"retired in Phase 3A; use `migrate-label-metadata` instead",
 	)
 	evidenceDir := flags.String(
 		"evidence-dir",
@@ -57,8 +60,7 @@ func runMigrateLabels(ctx context.Context, args []string) error {
 	only := flags.String(
 		"only",
 		"",
-		"comma separated exact container identities to migrate; "+
-			"required with --apply",
+		"retired with --apply; pass targets to `migrate-label-metadata --only`",
 	)
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -92,51 +94,65 @@ func splitIdentities(raw string) []string {
 	return identities
 }
 
-// MigrateLabels inventories managed containers and, when applying, migrates
-// every selected old-only container to dual labels.
+// MigrateLabels inventories managed containers. It never mutates the host.
 func (manager *manager) MigrateLabels(
 	ctx context.Context,
 	apply bool,
 	evidenceDir string,
 	only []string,
 ) error {
-	// --apply must name its targets. "Every old-only container" is a broad
-	// selector whose meaning depends on what else happens to be on the host,
-	// and Issue #123 forbids mutating on one. The operator reads --only off the
-	// inventory they just looked at, which also makes the sweep's blast radius
-	// reviewable in the shell history.
-	if apply && len(only) == 0 {
+	// Phase 3A retires this sweep's mutating half, and the refusal comes first —
+	// before the capability probe, before any listing, before anything that
+	// could start the runtime.
+	//
+	// The sweep migrated a container by deleting it and recreating it from its
+	// own observed specification. That was correct while the writer emitted both
+	// namespaces: a legacy-only container came back dual. From Phase 3A the
+	// writer emits the current namespace alone, so the same code would take a
+	// legacy-only container straight to current-only in one destructive step —
+	// exactly the jump Issue #123 forbids, performed by a path whose review
+	// predates the decision to forbid it. It would also delete the container
+	// before discovering that its own verification, which still demands a dual
+	// replacement, can no longer pass.
+	//
+	// The replacement is `migrate-label-metadata`, which moves the same labels in
+	// two reviewable stages and deletes nothing. The read-only inventory below
+	// is unaffected: it is still how an operator reads the phase gate.
+	if apply {
 		return fmt.Errorf(
-			"migrate-labels --apply requires --only with the exact container " +
-				"identities to migrate; run without --apply to inventory them",
+			"migrate-labels --apply is retired as of Phase 3A of Issue #123.\n" +
+				"It migrated a container by deleting and recreating it, which " +
+				"now produces a current-only replacement in one step and " +
+				"skips the staged migration the epic requires.\n" +
+				"Use the staged, non-destructive replacement instead:\n" +
+				"  agentopsctl migrate-label-metadata --stage prepare\n" +
+				"  agentopsctl migrate-label-metadata --stage prepare --apply " +
+				"--only <kind/id>,...\n" +
+				"  agentopsctl migrate-label-metadata --stage retire --apply " +
+				"--only <kind/id>,...\n" +
+				"`agentopsctl migrate-labels` without --apply remains the " +
+				"read-only inventory.",
 		)
 	}
-	// --only narrows a sweep, not an inventory. Accepting it here and ignoring
-	// it would make the natural rehearsal for `--apply --only <id>` report
-	// something other than what it appears to.
-	if !apply && len(only) > 0 {
+	// --only narrowed a sweep, and there is no longer a sweep to narrow.
+	if len(only) > 0 {
 		return fmt.Errorf(
-			"--only applies to --apply; the inventory always reports the whole " +
-				"host so its counts can be read as a phase gate",
+			"--only applied to the retired --apply path; the inventory always " +
+				"reports the whole host so its counts can be read as a phase " +
+				"gate. Pass exact targets to `migrate-label-metadata --only` " +
+				"instead",
 		)
 	}
 	// The inventory promises not to change the host, and starting the Apple
-	// Container system service would break that promise before the operator has
-	// chosen --apply. Only the mutating path may start the runtime.
+	// Container system service would break that promise. Nothing on this path
+	// starts the runtime.
 	capability := manager.runtime.Capability(ctx)
-	if !apply {
-		if !capability.Available || !capability.ServiceRunning {
-			return fmt.Errorf(
-				"Apple Container is not running; start it with " +
-					"`container system start` before taking inventory, which " +
-					"never starts it for you",
-			)
-		}
-	} else {
-		if err := manager.ensureRuntime(ctx); err != nil {
-			return err
-		}
-		capability = manager.runtime.Capability(ctx)
+	if !capability.Available || !capability.ServiceRunning {
+		return fmt.Errorf(
+			"Apple Container is not running; start it with " +
+				"`container system start` before taking inventory, which " +
+				"never starts it for you",
+		)
 	}
 	// A bare inventory writes nothing unless the operator asked for a durable
 	// copy: it is run repeatedly, often from inside the repository, and
@@ -161,86 +177,34 @@ func (manager *manager) MigrateLabels(
 		"%s-%s", time.Now().UTC().Format("20060102T150405Z"), runID,
 	)
 
-	if !apply {
-		audit, err := sweeper.Plan(ctx, "dry-run")
+	audit, err := sweeper.Plan(ctx, "dry-run")
+	if err != nil {
+		return err
+	}
+	printLabelMigrationAudit(audit)
+	if writeInventory {
+		path, err := writeLabelMigrationEvidence(
+			evidenceDir,
+			fmt.Sprintf("inventory-%s.json", stamp),
+			labelMigrationEvidence{
+				GeneratedAt:           stamp,
+				Mode:                  "dry-run",
+				AppleContainerVersion: capability.Version,
+				Plan:                  audit,
+			},
+		)
 		if err != nil {
 			return err
 		}
-		printLabelMigrationAudit(audit)
-		if writeInventory {
-			path, err := writeLabelMigrationEvidence(
-				evidenceDir,
-				fmt.Sprintf("inventory-%s.json", stamp),
-				labelMigrationEvidence{
-					GeneratedAt:           stamp,
-					Mode:                  "dry-run",
-					AppleContainerVersion: capability.Version,
-					Plan:                  audit,
-				},
-			)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("\nevidence: %s\n", path)
-		}
-		if audit.HasConflicts() {
-			fmt.Println(
-				"\nconflicting containers are present; resolve them before " +
-					"running with --apply",
-			)
-		}
-		return nil
+		fmt.Printf("\nevidence: %s\n", path)
 	}
-
-	// The snapshot is written from inside the sweep, against the exact audit it
-	// is about to act on, and a write failure aborts before anything mutates.
-	sweeper.SnapshotBeforeMutation = func(
-		audit lifecycle.MigrationAudit,
-		planned []lifecycle.PlannedReplacement,
-	) error {
-		path, err := writeLabelMigrationEvidence(
-			evidenceDir,
-			fmt.Sprintf("pre-mutation-%s.json", stamp),
-			labelMigrationEvidence{
-				GeneratedAt:           stamp,
-				Mode:                  "pre-mutation",
-				AppleContainerVersion: capability.Version,
-				Plan:                  audit,
-				PlannedSpecs:          planned,
-			},
+	if audit.HasConflicts() {
+		fmt.Println(
+			"\nconflicting containers are present; resolve them before " +
+				"migrating",
 		)
-		if err == nil {
-			fmt.Printf("pre-mutation snapshot: %s\n", path)
-		}
-		return err
 	}
-
-	report, sweepErr := sweeper.Apply(ctx)
-	// The sweep report is written whether or not the sweep succeeded. A halted
-	// sweep is precisely when an operator needs to see which stage stopped it.
-	path, writeErr := writeLabelMigrationEvidence(
-		evidenceDir,
-		fmt.Sprintf("sweep-%s.json", stamp),
-		labelMigrationEvidence{
-			GeneratedAt:           stamp,
-			Mode:                  "apply",
-			AppleContainerVersion: capability.Version,
-			Plan:                  report.Before,
-			Sweep:                 &report,
-		},
-	)
-	printSweepReport(report)
-	if writeErr != nil {
-		if sweepErr != nil {
-			return fmt.Errorf(
-				"sweep failed (%v) and its evidence could not be written: %w",
-				sweepErr, writeErr,
-			)
-		}
-		return writeErr
-	}
-	fmt.Printf("\nevidence: %s\n", path)
-	return sweepErr
+	return nil
 }
 
 // evidenceRunID returns a short collision-resistant identity for one run's
@@ -308,30 +272,6 @@ func printLabelMigrationAudit(audit lifecycle.MigrationAudit) {
 	for _, disposition := range sortedDispositions(audit.Totals) {
 		fmt.Printf("  %-12s %d\n", disposition, audit.Totals[disposition])
 	}
-}
-
-func printSweepReport(report lifecycle.SweepReport) {
-	fmt.Println("sweep steps")
-	for _, step := range report.Steps {
-		fmt.Printf(
-			"  %-40s %-15s %-7s %s\n",
-			step.Container, step.Stage, step.Outcome, step.Detail,
-		)
-	}
-	if len(report.Volumes) > 0 {
-		fmt.Println("named volume preservation")
-		for _, record := range report.Volumes {
-			fmt.Printf(
-				"  %-50s before=%t after=%t\n",
-				record.Name, record.PresentBefore, record.PresentAfter,
-			)
-		}
-	}
-	if report.Halted != "" {
-		fmt.Printf("halted: %s\n", report.Halted)
-		return
-	}
-	printLabelMigrationAudit(report.After)
 }
 
 func sortedDispositions(

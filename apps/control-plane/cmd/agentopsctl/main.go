@@ -40,6 +40,12 @@ func run(args []string) error {
 	if args[0] == "migrate-labels" {
 		return runMigrateLabels(ctx, args[1:])
 	}
+	// migrate-label-metadata is dispatched here for the same reason, and for one
+	// more: it stops the Apple Container services, so it must never be reachable
+	// through a path that starts them as a side effect of loading configuration.
+	if args[0] == "migrate-label-metadata" {
+		return runMigrateLabelMetadata(ctx, args[1:])
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -233,6 +239,6 @@ func parseProgressTarget(value string) (string, int64, error) {
 
 func usageError() error {
 	return fmt.Errorf(
-		"usage: agentopsctl deploy|start|drain|stop|rotate-postgres-admin|migrate-labels|status|progress|worktree|logs|open (use -h after a command)",
+		"usage: agentopsctl deploy|start|drain|stop|rotate-postgres-admin|migrate-labels|migrate-label-metadata|status|progress|worktree|logs|open (use -h after a command)",
 	)
 }

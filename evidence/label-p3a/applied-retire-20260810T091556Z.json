@@ -1,0 +1,2174 @@
+{
+  "generatedAt": "20260810T091556Z",
+  "mode": "applied",
+  "stage": "retire",
+  "host": {
+    "cliVersion": "1.1.0",
+    "apiServerVersion": "1.1.0"
+  },
+  "plan": {
+    "stage": "retire",
+    "host": {
+      "cliVersion": "1.1.0",
+      "apiServerVersion": "1.1.0"
+    },
+    "entries": [
+      {
+        "kind": "container",
+        "id": "agentops-control",
+        "state": "stopped",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "documents": [
+          {
+            "relativePath": "containers/agentops-control/runtime-configuration.json",
+            "beforeSha256": "254aa924303dd6bab26bfe968d083a25b95f0fb63dcdafd27dde176bcb6ff3dc"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "container",
+        "id": "agentops-github-broker",
+        "state": "stopped",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "documents": [
+          {
+            "relativePath": "containers/agentops-github-broker/runtime-configuration.json",
+            "beforeSha256": "a1fbef1b180fa3dc81b26494c98049fd012f2a5df851359d125e8ef752c5fa41"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "container",
+        "id": "agentops-postgres",
+        "state": "stopped",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "documents": [
+          {
+            "relativePath": "containers/agentops-postgres/config.json",
+            "beforeSha256": "4afbcc6789105b377b5c838ca3ffc1298f6caf2f0ad64fecaf333b10d101c841"
+          },
+          {
+            "relativePath": "containers/agentops-postgres/runtime-configuration.json",
+            "beforeSha256": "a7ed6caf7b6165a1beb6623a6738688f9a4f6675ddb519ee154b5ecafbed62a1"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "container",
+        "id": "agentops-runner",
+        "state": "stopped",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "documents": [
+          {
+            "relativePath": "containers/agentops-runner/runtime-configuration.json",
+            "beforeSha256": "e145680748de5b9c5646c49da67dc92a2405b2419ac10feb9cdc723fb1fd9677"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "container",
+        "id": "agentops-triage",
+        "state": "stopped",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "documents": [
+          {
+            "relativePath": "containers/agentops-triage/runtime-configuration.json",
+            "beforeSha256": "9b2cae92363fe9b4366d4a7e8ab1c11a486930ba8bdd41623f91a0819e658829"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso06-comp-internal",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "networks/agentops-ciso06-comp-internal/entity.json",
+            "beforeSha256": "bf825c2d0249fdf434733b82e3c7f7f40b5385aee69af47b31a2619fc97baa19"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso06-final-internal",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "networks/agentops-ciso06-final-internal/entity.json",
+            "beforeSha256": "5dae1f17efc53c82f763cb0457020af9aff94a77c96577571031157f9cbd79f9"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso06-smoke-internal",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "networks/agentops-ciso06-smoke-internal/entity.json",
+            "beforeSha256": "2bc261fb6f0e03bc188e498d8b77925962730ef22ef1427223787b80092ed998"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso07-dogfood-internal",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "networks/agentops-ciso07-dogfood-internal/entity.json",
+            "beforeSha256": "cf60adf25b4355678017a01ea216dc037a1ce5b4d3c58c28304a21952c427873"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "network",
+        "id": "agentops-internal",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "networks/agentops-internal/entity.json",
+            "beforeSha256": "a080dbc383f6dfe5274558749d6e70727587ffd87110d134531f71c48ad3d632"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "network",
+        "id": "servo-pipeline-latest-smoke-20260804-internal",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "networks/servo-pipeline-latest-smoke-20260804-internal/entity.json",
+            "beforeSha256": "4d8c7f7bd823b7747bb1dcbb9f4bcadf72b6e40f076a135847a6bd34e1364534"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "network",
+        "id": "servo-pipeline-smoke-20260804-internal",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "networks/servo-pipeline-smoke-20260804-internal/entity.json",
+            "beforeSha256": "f3efe48651f8cefef89a2a1e6083b04e85c8837366e38258bd279f466993b66d"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-comp-postgres-data",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-ciso06-comp-postgres-data/entity.json",
+            "beforeSha256": "df513e782e1b2a1b016cfb27db8dca0e530d4d8459956ee4c52c65fbf083f48b"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-comp-runner-workspace",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-ciso06-comp-runner-workspace/entity.json",
+            "beforeSha256": "dac16554c54b9888435a382197fcd486de364134c1610d6cd82daf533bc63fee"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-final-postgres-data",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-ciso06-final-postgres-data/entity.json",
+            "beforeSha256": "db85fa4ee45ebc22b8902412fbba859323bd5f633d89740ffa037964224f544c"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-final-runner-workspace",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-ciso06-final-runner-workspace/entity.json",
+            "beforeSha256": "5a15fda6e2d426bc6601e932a40317d1a3b86a16135d3b3c9a2884e9e135daa1"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-smoke-postgres-data",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-ciso06-smoke-postgres-data/entity.json",
+            "beforeSha256": "4ad9dcad8b369d9b32b75036318d8cec0d78d35cb701e44c8b83c5e41d22eb83"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-smoke-runner-workspace",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-ciso06-smoke-runner-workspace/entity.json",
+            "beforeSha256": "ee3b18aab67f17566f96fb0d074c42eb55e093822f4fd2e97b419ae3bd0d659d"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-dogfood-postgres-data",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-ciso07-dogfood-postgres-data/entity.json",
+            "beforeSha256": "02f619d911889d0640018c050badd64d0a7c2890a5a9902a0cfd353c9bcfabcf"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-dogfood-runner-credentials",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-ciso07-dogfood-runner-credentials/entity.json",
+            "beforeSha256": "251dcda155efb12412b4a69dca4d21b8143f6b8fd0bafd617ae0db09aeef9e89"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-dogfood-runner-workspace",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-ciso07-dogfood-runner-workspace/entity.json",
+            "beforeSha256": "c825d80db87f7ef8b2d8ee19ead28e64c3f020ac170e2b6d4ed967f7dffecd9b"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-github-app-key",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-github-app-key/entity.json",
+            "beforeSha256": "7aedcd815bd394abbf1032237fa3cdb5824634ca0637e2a30e83efbe8952609f"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-postgres-data",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-postgres-data/entity.json",
+            "beforeSha256": "a7b14c2e33b0e2f5ea820050ba4bb0890e87671ddeab2d9593a86f057a891d33"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-runner-credentials",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-runner-credentials/entity.json",
+            "beforeSha256": "66499bb189f8d2262503aa5a0d81869673058d0cf11743cf7f522ff5d0128127"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-runner-workspace",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-runner-workspace/entity.json",
+            "beforeSha256": "b0dc750ba79b40d2f216081025e071c88c92e4ec6abdd0d08d20f2042358a057"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-triage-credentials",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/agentops-triage-credentials/entity.json",
+            "beforeSha256": "4e192513b31c0c435c2fe02b9fbc04777e63c7b3b9f2ce7da5ad8b9995b8d747"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-latest-smoke-20260804-github-app-key",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/servo-pipeline-latest-smoke-20260804-github-app-key/entity.json",
+            "beforeSha256": "06627948ab67cd485ee44359b18a2e50a15dd675297160a8749bfd53ce211f92"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-latest-smoke-20260804-postgres-data",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/servo-pipeline-latest-smoke-20260804-postgres-data/entity.json",
+            "beforeSha256": "faf84a8c9f6fb28b935d28b0e733713da3f873189f0931cffc7dd35096bea2b4"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-latest-smoke-20260804-runner-workspace",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/servo-pipeline-latest-smoke-20260804-runner-workspace/entity.json",
+            "beforeSha256": "79b1ac1b4fcb5b058eb5ce7476d2df2ad28c183bf31bf39aed3e6fda8ae0cd92"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-smoke-20260804-github-app-key",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/servo-pipeline-smoke-20260804-github-app-key/entity.json",
+            "beforeSha256": "3fa8298f954d1772e9256c9c083fa8d48f97c274966bdaebb5f3a51c576938a5"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-smoke-20260804-postgres-data",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/servo-pipeline-smoke-20260804-postgres-data/entity.json",
+            "beforeSha256": "2c1ba5f6818d0a50b8b649f940616c9d5a98cb03cecc0599e10fc7cc273ca2f5"
+          }
+        ],
+        "alreadySatisfied": false
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-smoke-20260804-runner-workspace",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "documents": [
+          {
+            "relativePath": "volumes/servo-pipeline-smoke-20260804-runner-workspace/entity.json",
+            "beforeSha256": "e29cb4388b5966f356547d032f310d3259787c608f42b0c4f76920aa199e80e8"
+          }
+        ],
+        "alreadySatisfied": false
+      }
+    ],
+    "changeCount": 32
+  },
+  "report": {
+    "stage": "retire",
+    "host": {
+      "cliVersion": "1.1.0",
+      "apiServerVersion": "1.1.0"
+    },
+    "applied": [
+      {
+        "kind": "container",
+        "id": "agentops-control",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "control",
+          "com.mrbaron3.servo.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba",
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "control",
+          "com.mrbaron3.workflow.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "control",
+          "com.mrbaron3.servo.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "containerConfiguration",
+              "labels"
+            ],
+            "document": "containers/agentops-control/runtime-configuration.json",
+            "backup": "container/agentops-control/runtime-configuration.json",
+            "beforeSha256": "254aa924303dd6bab26bfe968d083a25b95f0fb63dcdafd27dde176bcb6ff3dc",
+            "afterSha256": "d6bed3785d834361d8adbee438c9f21d361261a733e97e69901d10ed93b653fd",
+            "backupSha256": "254aa924303dd6bab26bfe968d083a25b95f0fb63dcdafd27dde176bcb6ff3dc",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "control",
+              "com.mrbaron3.servo.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba",
+              "com.mrbaron3.workflow.agentopsctl": "v1",
+              "com.mrbaron3.workflow.role": "control",
+              "com.mrbaron3.workflow.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "control",
+              "com.mrbaron3.servo.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "container",
+        "id": "agentops-github-broker",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "github-broker",
+          "com.mrbaron3.servo.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66",
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "github-broker",
+          "com.mrbaron3.workflow.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "github-broker",
+          "com.mrbaron3.servo.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "containerConfiguration",
+              "labels"
+            ],
+            "document": "containers/agentops-github-broker/runtime-configuration.json",
+            "backup": "container/agentops-github-broker/runtime-configuration.json",
+            "beforeSha256": "a1fbef1b180fa3dc81b26494c98049fd012f2a5df851359d125e8ef752c5fa41",
+            "afterSha256": "c6d8da007f55afcf8524c2a67da975827f44b14001cd777b568ccac49d5a98be",
+            "backupSha256": "a1fbef1b180fa3dc81b26494c98049fd012f2a5df851359d125e8ef752c5fa41",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "github-broker",
+              "com.mrbaron3.servo.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66",
+              "com.mrbaron3.workflow.agentopsctl": "v1",
+              "com.mrbaron3.workflow.role": "github-broker",
+              "com.mrbaron3.workflow.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "github-broker",
+              "com.mrbaron3.servo.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "container",
+        "id": "agentops-postgres",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "postgres",
+          "com.mrbaron3.servo.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6",
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "postgres",
+          "com.mrbaron3.workflow.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "postgres",
+          "com.mrbaron3.servo.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "containers/agentops-postgres/config.json",
+            "backup": "container/agentops-postgres/config.json",
+            "beforeSha256": "4afbcc6789105b377b5c838ca3ffc1298f6caf2f0ad64fecaf333b10d101c841",
+            "afterSha256": "2ee948d58737def5c9fdb4b392e27b8f99ad175c8f2952d4980c42de6f3bba00",
+            "backupSha256": "4afbcc6789105b377b5c838ca3ffc1298f6caf2f0ad64fecaf333b10d101c841",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "postgres",
+              "com.mrbaron3.servo.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6",
+              "com.mrbaron3.workflow.agentopsctl": "v1",
+              "com.mrbaron3.workflow.role": "postgres",
+              "com.mrbaron3.workflow.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "postgres",
+              "com.mrbaron3.servo.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+            }
+          },
+          {
+            "labelPath": [
+              "containerConfiguration",
+              "labels"
+            ],
+            "document": "containers/agentops-postgres/runtime-configuration.json",
+            "backup": "container/agentops-postgres/runtime-configuration.json",
+            "beforeSha256": "a7ed6caf7b6165a1beb6623a6738688f9a4f6675ddb519ee154b5ecafbed62a1",
+            "afterSha256": "af7c2228fa94d04fa06b651ccbb5604767a025cc4665057db0dd33a0a45b2ff2",
+            "backupSha256": "a7ed6caf7b6165a1beb6623a6738688f9a4f6675ddb519ee154b5ecafbed62a1",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "postgres",
+              "com.mrbaron3.servo.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6",
+              "com.mrbaron3.workflow.agentopsctl": "v1",
+              "com.mrbaron3.workflow.role": "postgres",
+              "com.mrbaron3.workflow.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "postgres",
+              "com.mrbaron3.servo.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "container",
+        "id": "agentops-runner",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "runner",
+          "com.mrbaron3.servo.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c",
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "runner",
+          "com.mrbaron3.workflow.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "runner",
+          "com.mrbaron3.servo.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "containerConfiguration",
+              "labels"
+            ],
+            "document": "containers/agentops-runner/runtime-configuration.json",
+            "backup": "container/agentops-runner/runtime-configuration.json",
+            "beforeSha256": "e145680748de5b9c5646c49da67dc92a2405b2419ac10feb9cdc723fb1fd9677",
+            "afterSha256": "5bfc8ccf1909c0b9ced424fc8c6611537461fabe00820c87977ed0b04668b0df",
+            "backupSha256": "e145680748de5b9c5646c49da67dc92a2405b2419ac10feb9cdc723fb1fd9677",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "runner",
+              "com.mrbaron3.servo.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c",
+              "com.mrbaron3.workflow.agentopsctl": "v1",
+              "com.mrbaron3.workflow.role": "runner",
+              "com.mrbaron3.workflow.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "runner",
+              "com.mrbaron3.servo.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "container",
+        "id": "agentops-triage",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl",
+          "com.mrbaron3.workflow.role",
+          "com.mrbaron3.workflow.spec-sha256"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "triage",
+          "com.mrbaron3.servo.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c",
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "triage",
+          "com.mrbaron3.workflow.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "triage",
+          "com.mrbaron3.servo.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "containerConfiguration",
+              "labels"
+            ],
+            "document": "containers/agentops-triage/runtime-configuration.json",
+            "backup": "container/agentops-triage/runtime-configuration.json",
+            "beforeSha256": "9b2cae92363fe9b4366d4a7e8ab1c11a486930ba8bdd41623f91a0819e658829",
+            "afterSha256": "b05e391d8f0449d22454c941934050693066e3464b9f98a655351a15b21260b6",
+            "backupSha256": "9b2cae92363fe9b4366d4a7e8ab1c11a486930ba8bdd41623f91a0819e658829",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "triage",
+              "com.mrbaron3.servo.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c",
+              "com.mrbaron3.workflow.agentopsctl": "v1",
+              "com.mrbaron3.workflow.role": "triage",
+              "com.mrbaron3.workflow.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.servo.role": "triage",
+              "com.mrbaron3.servo.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso06-comp-internal",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "networks/agentops-ciso06-comp-internal/entity.json",
+            "backup": "network/agentops-ciso06-comp-internal/entity.json",
+            "beforeSha256": "bf825c2d0249fdf434733b82e3c7f7f40b5385aee69af47b31a2619fc97baa19",
+            "afterSha256": "129fe383fa2d173fcb5956567a0d1f0686ec77aad408c6e1cdbb94856808cc04",
+            "backupSha256": "bf825c2d0249fdf434733b82e3c7f7f40b5385aee69af47b31a2619fc97baa19",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso06-final-internal",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "networks/agentops-ciso06-final-internal/entity.json",
+            "backup": "network/agentops-ciso06-final-internal/entity.json",
+            "beforeSha256": "5dae1f17efc53c82f763cb0457020af9aff94a77c96577571031157f9cbd79f9",
+            "afterSha256": "5f2eda7f8338ad8b87dc9ded9e6baf34e9fa251a3cfa63ca718df6f1badf850f",
+            "backupSha256": "5dae1f17efc53c82f763cb0457020af9aff94a77c96577571031157f9cbd79f9",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso06-smoke-internal",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "networks/agentops-ciso06-smoke-internal/entity.json",
+            "backup": "network/agentops-ciso06-smoke-internal/entity.json",
+            "beforeSha256": "2bc261fb6f0e03bc188e498d8b77925962730ef22ef1427223787b80092ed998",
+            "afterSha256": "4e831d18d4b672c0c05d4b952557939687a316a3a67fb87b7e66f139b13b4f9b",
+            "backupSha256": "2bc261fb6f0e03bc188e498d8b77925962730ef22ef1427223787b80092ed998",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso07-dogfood-internal",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "networks/agentops-ciso07-dogfood-internal/entity.json",
+            "backup": "network/agentops-ciso07-dogfood-internal/entity.json",
+            "beforeSha256": "cf60adf25b4355678017a01ea216dc037a1ce5b4d3c58c28304a21952c427873",
+            "afterSha256": "1814b5ab2e1f1c560786c03153c3711946611ce629421636fd39c78b14fb6078",
+            "backupSha256": "cf60adf25b4355678017a01ea216dc037a1ce5b4d3c58c28304a21952c427873",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "network",
+        "id": "agentops-internal",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "networks/agentops-internal/entity.json",
+            "backup": "network/agentops-internal/entity.json",
+            "beforeSha256": "a080dbc383f6dfe5274558749d6e70727587ffd87110d134531f71c48ad3d632",
+            "afterSha256": "1606b0f7ad9aefed21591852bb07cdbcf54540aaac004a930b1a1ec66a15b46d",
+            "backupSha256": "a080dbc383f6dfe5274558749d6e70727587ffd87110d134531f71c48ad3d632",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "network",
+        "id": "servo-pipeline-latest-smoke-20260804-internal",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "networks/servo-pipeline-latest-smoke-20260804-internal/entity.json",
+            "backup": "network/servo-pipeline-latest-smoke-20260804-internal/entity.json",
+            "beforeSha256": "4d8c7f7bd823b7747bb1dcbb9f4bcadf72b6e40f076a135847a6bd34e1364534",
+            "afterSha256": "1e919fcecc003f6586c8cddb6c41c4fca694e3c2227a2766088e270cc737e45f",
+            "backupSha256": "4d8c7f7bd823b7747bb1dcbb9f4bcadf72b6e40f076a135847a6bd34e1364534",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "network",
+        "id": "servo-pipeline-smoke-20260804-internal",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "networks/servo-pipeline-smoke-20260804-internal/entity.json",
+            "backup": "network/servo-pipeline-smoke-20260804-internal/entity.json",
+            "beforeSha256": "f3efe48651f8cefef89a2a1e6083b04e85c8837366e38258bd279f466993b66d",
+            "afterSha256": "64895273ffdb076d7c7cb95995696dbd4334a23b93e6e454d6515bd28fc08630",
+            "backupSha256": "f3efe48651f8cefef89a2a1e6083b04e85c8837366e38258bd279f466993b66d",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-comp-postgres-data",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-ciso06-comp-postgres-data/entity.json",
+            "backup": "volume/agentops-ciso06-comp-postgres-data/entity.json",
+            "beforeSha256": "df513e782e1b2a1b016cfb27db8dca0e530d4d8459956ee4c52c65fbf083f48b",
+            "afterSha256": "74d9454ef1064dec85ebe88205ac3b8178645c4f38cf68d66671dc17a9d574e9",
+            "backupSha256": "df513e782e1b2a1b016cfb27db8dca0e530d4d8459956ee4c52c65fbf083f48b",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-comp-runner-workspace",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-ciso06-comp-runner-workspace/entity.json",
+            "backup": "volume/agentops-ciso06-comp-runner-workspace/entity.json",
+            "beforeSha256": "dac16554c54b9888435a382197fcd486de364134c1610d6cd82daf533bc63fee",
+            "afterSha256": "6a7e1d3138e0eb0eb33c90659fa28b83e825b6473de06fd89ef83584fd3870a5",
+            "backupSha256": "dac16554c54b9888435a382197fcd486de364134c1610d6cd82daf533bc63fee",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-final-postgres-data",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-ciso06-final-postgres-data/entity.json",
+            "backup": "volume/agentops-ciso06-final-postgres-data/entity.json",
+            "beforeSha256": "db85fa4ee45ebc22b8902412fbba859323bd5f633d89740ffa037964224f544c",
+            "afterSha256": "d573d039602e872e61bf4e47f5b538157bce5e134f54cfc331e4a891a8271872",
+            "backupSha256": "db85fa4ee45ebc22b8902412fbba859323bd5f633d89740ffa037964224f544c",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-final-runner-workspace",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-ciso06-final-runner-workspace/entity.json",
+            "backup": "volume/agentops-ciso06-final-runner-workspace/entity.json",
+            "beforeSha256": "5a15fda6e2d426bc6601e932a40317d1a3b86a16135d3b3c9a2884e9e135daa1",
+            "afterSha256": "b01fecec2c12456e69110fa6487ccd23ac3014a9931a35c69c4d280ae6a767cf",
+            "backupSha256": "5a15fda6e2d426bc6601e932a40317d1a3b86a16135d3b3c9a2884e9e135daa1",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-smoke-postgres-data",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-ciso06-smoke-postgres-data/entity.json",
+            "backup": "volume/agentops-ciso06-smoke-postgres-data/entity.json",
+            "beforeSha256": "4ad9dcad8b369d9b32b75036318d8cec0d78d35cb701e44c8b83c5e41d22eb83",
+            "afterSha256": "bb6da060e49806360a0171728d016d06c604f000532736a7c823723ae1a7cd9b",
+            "backupSha256": "4ad9dcad8b369d9b32b75036318d8cec0d78d35cb701e44c8b83c5e41d22eb83",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-smoke-runner-workspace",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-ciso06-smoke-runner-workspace/entity.json",
+            "backup": "volume/agentops-ciso06-smoke-runner-workspace/entity.json",
+            "beforeSha256": "ee3b18aab67f17566f96fb0d074c42eb55e093822f4fd2e97b419ae3bd0d659d",
+            "afterSha256": "3d73dfe787174b4a4881ab12377b7d164a9ef3de9aae9ad9a3f051ba3ff9acb9",
+            "backupSha256": "ee3b18aab67f17566f96fb0d074c42eb55e093822f4fd2e97b419ae3bd0d659d",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-dogfood-postgres-data",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-ciso07-dogfood-postgres-data/entity.json",
+            "backup": "volume/agentops-ciso07-dogfood-postgres-data/entity.json",
+            "beforeSha256": "02f619d911889d0640018c050badd64d0a7c2890a5a9902a0cfd353c9bcfabcf",
+            "afterSha256": "8b6ea9c334c2ffc811a62e87ef351f224fe829826107dd3ecd6a66dfb2f22339",
+            "backupSha256": "02f619d911889d0640018c050badd64d0a7c2890a5a9902a0cfd353c9bcfabcf",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-dogfood-runner-credentials",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-ciso07-dogfood-runner-credentials/entity.json",
+            "backup": "volume/agentops-ciso07-dogfood-runner-credentials/entity.json",
+            "beforeSha256": "251dcda155efb12412b4a69dca4d21b8143f6b8fd0bafd617ae0db09aeef9e89",
+            "afterSha256": "1f5b3f36ed4763b1c9e341aa65b9891112011e3f9e4f7b35e7e8b63bc6d03f1f",
+            "backupSha256": "251dcda155efb12412b4a69dca4d21b8143f6b8fd0bafd617ae0db09aeef9e89",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-dogfood-runner-workspace",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-ciso07-dogfood-runner-workspace/entity.json",
+            "backup": "volume/agentops-ciso07-dogfood-runner-workspace/entity.json",
+            "beforeSha256": "c825d80db87f7ef8b2d8ee19ead28e64c3f020ac170e2b6d4ed967f7dffecd9b",
+            "afterSha256": "39028bebf4b82f6ff5b6e74d8197e576be19b6fe0c0b7a370fff1a9a9e7c18a8",
+            "backupSha256": "c825d80db87f7ef8b2d8ee19ead28e64c3f020ac170e2b6d4ed967f7dffecd9b",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-github-app-key",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-github-app-key/entity.json",
+            "backup": "volume/agentops-github-app-key/entity.json",
+            "beforeSha256": "7aedcd815bd394abbf1032237fa3cdb5824634ca0637e2a30e83efbe8952609f",
+            "afterSha256": "a1e7f9f52b36f7e436adec3a5fb28cc70eb9db31c2bf2d42548a1577f4f693ae",
+            "backupSha256": "7aedcd815bd394abbf1032237fa3cdb5824634ca0637e2a30e83efbe8952609f",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-postgres-data",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-postgres-data/entity.json",
+            "backup": "volume/agentops-postgres-data/entity.json",
+            "beforeSha256": "a7b14c2e33b0e2f5ea820050ba4bb0890e87671ddeab2d9593a86f057a891d33",
+            "afterSha256": "a04a98cc331f0cf58952c71e7691218c57eeae7612c297ac8c6d1d6c163ef50d",
+            "backupSha256": "a7b14c2e33b0e2f5ea820050ba4bb0890e87671ddeab2d9593a86f057a891d33",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-runner-credentials",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-runner-credentials/entity.json",
+            "backup": "volume/agentops-runner-credentials/entity.json",
+            "beforeSha256": "66499bb189f8d2262503aa5a0d81869673058d0cf11743cf7f522ff5d0128127",
+            "afterSha256": "a8382d3e703fbb68b176dc7f6d3e427a221ba0abb67225b2775d9f2cda8c1c2e",
+            "backupSha256": "66499bb189f8d2262503aa5a0d81869673058d0cf11743cf7f522ff5d0128127",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-runner-workspace",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-runner-workspace/entity.json",
+            "backup": "volume/agentops-runner-workspace/entity.json",
+            "beforeSha256": "b0dc750ba79b40d2f216081025e071c88c92e4ec6abdd0d08d20f2042358a057",
+            "afterSha256": "e92ff51b8d5a82aac23c96e43323fecb17ffe79cfa66437e610ca4582d8acd65",
+            "backupSha256": "b0dc750ba79b40d2f216081025e071c88c92e4ec6abdd0d08d20f2042358a057",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-triage-credentials",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/agentops-triage-credentials/entity.json",
+            "backup": "volume/agentops-triage-credentials/entity.json",
+            "beforeSha256": "4e192513b31c0c435c2fe02b9fbc04777e63c7b3b9f2ce7da5ad8b9995b8d747",
+            "afterSha256": "b044364f53cfffe4a31c15b9dd8c199902d54c9545f2e2d73fb839acc59daf69",
+            "backupSha256": "4e192513b31c0c435c2fe02b9fbc04777e63c7b3b9f2ce7da5ad8b9995b8d747",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-latest-smoke-20260804-github-app-key",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/servo-pipeline-latest-smoke-20260804-github-app-key/entity.json",
+            "backup": "volume/servo-pipeline-latest-smoke-20260804-github-app-key/entity.json",
+            "beforeSha256": "06627948ab67cd485ee44359b18a2e50a15dd675297160a8749bfd53ce211f92",
+            "afterSha256": "26b6270c9781760a4cd9b6933d2c11d3dcb064ce2c058128ccfed351969f9cb9",
+            "backupSha256": "06627948ab67cd485ee44359b18a2e50a15dd675297160a8749bfd53ce211f92",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-latest-smoke-20260804-postgres-data",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/servo-pipeline-latest-smoke-20260804-postgres-data/entity.json",
+            "backup": "volume/servo-pipeline-latest-smoke-20260804-postgres-data/entity.json",
+            "beforeSha256": "faf84a8c9f6fb28b935d28b0e733713da3f873189f0931cffc7dd35096bea2b4",
+            "afterSha256": "57acff2939bb0cc521e11d784498439ab9a56a73f04f683c43c33d2d3adcdd50",
+            "backupSha256": "faf84a8c9f6fb28b935d28b0e733713da3f873189f0931cffc7dd35096bea2b4",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-latest-smoke-20260804-runner-workspace",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/servo-pipeline-latest-smoke-20260804-runner-workspace/entity.json",
+            "backup": "volume/servo-pipeline-latest-smoke-20260804-runner-workspace/entity.json",
+            "beforeSha256": "79b1ac1b4fcb5b058eb5ce7476d2df2ad28c183bf31bf39aed3e6fda8ae0cd92",
+            "afterSha256": "27650365a3f1958cb11dd98ab3816cdd90261cbb7341c16bcc25bc3c90a5e057",
+            "backupSha256": "79b1ac1b4fcb5b058eb5ce7476d2df2ad28c183bf31bf39aed3e6fda8ae0cd92",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-smoke-20260804-github-app-key",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/servo-pipeline-smoke-20260804-github-app-key/entity.json",
+            "backup": "volume/servo-pipeline-smoke-20260804-github-app-key/entity.json",
+            "beforeSha256": "3fa8298f954d1772e9256c9c083fa8d48f97c274966bdaebb5f3a51c576938a5",
+            "afterSha256": "ebf1d9f8e682e4b2b3dfa7d737067fbac8f11817b86e2cc11e2bda204e9962d5",
+            "backupSha256": "3fa8298f954d1772e9256c9c083fa8d48f97c274966bdaebb5f3a51c576938a5",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-smoke-20260804-postgres-data",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/servo-pipeline-smoke-20260804-postgres-data/entity.json",
+            "backup": "volume/servo-pipeline-smoke-20260804-postgres-data/entity.json",
+            "beforeSha256": "2c1ba5f6818d0a50b8b649f940616c9d5a98cb03cecc0599e10fc7cc273ca2f5",
+            "afterSha256": "51832ef7676f5230a09f27c540892e6fc83ff9da12f4b2d34892550a48f7d004",
+            "backupSha256": "2c1ba5f6818d0a50b8b649f940616c9d5a98cb03cecc0599e10fc7cc273ca2f5",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-smoke-20260804-runner-workspace",
+        "stage": "retire",
+        "classBefore": "dual",
+        "classAfter": "current-only",
+        "changedKeys": [
+          "com.mrbaron3.workflow.agentopsctl"
+        ],
+        "beforeOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.workflow.agentopsctl": "v1"
+        },
+        "afterOwnershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        },
+        "files": [
+          {
+            "labelPath": [
+              "labels"
+            ],
+            "document": "volumes/servo-pipeline-smoke-20260804-runner-workspace/entity.json",
+            "backup": "volume/servo-pipeline-smoke-20260804-runner-workspace/entity.json",
+            "beforeSha256": "e29cb4388b5966f356547d032f310d3259787c608f42b0c4f76920aa199e80e8",
+            "afterSha256": "3fabad9d58048bf7442e221b583e421c7bbc1299cbd99f26410582e355aebee8",
+            "backupSha256": "e29cb4388b5966f356547d032f310d3259787c608f42b0c4f76920aa199e80e8",
+            "mode": 420,
+            "beforeOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1",
+              "com.mrbaron3.workflow.agentopsctl": "v1"
+            },
+            "afterOwnershipLabels": {
+              "com.mrbaron3.servo.agentopsctl": "v1"
+            }
+          }
+        ]
+      }
+    ],
+    "skipped": null,
+    "rolledBack": false,
+    "backupRootName": "retire-20260810T091556Z",
+    "verifiedByApi": true
+  },
+  "verifiedInventory": {
+    "records": [
+      {
+        "kind": "container",
+        "id": "agentops-ciso06-hardening-probe",
+        "class": "missing-label",
+        "state": "stopped",
+        "ownershipLabels": {}
+      },
+      {
+        "kind": "container",
+        "id": "agentops-control",
+        "class": "current-only",
+        "state": "stopped",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "control",
+          "com.mrbaron3.servo.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba"
+        }
+      },
+      {
+        "kind": "container",
+        "id": "agentops-github-broker",
+        "class": "current-only",
+        "state": "stopped",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "github-broker",
+          "com.mrbaron3.servo.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66"
+        }
+      },
+      {
+        "kind": "container",
+        "id": "agentops-postgres",
+        "class": "current-only",
+        "state": "stopped",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "postgres",
+          "com.mrbaron3.servo.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+        }
+      },
+      {
+        "kind": "container",
+        "id": "agentops-runner",
+        "class": "current-only",
+        "state": "stopped",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "runner",
+          "com.mrbaron3.servo.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
+        }
+      },
+      {
+        "kind": "container",
+        "id": "agentops-triage",
+        "class": "current-only",
+        "state": "stopped",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "triage",
+          "com.mrbaron3.servo.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c"
+        }
+      },
+      {
+        "kind": "container",
+        "id": "buildkit",
+        "class": "missing-label",
+        "state": "stopped",
+        "ownershipLabels": {}
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso06-comp-internal",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso06-final-internal",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso06-smoke-internal",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "network",
+        "id": "agentops-ciso07-dogfood-internal",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "network",
+        "id": "agentops-internal",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "network",
+        "id": "default",
+        "class": "missing-label",
+        "ownershipLabels": {}
+      },
+      {
+        "kind": "network",
+        "id": "servo-pipeline-latest-smoke-20260804-internal",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "network",
+        "id": "servo-pipeline-smoke-20260804-internal",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-comp-postgres-data",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-comp-runner-workspace",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-final-postgres-data",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-final-runner-workspace",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-smoke-postgres-data",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso06-smoke-runner-workspace",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-dogfood-postgres-data",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-dogfood-runner-credentials",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-dogfood-runner-workspace",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-ciso07-trivy-cache",
+        "class": "missing-label",
+        "ownershipLabels": {}
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-github-app-key",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-postgres-data",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-postgres16-backup-20260805",
+        "class": "missing-label",
+        "ownershipLabels": {}
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-postgres18-restore-20260805",
+        "class": "missing-label",
+        "ownershipLabels": {}
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-runner-credentials",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-runner-workspace",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "agentops-triage-credentials",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-latest-smoke-20260804-github-app-key",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-latest-smoke-20260804-postgres-data",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-latest-smoke-20260804-runner-workspace",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-smoke-20260804-github-app-key",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-smoke-20260804-postgres-data",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      },
+      {
+        "kind": "volume",
+        "id": "servo-pipeline-smoke-20260804-runner-workspace",
+        "class": "current-only",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1"
+        }
+      }
+    ],
+    "totals": {
+      "current-only": 32,
+      "missing-label": 6
+    },
+    "byKind": {
+      "container": 7,
+      "network": 8,
+      "volume": 23
+    },
+    "managed": {
+      "container": 5,
+      "network": 7,
+      "volume": 20
+    },
+    "legacyOnly": null
+  }
+}
