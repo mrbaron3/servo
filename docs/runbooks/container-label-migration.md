@@ -31,9 +31,11 @@ label key の正典は `apps/control-plane/internal/lifecycle/ownership.go` **1 
 | --- | --- | --- |
 | **P1 dual label**（本 PR で実装済み） | なし | 新規作成 resource が新旧両 label を持ち、reader が上表 6 分類を明示し、旧 binary へ戻しても発見できることを grounded に確認済み |
 | **P2 旧 container 掃討**（本 PR で実装済み） | P1 が merge 済みで、稼働 host の inventory が取れている | old-only container が 0 件、移行・skip・conflict・block の bounded audit が残り、Apple Container 上で drain/recreate と volume detach/attach、restart 整合、rollback を grounded に確認済み |
-| **P3 新 label のみ**（未実装） | P2 の gate を満たし、dual label 観測窓で ownership／attachment の回帰が無い | 旧 write 停止 → 旧 read 削除の順で別々に review・merge され、全 managed container の新 label ownership が証明済み |
+| **P3A 旧 write 停止＋obsolete label 掃討**（本 PR で実装済み） | P2 の gate を満たし、dual label 観測窓で ownership／attachment の回帰が無い | 新規作成 resource が `current-only` になり、reader は 6 分類を保ったまま、全 managed container / volume / network が `current-only` へ移行済み |
+| **P3B 旧 read 削除**（未実装） | P3A が merge 済みで、host に `legacy-only` が 0 件 | 旧 namespace の read が消え、reader が `com.mrbaron3.servo.*` だけを見る |
 
 **P1 から P3 へ直接飛ばない。** 旧 write と旧 read は同じ PR で消さない（write を先に止める）。
+**P3A と P3B も同じ PR にしない。** write 停止と掃討が終わって初めて read を消せる。
 
 ## Inventory command
 
@@ -278,6 +280,130 @@ Apple Container の container は**再利用可能な名前**で識別され、�
 
 **sweep 実行中に別の actor が同じ host の managed resource を触らないこと**は依然として前提である。
 
+## Phase 3A: 旧 write の停止と obsolete label の掃討
+
+### 何が変わったか
+
+- **writer は新 namespace だけを書く**（`ownership.go` の `ownershipLabelArgs`）。以後 `agentopsctl` が
+  作る container / network / volume は `current-only` になる。
+- **reader は 6 分類のまま**である。host にはまだ移行前の resource が居るし、P1/P2 の binary は
+  どちらの namespace も読むので **P2 binary への rollback は引き続き安全**である。
+  失われるのは **P1 より前の binary へ戻す道**だけで、これは意図した片道である。
+- 旧 namespace の **read 削除は P3B**（別 PR）。
+
+### なぜ metadata を直接書くのか
+
+**Apple Container 1.1.0 には既存 resource の label を変更する route が無い。** CLI に update/relabel が
+無いだけでなく、apiserver の XPC route は `volumeCreate` / `volumeDelete` / `volumeInspect` /
+`volumeList` / `networkCreate` / `networkDelete` / `networkList` が全てであり、公開されている
+`ClientVolume` も `create` / `delete` / `list` / `inspect` / `volumeDiskUsage` しか持たない。
+
+container は P2 のように作り直せる。しかし **volume を作り直すことは data 破棄そのもの**であり、
+network も P3A では削除しない。したがって残る手段は **service を止めて Apple Container 自身の
+metadata document を書き換えること**だけである。これは特権的な操作なので、専用 subcommand
+`migrate-label-metadata` に閉じ込め、下記の gate を全部通らないと 1 byte も書かない。
+
+### 書き換える document
+
+| 種別 | document | label の位置 | 備考 |
+| --- | --- | --- | --- |
+| volume | `volumes/<name>/entity.json` | `labels` | `volume.img` には触れない |
+| network | `networks/<name>/entity.json` | `labels` | |
+| container | `containers/<id>/runtime-configuration.json` | `containerConfiguration.labels` | 常に存在する |
+| container | `containers/<id>/config.json` | `labels` | **一度でも start した container だけ**に存在し、**listing はこちらを優先する** |
+
+**container の document は 1 つとは限らない。** 未 start の container は
+`runtime-configuration.json` しか持たず、start 済みは両方持つ。片方だけ書くと
+「listing は変わったのに片割れが旧 label のまま」または「書いたのに listing が変わらない」に
+なるので、**存在する document を全部書き、全部が一致していることを事前に要求する**。
+
+### 安全装置
+
+`migrate-label-metadata` は次を全部通らなければ実行されない。
+
+- **appRoot は `container system status` から取る**（hardcode しない）。version は
+  CLI・apiserver とも **`1.1.0` の exact allowlist**。layout は公開契約ではないので、
+  未知 version は「止まって layout を人が見直す」が正しい。
+- **対象は operator が書いた exact id だけ**（`kind/identity`）。重複・不在・path 区切りを含む
+  identity は拒否する。broad selector は無い。
+- **symlink 拒否**: document 本体と親 directory を lstat し、appRoot からの各 component も検査する。
+- **regular file / owner / mode 検査**: 現在の user 所有で、group・other から書けない regular file だけ。
+- **round-trip guard**: parse した document を書き戻して **元の byte と完全一致すること**を先に証明する。
+  再現できない document は「この tool が理解できていない」ので**書かずに拒否する**。
+  これにより、完了後の diff は **labels field 以外に出ない**。
+- **ownership pair 検査**: `conflicting`・片側だけ書かれた pair・`unmanaged`・`missing-label` は拒否。
+- **service 停止の二重証明**: `container system status` が落ちること **かつ** data plane 呼び出しが
+  失敗すること。片方だけでは半分生きた runtime を通してしまう。
+- **running managed container が 1 つでもあれば実行しない。**
+- **before/after hash・O_EXCL backup・同一 directory の temp file・mode/owner 保持・
+  fsync → atomic rename → directory fsync。**
+- **事後は runtime の API で検証する。** 自分が書いた file を読み返しても「writer が自分と一致した」
+  ことしか言えない。意味があるのは Apple Container が何を報告するかである。
+
+### 手順
+
+```sh
+# 1. read-only の plan。host は変わらない。全 managed resource の分類と対象 document が出る。
+agentopsctl migrate-label-metadata --stage prepare
+
+# 2. prepare: legacy-only の volume/network に current pair を足して dual にする。
+agentopsctl migrate-label-metadata --stage prepare --apply \
+  --only volume/agentops-postgres-data,network/agentops-internal,... \
+  --backup-dir <dir> --evidence-dir evidence/label-p3a
+
+# 3. 全 managed resource が dual / current-only になったことを確認する。
+agentopsctl migrate-label-metadata --stage retire
+
+# 4. retire: legacy pair を落として current-only にする。
+agentopsctl migrate-label-metadata --stage retire --apply --only <...> \
+  --backup-dir <dir> --evidence-dir evidence/label-p3a
+
+# 5. rollback が要るとき（applied-*.json を渡す）
+agentopsctl migrate-label-metadata --rollback evidence/label-p3a/applied-retire-<stamp>.json
+```
+
+**`--stage retire` は、host のどこかに `legacy-only` が残っている限り拒否される。** 対象を絞っても
+拒否される――「そこだけ安全」ではなく「全体として旧 label が冗長になった」ことが retire の条件だからである。
+
+### rollback の 2 つの mode
+
+**Apple Container は `container system start` のたびに `volumes/*/entity.json` を書き直す。**
+値は同じだが key 順が変わる（Foundation の dictionary 順は run 間で安定しない）。network の
+entity.json は書き直されない。したがって:
+
+- **`bytes`** — document が sweep の書いた通りなら、backup の byte を丸ごと戻す。
+- **`relabelled`** — runtime が再直列化していた場合。**labels 以外の全 field が値として一致すること**と
+  **labels が sweep の書いた通りであること**を証明したうえで、現在の document に移行前 labels を書き戻す。
+  古い byte を被せると、その後 runtime が記録した内容を巻き戻してしまうためこうする。
+- それ以外（labels 以外が変わっている等）は **拒否する**。rollback という名前の未 review な mutation を
+  しないためである。
+
+さらに、**sweep 後に生まれた document** も rollback は面倒を見る。container を start すると
+runtime が in-memory model から `config.json` を作るので、記録済み document だけ戻すと
+「片方だけ戻った container」になる。そこで rollback は、既知 document のうち記録に無いものが
+現れていたら、**その labels が sweep の書いたものと完全一致することを確認したうえで**移行前 labels を
+書き込む（`reconciled` に記録される）。一致しなければ拒否する。
+
+### grounded 検証
+
+```sh
+AGENTOPS_TEST_APPLE_CONTAINER=1 \
+AGENTOPS_TEST_APPLE_IMAGE=<shell を持つ image。例 agentops-postgres:dev> \
+go test ./apps/control-plane/internal/lifecycle/ -run AppleContainerMetadata -v -count=1
+```
+
+固有 prefix の使い捨て container / volume / network を作り、volume に sentinel を書いてから
+system stop → prepare → start → retire → start → **volume.img の size と mtime が sweep を跨いで
+不変であること** → sentinel が読めること → container が start/stop できること →
+rollback（dual へ）→ reapply（current-only へ）→ 旧 namespace の残渣 0 を確認し、最後に全て削除する。
+image は `/bin/sh` を持つ必要がある（`--entrypoint` で override する）。
+
+### P3A でやらないこと
+
+- 旧 namespace の **read 削除**（P3B）。
+- container / network / volume の **削除・再作成**。P3A は 1 つも消さない。
+- `unmanaged` / `missing-label` の resource への操作。**件数を減らそうとしない。**
+
 ## P3 の entry gate
 
 次を**すべて**満たすまで P3 へ進まない。
@@ -287,11 +413,20 @@ Apple Container の container は**再利用可能な名前**で識別され、�
   移行直後・restart/reconcile 後・窓の終了時。
 - grounded Apple Container で drain/recreate、排他 volume の detach/attach、restart 整合、
   旧 binary reader へ戻せる rollback predicate が確認済み。
-- **未解決の残課題**: managed な **volume / network は依然 `legacy-only`** である。P2 は
-  container だけを移行する（volume の label を直すには volume を作り直す必要があり、それは
-  data 破棄そのものだから）。P3 が旧 namespace の **read** を消すと、これらは `missing-label`＝
-  非所有に落ち、`EnsureVolume` / `EnsureNetwork` が自分の resource を拒否する。**P3 は
-  「旧 read の削除」の前に volume/network の移行方式を決めなければならない。**
+- ~~**未解決の残課題**: managed な volume / network は依然 `legacy-only` である~~
+  **P3A で解決済み。** `migrate-label-metadata` が service を止めて Apple Container の
+  metadata document を書き換えることで、volume を 1 つも削除せずに
+  `legacy-only` → `dual` → `current-only` を通す。上記「Phase 3A」節を見る。
+
+### P3B の entry gate
+
+P3B（旧 read の削除）へ進む条件は次のとおり。
+
+- `agentopsctl migrate-label-metadata --stage retire` の plan で、**host の `legacy-only` が 0 件**。
+  container だけでなく **volume と network も 0 件**であること。
+- P3A の掃討後に **20 分以上・3 サンプル以上**の観測窓で ownership／attachment の回帰が 0 件。
+- 旧 read を消しても `EnsureVolume` / `EnsureNetwork` が自分の resource を所有と読めること
+  （＝全 managed resource が `current-only`）。
 
 ## grounded 検証の実行
 

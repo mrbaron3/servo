@@ -8,14 +8,20 @@ import (
 )
 
 // The cases below pin the ownership contract that Issue #123 migrates from
-// `com.mrbaron3.workflow.*` to `com.mrbaron3.servo.*`. They must keep passing
-// after the dual-label change: a rollback to the pre-migration binary reads
-// only the legacy namespace, so every resource this binary creates has to stay
-// discoverable through the legacy keys alone.
+// `com.mrbaron3.workflow.*` to `com.mrbaron3.servo.*`.
+//
+// Phase 3A stops writing the legacy namespace: a resource this binary creates
+// now carries `com.mrbaron3.servo.*` alone. The reader is deliberately left
+// dual, which is what keeps the change reversible. Rolling back to the Phase 1
+// or Phase 2 binary is safe because both read either namespace and therefore
+// still discover a current-only resource; rolling back past Phase 1, to a
+// binary that reads the legacy keys only, is not, and that is the boundary this
+// phase knowingly crosses once its sweep has moved every managed resource
+// forward.
 
 const legacyManagedLabel = "com.mrbaron3.workflow.agentopsctl"
 
-func TestRunArgsKeepLegacyOwnershipAndRoleLabelsForRollback(t *testing.T) {
+func TestRunArgsWriteOnlyTheCurrentNamespace(t *testing.T) {
 	args, _, err := buildContainerArgs(ContainerSpec{
 		Name: "agentops-runner", Role: "runner", Image: "runner:test",
 		Networks: []string{"agentops-internal"}, Detach: true,
@@ -26,45 +32,63 @@ func TestRunArgsKeepLegacyOwnershipAndRoleLabelsForRollback(t *testing.T) {
 	}
 	rendered := strings.Join(args, " ")
 	for _, expected := range []string{
-		"--label com.mrbaron3.workflow.agentopsctl=v1",
-		"--label com.mrbaron3.workflow.role=runner",
-		"--label com.mrbaron3.workflow.spec-sha256=" + strings.Repeat("a", 64),
+		"--label com.mrbaron3.servo.agentopsctl=v1",
+		"--label com.mrbaron3.servo.role=runner",
+		"--label com.mrbaron3.servo.spec-sha256=" + strings.Repeat("a", 64),
 	} {
 		if !strings.Contains(rendered, expected) {
-			t.Fatalf("legacy label %q is absent from %s", expected, rendered)
+			t.Fatalf("current label %q is absent from %s", expected, rendered)
 		}
+	}
+	// The legacy namespace must not appear at all. Checking the prefix rather
+	// than the three exact keys means a fourth ownership label added later
+	// cannot reintroduce the namespace unnoticed.
+	if strings.Contains(rendered, LegacyLabelNamespace) {
+		t.Fatalf(
+			"Phase 3A still writes the legacy namespace: %s", rendered,
+		)
 	}
 }
 
-func TestEnsureNetworkAndVolumeKeepLegacyOwnershipLabelOnCreate(t *testing.T) {
-	network := &fakeRuntimeRunner{results: []CommandResult{{Status: 0, Stdout: `[]`}}}
-	if err := NewAppleRuntimeForTest(network).EnsureNetwork(
-		context.Background(),
-		"agentops-internal",
-	); err != nil {
-		t.Fatal(err)
-	}
-	if len(network.args) != 2 ||
-		!strings.Contains(
-			strings.Join(network.args[1], " "),
-			"--label com.mrbaron3.workflow.agentopsctl=v1",
-		) {
-		t.Fatalf("network create lost the legacy ownership label: %#v", network.args)
-	}
-
-	volume := &fakeRuntimeRunner{results: []CommandResult{{Status: 0, Stdout: `[]`}}}
-	if err := NewAppleRuntimeForTest(volume).EnsureVolume(
-		context.Background(),
-		"agentops-postgres-data",
-	); err != nil {
-		t.Fatal(err)
-	}
-	if len(volume.args) != 2 ||
-		!strings.Contains(
-			strings.Join(volume.args[1], " "),
-			"--label com.mrbaron3.workflow.agentopsctl=v1",
-		) {
-		t.Fatalf("volume create lost the legacy ownership label: %#v", volume.args)
+func TestEnsureNetworkAndVolumeWriteOnlyTheCurrentNamespaceOnCreate(t *testing.T) {
+	for name, ensure := range map[string]func(*AppleRuntime) error{
+		"network": func(runtime *AppleRuntime) error {
+			return runtime.EnsureNetwork(
+				context.Background(), "agentops-internal",
+			)
+		},
+		"volume": func(runtime *AppleRuntime) error {
+			return runtime.EnsureVolume(
+				context.Background(), "agentops-postgres-data",
+			)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := &fakeRuntimeRunner{
+				results: []CommandResult{{Status: 0, Stdout: `[]`}},
+			}
+			if err := ensure(NewAppleRuntimeForTest(runner)); err != nil {
+				t.Fatal(err)
+			}
+			if len(runner.args) != 2 {
+				t.Fatalf("unexpected %s commands: %#v", name, runner.args)
+			}
+			rendered := strings.Join(runner.args[1], " ")
+			if !strings.Contains(
+				rendered, "--label com.mrbaron3.servo.agentopsctl=v1",
+			) {
+				t.Fatalf(
+					"%s create lost the current ownership label: %s",
+					name, rendered,
+				)
+			}
+			if strings.Contains(rendered, LegacyLabelNamespace) {
+				t.Fatalf(
+					"%s create still writes the legacy namespace: %s",
+					name, rendered,
+				)
+			}
+		})
 	}
 }
 
@@ -349,7 +373,7 @@ func TestReadDualLabelResolvesRoleAndSpecPairs(t *testing.T) {
 	}
 }
 
-func TestRunArgsDualWriteEveryOwnershipLabel(t *testing.T) {
+func TestRunArgsWriteEveryOwnershipLabelInTheCurrentNamespace(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	args, _, err := buildContainerArgs(ContainerSpec{
 		Name: "agentops-runner", Role: "runner", Image: "runner:test",
@@ -361,21 +385,36 @@ func TestRunArgsDualWriteEveryOwnershipLabel(t *testing.T) {
 	}
 	rendered := strings.Join(args, " ")
 	for _, expected := range []string{
-		"--label " + LegacyManagedLabelKey + "=v1",
 		"--label " + CurrentManagedLabelKey + "=v1",
-		"--label " + LegacyRoleLabelKey + "=runner",
 		"--label " + CurrentRoleLabelKey + "=runner",
-		"--label " + LegacySpecLabelKey + "=" + digest,
 		"--label " + CurrentSpecLabelKey + "=" + digest,
 	} {
 		if !strings.Contains(rendered, expected) {
-			t.Fatalf("dual-written label %q is absent from %s", expected, rendered)
+			t.Fatalf("label %q is absent from %s", expected, rendered)
 		}
 	}
-	// A container created here must classify as dual for both the writer and
-	// every reader, otherwise Phase 2's inventory would see a partial state.
-	if class := ClassifyOwnership(labelsFromArgs(args)); class != OwnershipDual {
+	for _, forbidden := range []string{
+		LegacyManagedLabelKey, LegacyRoleLabelKey, LegacySpecLabelKey,
+	} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("legacy label %q is still written: %s", forbidden, rendered)
+		}
+	}
+	// A container created here classifies as current-only, which every reader
+	// in this phase still treats as owned. That equivalence is the entire
+	// reason the writer may move before the reader.
+	labels := labelsFromArgs(args)
+	if class := ClassifyOwnership(labels); class != OwnershipCurrentOnly {
 		t.Fatalf("newly created container classifies as %q", class)
+	}
+	if err := RequireManaged("container", labels); err != nil {
+		t.Fatalf("a container this binary just created is not managed: %v", err)
+	}
+	if err := RequireRole("container", "runner", labels); err != nil {
+		t.Fatalf("role label unreadable after the writer change: %v", err)
+	}
+	if err := RequireSpecDigest("container", digest, labels); err != nil {
+		t.Fatalf("spec label unreadable after the writer change: %v", err)
 	}
 }
 
@@ -393,7 +432,7 @@ func labelsFromArgs(args []string) map[string]string {
 	return labels
 }
 
-func TestEnsureNetworkAndVolumeDualWriteAndReadEitherNamespace(t *testing.T) {
+func TestEnsureNetworkAndVolumeCreateCurrentOnlyAndReadEitherNamespace(t *testing.T) {
 	network := &fakeRuntimeRunner{results: []CommandResult{{Status: 0, Stdout: `[]`}}}
 	if err := NewAppleRuntimeForTest(network).EnsureNetwork(
 		context.Background(),
@@ -406,7 +445,7 @@ func TestEnsureNetworkAndVolumeDualWriteAndReadEitherNamespace(t *testing.T) {
 	}
 	if class := ClassifyOwnership(
 		labelsFromArgs(network.args[1]),
-	); class != OwnershipDual {
+	); class != OwnershipCurrentOnly {
 		t.Fatalf("created network classifies as %q", class)
 	}
 	if network.args[1][len(network.args[1])-1] != "agentops-internal" {
@@ -425,11 +464,70 @@ func TestEnsureNetworkAndVolumeDualWriteAndReadEitherNamespace(t *testing.T) {
 	}
 	if class := ClassifyOwnership(
 		labelsFromArgs(volume.args[1]),
-	); class != OwnershipDual {
+	); class != OwnershipCurrentOnly {
 		t.Fatalf("created volume classifies as %q", class)
 	}
 	if volume.args[1][len(volume.args[1])-1] != "agentops-postgres-data" {
 		t.Fatalf("volume name is no longer the final argument: %#v", volume.args[1])
+	}
+}
+
+// TestReadersStillAcceptEveryLegacyShape is the other half of Phase 3A. The
+// writer moved; the reader must not, because the host is full of resources the
+// sweep has not reached yet and because a Phase 2 binary has to remain a valid
+// rollback target.
+func TestReadersStillAcceptEveryLegacyShape(t *testing.T) {
+	digest := strings.Repeat("b", 64)
+	for name, testCase := range map[string]struct {
+		labels map[string]string
+		class  OwnershipClass
+	}{
+		"legacy-only": {
+			labels: map[string]string{
+				LegacyManagedLabelKey: "v1",
+				LegacyRoleLabelKey:    "runner",
+				LegacySpecLabelKey:    digest,
+			},
+			class: OwnershipLegacyOnly,
+		},
+		"dual": {
+			labels: map[string]string{
+				LegacyManagedLabelKey:  "v1",
+				CurrentManagedLabelKey: "v1",
+				LegacyRoleLabelKey:     "runner",
+				CurrentRoleLabelKey:    "runner",
+				LegacySpecLabelKey:     digest,
+				CurrentSpecLabelKey:    digest,
+			},
+			class: OwnershipDual,
+		},
+		"current-only": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v1",
+				CurrentRoleLabelKey:    "runner",
+				CurrentSpecLabelKey:    digest,
+			},
+			class: OwnershipCurrentOnly,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class := ClassifyOwnership(testCase.labels); class != testCase.class {
+				t.Fatalf("classified %q, want %q", class, testCase.class)
+			}
+			if err := RequireManaged("resource", testCase.labels); err != nil {
+				t.Fatalf("reader stopped owning a %s resource: %v", name, err)
+			}
+			if err := RequireRole(
+				"resource", "runner", testCase.labels,
+			); err != nil {
+				t.Fatalf("role unreadable for %s: %v", name, err)
+			}
+			if err := RequireSpecDigest(
+				"resource", digest, testCase.labels,
+			); err != nil {
+				t.Fatalf("spec digest unreadable for %s: %v", name, err)
+			}
+		})
 	}
 }
 

@@ -323,24 +323,26 @@ func TestRebuiltSpecPreservesObservedConfigurationAndDualWrites(t *testing.T) {
 		"postgres://u:secret@db/x" {
 		t.Fatalf("environment was not carried onto the replacement")
 	}
-	// The replacement must be discoverable by the pre-migration binary, which
-	// reads the legacy namespace only, and by the current one.
+	// From Phase 3A the replacement carries the current namespace only. It stays
+	// discoverable by this binary and by the Phase 1 and Phase 2 binaries, all
+	// of which read either namespace; a pre-migration binary is no longer a
+	// rollback target, which is the step this phase takes deliberately.
 	args, _, err := buildContainerArgs(spec)
 	if err != nil {
 		t.Fatalf("rebuilt spec is not runnable: %v", err)
 	}
 	rendered := strings.Join(args, " ")
 	for _, want := range []string{
-		"--label com.mrbaron3.workflow.agentopsctl=v1",
 		"--label com.mrbaron3.servo.agentopsctl=v1",
-		"--label com.mrbaron3.workflow.role=runner",
 		"--label com.mrbaron3.servo.role=runner",
-		"--label com.mrbaron3.workflow.spec-sha256=" + fixtureSpecDigest,
 		"--label com.mrbaron3.servo.spec-sha256=" + fixtureSpecDigest,
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("replacement argv is missing %q: %s", want, rendered)
 		}
+	}
+	if strings.Contains(rendered, LegacyLabelNamespace) {
+		t.Fatalf("replacement argv still writes the legacy namespace: %s", rendered)
 	}
 	// Secret values reach the child process environment, never argv.
 	if strings.Contains(rendered, "postgres://u:secret@db/x") {

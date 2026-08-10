@@ -540,16 +540,18 @@ func TestSweepRecreatesAStoppedContainerWithoutStartingIt(t *testing.T) {
 			t.Fatalf("planned replacement leaked an environment value: %q", key)
 		}
 	}
-	// The replacement carries both namespaces, so the pre-migration binary can
-	// still discover it.
+	// From Phase 3A the replacement carries the current namespace only, which
+	// every reader in this phase still treats as owned.
 	args, _, err := containerArgs("create", runtime.createdSpec[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	rendered := strings.Join(args, " ")
-	if !strings.Contains(rendered, LegacyManagedLabelKey+"=v1") ||
-		!strings.Contains(rendered, CurrentManagedLabelKey+"=v1") {
-		t.Fatalf("replacement is not dual-labeled: %s", rendered)
+	if !strings.Contains(rendered, CurrentManagedLabelKey+"=v1") {
+		t.Fatalf("replacement lost the current ownership label: %s", rendered)
+	}
+	if strings.Contains(rendered, LegacyLabelNamespace) {
+		t.Fatalf("replacement still writes the legacy namespace: %s", rendered)
 	}
 }
 

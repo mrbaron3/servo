@@ -88,7 +88,7 @@ func TestContainerSpecDigestBindsNonSecretEnvironmentWithoutCredentialFingerprin
 	}
 	if !strings.Contains(
 		strings.Join(args, " "),
-		"--label com.mrbaron3.workflow.spec-sha256="+digest,
+		"--label com.mrbaron3.servo.spec-sha256="+digest,
 	) {
 		t.Fatalf("spec digest label is absent: %v", args)
 	}

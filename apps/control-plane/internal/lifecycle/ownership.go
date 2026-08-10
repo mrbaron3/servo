@@ -271,22 +271,28 @@ func conflictingLabelError(subject, kind, legacyKey, currentKey string) error {
 	)
 }
 
-// dualLabelArgs renders the `--label` arguments that write one value into both
-// namespaces. Every managed resource is created through this helper so a
-// namespace can never be added to the writer on one path only.
-func dualLabelArgs(legacyKey, currentKey, value string) []string {
-	return []string{
-		"--label", legacyKey + "=" + value,
-		"--label", currentKey + "=" + value,
-	}
+// ownershipLabelArgs renders the `--label` arguments for one ownership label.
+//
+// Phase 3A writes the current namespace only. Phase 1 wrote both so that a
+// rollback to the pre-migration binary — which reads the legacy keys alone —
+// could still discover what this binary had created. That obligation ends here,
+// and it ends for a reason rather than for tidiness: as long as the writer keeps
+// emitting the legacy namespace, every newly created resource re-manufactures
+// exactly the state the sweep exists to remove, and the legacy keys can never
+// reach zero.
+//
+// The reader is deliberately left dual. Rolling back to the Phase 1 or Phase 2
+// binary stays safe because both accept either namespace; only a rollback past
+// Phase 1 is now unavailable, which is the boundary this phase knowingly
+// crosses. Phase 3B removes the legacy reader in its own reviewable change,
+// after this phase's sweep has proved every managed resource carries the
+// current namespace.
+func ownershipLabelArgs(currentKey, value string) []string {
+	return []string{"--label", currentKey + "=" + value}
 }
 
 // managedOwnershipLabelArgs renders the ownership marker written on every
 // container, network, and volume this binary creates.
 func managedOwnershipLabelArgs() []string {
-	return dualLabelArgs(
-		LegacyManagedLabelKey,
-		CurrentManagedLabelKey,
-		ManagedLabelValue,
-	)
+	return ownershipLabelArgs(CurrentManagedLabelKey, ManagedLabelValue)
 }

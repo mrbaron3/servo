@@ -289,6 +289,24 @@ func (runtime *AppleRuntime) Container(
 	return nil, nil
 }
 
+// Networks lists every network Apple Container knows about. It is read-only,
+// and Phase 3A's ownership inventory depends on it: a managed network still
+// carrying the legacy namespace alone would be read as unowned the moment the
+// legacy reader is removed.
+func (runtime *AppleRuntime) Networks(ctx context.Context) ([]Resource, error) {
+	result := runtime.runner.Run(
+		ctx, []string{"network", "list", "--format", "json"},
+	)
+	if result.Status != 0 {
+		return nil, runtimeError(result, nil)
+	}
+	var resources []Resource
+	if err := json.Unmarshal([]byte(result.Stdout), &resources); err != nil {
+		return nil, fmt.Errorf("parse Apple Container network list: %w", err)
+	}
+	return resources, nil
+}
+
 func (runtime *AppleRuntime) EnsureNetwork(
 	ctx context.Context,
 	name string,
@@ -296,13 +314,9 @@ func (runtime *AppleRuntime) EnsureNetwork(
 	if err := validateResourceName(name); err != nil {
 		return err
 	}
-	result := runtime.runner.Run(ctx, []string{"network", "list", "--format", "json"})
-	if result.Status != 0 {
-		return runtimeError(result, nil)
-	}
-	var resources []Resource
-	if err := json.Unmarshal([]byte(result.Stdout), &resources); err != nil {
-		return fmt.Errorf("parse Apple Container network list: %w", err)
+	resources, err := runtime.Networks(ctx)
+	if err != nil {
+		return err
 	}
 	for _, resource := range resources {
 		resourceName := resource.ID
@@ -697,17 +711,12 @@ func containerArgs(
 	}
 	args = append(args, "--name", spec.Name)
 	args = append(args, managedOwnershipLabelArgs()...)
-	args = append(args, dualLabelArgs(
-		LegacyRoleLabelKey,
-		CurrentRoleLabelKey,
-		spec.Role,
-	)...)
+	args = append(args, ownershipLabelArgs(CurrentRoleLabelKey, spec.Role)...)
 	if spec.SpecDigest != "" {
 		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(spec.SpecDigest) {
 			return nil, nil, fmt.Errorf("invalid container specification digest")
 		}
-		args = append(args, dualLabelArgs(
-			LegacySpecLabelKey,
+		args = append(args, ownershipLabelArgs(
 			CurrentSpecLabelKey,
 			spec.SpecDigest,
 		)...)
