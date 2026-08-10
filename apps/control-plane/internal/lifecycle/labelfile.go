@@ -301,12 +301,15 @@ func applyMetadataFile(
 		return nil, err
 	}
 
-	if err := writeThroughDirectory(
+	writeErr := writeThroughDirectory(
 		directory, filepath.Base(state.Ref.Path), updated,
 		current.Mode.Perm(), current.UID, current.GID,
-	); err != nil {
-		return nil, err
+	)
+	if writeErr != nil && !WriteLanded(writeErr) {
+		return nil, writeErr
 	}
+	// When the write landed but its durability is uncertain, the record is
+	// returned ALONGSIDE the error so the caller can unwind this document.
 	return &metadataFileApplication{
 		Path:            state.Ref.Path,
 		LabelPath:       state.Ref.LabelPath,
@@ -319,7 +322,7 @@ func applyMetadataFile(
 		AfterLabels:     labels,
 		BeforeOwnership: ownershipLabelSubset(state.Labels),
 		AfterOwnership:  ownershipLabelSubset(labels),
-	}, nil
+	}, writeErr
 }
 
 // writeBackup records the pre-migration bytes. O_EXCL rather than a truncating
@@ -418,9 +421,34 @@ func writeThroughDirectory(
 		directory.remove(temporaryName)
 		return err
 	}
-	// Without this the rename can still be lost to a crash even though the file
-	// contents were flushed.
-	return directory.sync()
+	// Past this point the replacement IS the file. A directory-sync failure
+	// means durability is uncertain, not that the rename did not happen, and
+	// reporting it as an ordinary failure would make the caller drop the record
+	// it needs to unwind — leaving a multi-document resource half-migrated with
+	// nothing to roll back from.
+	if err := directory.sync(); err != nil {
+		return errDurabilityUncertain{err: err}
+	}
+	return nil
+}
+
+// errDurabilityUncertain marks a write whose rename succeeded but whose
+// directory entry could not be flushed. The bytes on disk are the new ones.
+type errDurabilityUncertain struct{ err error }
+
+func (e errDurabilityUncertain) Error() string {
+	return "the replacement was written but its directory entry could not be " +
+		"flushed, so it may not survive a crash: " + e.err.Error()
+}
+
+func (e errDurabilityUncertain) Unwrap() error { return e.err }
+
+// WriteLanded reports whether an error came from a write that had already
+// replaced the destination. Callers use it to keep the record they need to
+// unwind rather than discarding it with the error.
+func WriteLanded(err error) bool {
+	var uncertain errDurabilityUncertain
+	return errors.As(err, &uncertain)
 }
 
 // temporaryFileName returns a name no concurrent run can collide with. The

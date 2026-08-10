@@ -193,3 +193,25 @@ func TestParseRollbackPlanRefusesAMismatchedPlan(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveBackupRootFollowsASymlinkedAncestorIntoAWorkTree(t *testing.T) {
+	// ~/.local/state symlinked into a dotfiles repository is an ordinary stow
+	// arrangement. A lexical walk over the un-resolved path would never see the
+	// checkout, and the credential-bearing backups would land inside it.
+	root := t.TempDir()
+	checkout := filepath.Join(root, "dotfiles")
+	if err := os.MkdirAll(filepath.Join(checkout, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(checkout, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "state")
+	if err := os.Symlink(filepath.Join(checkout, "state"), link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolveBackupRoot(filepath.Join(link, "agentops", "backups"))
+	if err == nil || !strings.Contains(err.Error(), "git work tree") {
+		t.Fatalf("expected a symlinked ancestor to be resolved and refused, got %v", err)
+	}
+}

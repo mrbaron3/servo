@@ -274,30 +274,6 @@ func printLabelMigrationAudit(audit lifecycle.MigrationAudit) {
 	}
 }
 
-func printSweepReport(report lifecycle.SweepReport) {
-	fmt.Println("sweep steps")
-	for _, step := range report.Steps {
-		fmt.Printf(
-			"  %-40s %-15s %-7s %s\n",
-			step.Container, step.Stage, step.Outcome, step.Detail,
-		)
-	}
-	if len(report.Volumes) > 0 {
-		fmt.Println("named volume preservation")
-		for _, record := range report.Volumes {
-			fmt.Printf(
-				"  %-50s before=%t after=%t\n",
-				record.Name, record.PresentBefore, record.PresentAfter,
-			)
-		}
-	}
-	if report.Halted != "" {
-		fmt.Printf("halted: %s\n", report.Halted)
-		return
-	}
-	printLabelMigrationAudit(report.After)
-}
-
 func sortedDispositions(
 	totals map[lifecycle.MigrationDisposition]int,
 ) []lifecycle.MigrationDisposition {

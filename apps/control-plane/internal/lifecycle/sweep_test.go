@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -173,9 +174,18 @@ func TestPlannedReplacementSchemaStillRoundTrips(t *testing.T) {
 		t.Fatalf("round trip lost fields: %#v", decoded)
 	}
 	// Environment VALUES were never part of this schema and must not become so.
-	if bytes := string(encoded); len(bytes) == 0 ||
-		containsString([]string{"environment"}, "environmentValues") {
-		t.Fatal("unexpected schema shape")
+	// The check is against the marshalled document: the schema carries keys
+	// only, so a value that reached it would appear here.
+	rendered := string(encoded)
+	if !strings.Contains(rendered, `"environmentKeys"`) {
+		t.Fatalf("the schema lost its environment key list: %s", rendered)
+	}
+	for _, forbidden := range []string{
+		"environmentValues", "\"environment\":", "postgres://",
+	} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("the schema now carries %q: %s", forbidden, rendered)
+		}
 	}
 }
 

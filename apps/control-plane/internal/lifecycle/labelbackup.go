@@ -56,7 +56,17 @@ func ResolveBackupRoot(explicit string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve backup root %s: %w", root, err)
 	}
-	if err := requireOutsideGitWorkTree(absolute); err != nil {
+	// filepath.Abs is lexical. Walking the un-resolved string upward would miss
+	// a symlinked ancestor pointing into a checkout — ~/.local/state symlinked
+	// into a dotfiles repository is an ordinary stow arrangement — and the
+	// git-work-tree refusal below would then pass while the backups land inside
+	// a repository after all. The deepest existing ancestor is resolved first so
+	// the walk happens over real directories.
+	resolved, err := resolveExistingAncestor(absolute)
+	if err != nil {
+		return "", err
+	}
+	if err := requireOutsideGitWorkTree(resolved); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
@@ -85,6 +95,30 @@ func ResolveBackupRoot(explicit string) (string, error) {
 		)
 	}
 	return absolute, nil
+}
+
+// resolveExistingAncestor resolves symlinks over the part of a path that
+// exists, then reattaches the components that do not exist yet. EvalSymlinks
+// alone fails on a path whose leaf has not been created.
+func resolveExistingAncestor(path string) (string, error) {
+	missing := make([]string, 0)
+	current := path
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf(
+				"no existing ancestor of %s could be resolved", path,
+			)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 // requireOutsideGitWorkTree refuses a path inside a repository checkout. It

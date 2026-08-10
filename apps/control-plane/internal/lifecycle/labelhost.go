@@ -127,11 +127,34 @@ func RequireServicesStopped(
 	ctx context.Context,
 	runner RuntimeRunner,
 ) error {
+	// The CLI itself has to work, or the two failures below prove nothing. A
+	// missing binary, a broken install, or a permission problem makes every
+	// command fail, and "everything failed" is not evidence that a service
+	// stopped — it is evidence that nothing can be asked.
+	version := runner.Run(ctx, []string{"--version"})
+	if version.Status != 0 {
+		return fmt.Errorf(
+			"the Apple Container CLI is not usable, so a failing `system " +
+				"status` proves nothing about whether the runtime is stopped",
+		)
+	}
 	status := runner.Run(ctx, []string{"system", "status"})
 	if status.Status == 0 {
 		return fmt.Errorf(
 			"Apple Container services are still running; the migration will " +
 				"not edit metadata underneath a live apiserver",
+		)
+	}
+	// A positive marker, not merely a nonzero exit: 1.1.0 reports the stopped
+	// apiserver in words, and requiring them distinguishes "stopped" from
+	// "the command failed for some other reason".
+	reported := strings.ToLower(status.Stdout + " " + status.Stderr)
+	if !strings.Contains(reported, "not running") &&
+		!strings.Contains(reported, "not registered") {
+		return fmt.Errorf(
+			"`container system status` failed without reporting the apiserver " +
+				"as stopped, so the runtime's state is unknown; resolve that " +
+				"before editing its metadata",
 		)
 	}
 	probe := runner.Run(ctx, []string{"volume", "list", "--format", "json"})

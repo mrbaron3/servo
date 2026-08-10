@@ -425,6 +425,10 @@ func applyMetadataStage(
 		if applied != nil {
 			applied.Document = relativeTo(appRoot, applied.Path)
 			applied.Backup = relativeTo(backupDirectory, applied.BackupPath)
+			// A write whose rename succeeded but whose directory entry could not
+			// be flushed HAS changed the document. Recording it before handling
+			// the error is what lets the unwind below put it back.
+			application.Files = append(application.Files, applied)
 		}
 		if err != nil {
 			// Unwind in reverse so the resource is left exactly as it was
@@ -439,7 +443,6 @@ func applyMetadataStage(
 			}
 			return nil, fmt.Errorf("%s %s: %w", target.Kind, target.ID, err)
 		}
-		application.Files = append(application.Files, applied)
 	}
 	return application, nil
 }
@@ -561,7 +564,14 @@ func preflightRestore(file *metadataFileApplication) error {
 		return nil
 	}
 	// Not either recorded shape: only an Apple Container re-serialisation is
-	// acceptable, and proving that is the same work restore does.
+	// acceptable, and proving that is the same work restore does — including
+	// the byte-stability guard. equalExceptLabels below is deliberately
+	// insensitive to key order and whitespace, so without this a non-compact
+	// document would pass preflight and then be refused by the restore, after
+	// earlier documents had already been written.
+	if err := requireByteStableRoundTrip(current, file.LabelPath); err != nil {
+		return fmt.Errorf("%s: %w", file.Document, err)
+	}
 	rewritten, err := rewriteLabels(backup, file.LabelPath, file.AfterLabels)
 	if err != nil {
 		return fmt.Errorf("%s: %w", file.Document, err)

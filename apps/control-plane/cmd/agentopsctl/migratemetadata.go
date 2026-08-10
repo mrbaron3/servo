@@ -91,6 +91,24 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 	}
 	runtime := lifecycle.NewAppleRuntime()
 	if strings.TrimSpace(*rollback) != "" {
+		// Rollback writes to the same documents as the forward path, so it has
+		// to clear the same gates: the exact version allowlist that makes this
+		// layout knowable at all, and the running-container check, which cannot
+		// be made once the services are stopped.
+		if _, err := runtime.ResolveMetadataHost(ctx); err != nil {
+			return err
+		}
+		inventory, err := lifecycle.TakeOwnershipInventory(ctx, runtime)
+		if err != nil {
+			return err
+		}
+		if running := inventory.RunningManagedContainers(); len(running) > 0 {
+			return fmt.Errorf(
+				"%d managed container(s) are not stopped (%s); stop them before "+
+					"rolling back runtime metadata",
+				len(running), strings.Join(running, ", "),
+			)
+		}
 		return runMetadataRollback(ctx, runtime, *rollback)
 	}
 
@@ -232,6 +250,16 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 						"  agentopsctl migrate-label-metadata --rollback %s\n",
 					len(report.Applied), lifecycle.RollbackPlanPath(backupRoot),
 				)
+				if report.PlanStaleAfter != "" {
+					fmt.Fprintf(
+						os.Stderr,
+						"WARNING: the rollback plan could NOT be updated for %s. "+
+							"That resource is migrated and the plan does not "+
+							"describe it; its backup is under %s and must be "+
+							"restored by hand.\n",
+						report.PlanStaleAfter, backupRoot,
+					)
+				}
 			}
 		}
 		return applyErr

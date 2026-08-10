@@ -80,6 +80,7 @@ func TestResolveMetadataHostRequiresRunningServices(t *testing.T) {
 
 func TestRequireServicesStoppedNeedsTwoSignals(t *testing.T) {
 	stopped := []CommandResult{
+		{Status: 0, Stdout: cliVersionOutput},
 		{Status: 1, Stdout: "apiserver is not running and not registered with launchd"},
 		{Status: 1, Stderr: "cannot connect"},
 	}
@@ -91,12 +92,27 @@ func TestRequireServicesStoppedNeedsTwoSignals(t *testing.T) {
 
 	for name, results := range map[string][]CommandResult{
 		"status still succeeds": {
+			{Status: 0, Stdout: cliVersionOutput},
 			{Status: 0, Stdout: runningStatusOutput},
 			{Status: 1},
 		},
 		"data plane still answers": {
+			{Status: 0, Stdout: cliVersionOutput},
 			{Status: 1, Stdout: "apiserver is not running"},
 			{Status: 0, Stdout: `[]`},
+		},
+		// Two failures are not proof of a stopped service. A broken or missing
+		// CLI makes every command fail, and "nothing can be asked" must not be
+		// read as "the runtime confirmed it is down".
+		"the CLI itself is unusable": {
+			{Status: 127, Stderr: "command not found"},
+			{Status: 127},
+			{Status: 127},
+		},
+		"status failed without saying why": {
+			{Status: 0, Stdout: cliVersionOutput},
+			{Status: 2, Stderr: "permission denied"},
+			{Status: 2},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

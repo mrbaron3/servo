@@ -349,6 +349,10 @@ type MetadataSweepReport struct {
 	// name so a reader can find it without the file naming the operator's home.
 	BackupRoot     string `json:"-"`
 	BackupRootName string `json:"backupRootName"`
+	// PlanStaleAfter names the resource that was migrated when the rollback plan
+	// could not be rewritten. While it is set, the plan on disk covers strictly
+	// less than what the run changed.
+	PlanStaleAfter string `json:"planStaleAfter,omitempty"`
 	VerifiedByAPI  bool   `json:"verifiedByApi"`
 }
 
@@ -415,8 +419,17 @@ func ApplyMetadataSweep(
 		// only artifact that can undo them — the committed evidence cannot,
 		// because it deliberately omits the absolute paths.
 		if err := PersistRollbackPlan(backupRoot, report); err != nil {
-			report.Halted = redactRoots(err.Error(), host.AppRoot, backupRoot)
-			return report, err
+			// The resource is already rewritten and the plan on disk does not
+			// mention it. Saying so precisely is the whole value of the message:
+			// an operator told only "the plan failed" cannot tell which resource
+			// the plan no longer covers.
+			report.PlanStaleAfter = reference.String()
+			report.Halted = redactRoots(fmt.Sprintf(
+				"%s was migrated but the rollback plan could not be updated, so "+
+					"the plan on disk does not describe it: %v",
+				reference, err,
+			), host.AppRoot, backupRoot)
+			return report, fmt.Errorf("%s: %w", report.Halted, err)
 		}
 	}
 	return report, nil
