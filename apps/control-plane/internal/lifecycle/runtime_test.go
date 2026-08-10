@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -87,7 +88,7 @@ func TestContainerSpecDigestBindsNonSecretEnvironmentWithoutCredentialFingerprin
 	}
 	if !strings.Contains(
 		strings.Join(args, " "),
-		"--label com.mrbaron3.workflow.spec-sha256="+digest,
+		"--label com.mrbaron3.servo.spec-sha256="+digest,
 	) {
 		t.Fatalf("spec digest label is absent: %v", args)
 	}
@@ -139,6 +140,78 @@ func TestImageDigestParsesImmutableDescriptor(t *testing.T) {
 	digest, err := runtime.ImageDigest(context.Background(), "control:test")
 	if err != nil || digest != "sha256:"+strings.Repeat("a", 64) {
 		t.Fatalf("ImageDigest() = %q, %v", digest, err)
+	}
+}
+
+// The environment subtraction is only as good as this parser, and it returns an
+// empty set on any shape it does not recognize — which would silently disable
+// the subtraction rather than fail. The payload here is the shape Apple
+// Container 1.1.0 actually emits.
+func TestImageEnvironmentParsesTheRealInspectShape(t *testing.T) {
+	fake := &fakeRuntimeRunner{results: []CommandResult{{
+		Status: 0,
+		Stdout: `[{"id":"agentops-control:dev","variants":[{"config":{"config":{
+			"Env":["PATH=/usr/local/bin:/usr/bin","HOME=/home/nonroot",
+			"AGENTOPS_APP_ROOT=/app"],
+			"Entrypoint":["node","dist/src/runner/cli.js"],
+			"WorkingDir":"/app","User":"agentops"}}}]}]`,
+	}}}
+	runtime := NewAppleRuntimeForTest(fake)
+	image, err := runtime.ImageConfiguration(
+		context.Background(), "agentops-control:dev",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.Environment) != 3 ||
+		image.Environment[0] != "PATH=/usr/local/bin:/usr/bin" ||
+		image.Environment[2] != "AGENTOPS_APP_ROOT=/app" {
+		t.Fatalf("image environment = %#v", image.Environment)
+	}
+	if image.WorkingDir != "/app" || image.User != "agentops" {
+		t.Fatalf("image process context = %#v", image)
+	}
+	// Entrypoint plus Cmd is what the container actually runs.
+	if process := image.Process(); len(process) != 2 ||
+		process[0] != "node" || process[1] != "dist/src/runner/cli.js" {
+		t.Fatalf("image process = %#v", image.Process())
+	}
+}
+
+// Guessing between variants that declare different environments would silently
+// change the replacement's environment.
+func TestImageEnvironmentRefusesDisagreeingVariants(t *testing.T) {
+	fake := &fakeRuntimeRunner{results: []CommandResult{{
+		Status: 0,
+		Stdout: `[{"variants":[
+			{"config":{"config":{"Env":["PATH=/a"]}}},
+			{"config":{"config":{"Env":["PATH=/b"]}}}]}]`,
+	}}}
+	runtime := NewAppleRuntimeForTest(fake)
+	if _, err := runtime.ImageConfiguration(
+		context.Background(), "agentops-control:dev",
+	); err == nil {
+		t.Fatal("disagreeing variants were silently reconciled")
+	}
+}
+
+// Teardown wants deleting an absent container to be success. The label sweep,
+// which has just proven the container exists and owns it, needs the opposite:
+// absence there means another actor is mutating the same reusable name.
+func TestDeleteDistinguishesAbsenceFromSuccess(t *testing.T) {
+	absent := func() *AppleRuntime {
+		return NewAppleRuntimeForTest(&fakeRuntimeRunner{
+			results: []CommandResult{{Status: 0, Stdout: `[]`}},
+		})
+	}
+	err := absent().DeleteExisting(context.Background(), "agentops-runner")
+	if !errors.Is(err, ErrContainerAbsent) {
+		t.Fatalf("DeleteExisting() on an absent container = %v", err)
+	}
+	if err := absent().Delete(
+		context.Background(), "agentops-runner",
+	); err != nil {
+		t.Fatalf("Delete() stopped being idempotent: %v", err)
 	}
 }
 
@@ -206,11 +279,34 @@ func TestVolumeInitCanAddOnlyChownCapability(t *testing.T) {
 func TestEnsureNetworkAcceptsOwnedHostOnlyResource(t *testing.T) {
 	fake := &fakeRuntimeRunner{results: []CommandResult{{
 		Status: 0,
-		Stdout: `[{"id":"agentops-internal","configuration":{"mode":"hostOnly","labels":{"com.mrbaron3.workflow.agentopsctl":"v1"}}}]`,
+		Stdout: `[{"id":"agentops-internal","configuration":{"mode":"hostOnly","labels":{"com.mrbaron3.servo.agentopsctl":"v1"}}}]`,
 	}}}
 	runtime := NewAppleRuntimeForTest(fake)
 	if err := runtime.EnsureNetwork(context.Background(), "agentops-internal"); err != nil {
 		t.Fatalf("owned host-only network was rejected: %v", err)
+	}
+}
+
+// The mode check must be reached only for a network this binary owns. Since
+// Phase 3B a legacy-only network is not owned, so it is refused on ownership
+// before its mode is ever considered — and, crucially, without being recreated.
+func TestEnsureNetworkRefusesALegacyOnlyNetworkWithoutRecreatingIt(t *testing.T) {
+	fake := &fakeRuntimeRunner{results: []CommandResult{{
+		Status: 0,
+		Stdout: `[{"id":"agentops-internal","configuration":{"mode":"hostOnly",` +
+			`"labels":{"com.mrbaron3.workflow.agentopsctl":"v1"}}}]`,
+	}}}
+	err := NewAppleRuntimeForTest(fake).EnsureNetwork(
+		context.Background(), "agentops-internal",
+	)
+	if err == nil {
+		t.Fatal("a legacy-only network was adopted")
+	}
+	if !strings.Contains(err.Error(), "is not owned by agentopsctl") {
+		t.Fatalf("a legacy-only network was not reported as unowned: %v", err)
+	}
+	if len(fake.args) != 1 {
+		t.Fatalf("a legacy-only network reached a mutation: %#v", fake.args)
 	}
 }
 

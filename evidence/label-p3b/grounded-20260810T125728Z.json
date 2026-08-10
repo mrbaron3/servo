@@ -1,0 +1,126 @@
+{
+  "appleContainer": {
+    "cli": "container CLI version 1.1.0 (build: release, commit: unspeci)",
+    "layoutAllowlist": "1.1.0"
+  },
+  "cleanup": {
+    "hostUnchanged": true,
+    "malformedTotal": 0,
+    "namedVolumeAttachmentsPreserved": true,
+    "ownedTotal": 32,
+    "runningContainersAfter": [],
+    "testPrefixResidue": []
+  },
+  "commands": [
+    "AGENTOPS_TEST_APPLE_CONTAINER=1 AGENTOPS_TEST_APPLE_IMAGE=<local image with /bin/sh> go test ./apps/control-plane/internal/lifecycle/ -run AppleContainer -v -count=1",
+    "container list --all --format json  # read-only inventory, before and after",
+    "container volume list --format json",
+    "container network list --format json"
+  ],
+  "generatedAt": "20260810T125728Z",
+  "grounded": {
+    "TestAppleContainerCurrentLabelsSurviveOnALiveContainer": true,
+    "TestAppleContainerMetadataRollbackRefusesWhileTheRuntimeIsUp": true,
+    "TestAppleContainerMetadataRollbackRestoresExactlyAndEndsTheReadPath": true,
+    "TestAppleContainerReadsEveryOwnershipStateFromRealVolumes": true,
+    "TestAppleContainerWritesAndClassifiesCurrentOwnershipLabels": true
+  },
+  "hostAfter": {
+    "counts": {
+      "containers": 7,
+      "networks": 8,
+      "volumes": 23
+    },
+    "totals": {
+      "containers": {
+        "missing-label": 2,
+        "owned": 5
+      },
+      "networks": {
+        "missing-label": 1,
+        "owned": 7
+      },
+      "volumes": {
+        "missing-label": 3,
+        "owned": 20
+      }
+    }
+  },
+  "hostBefore": {
+    "counts": {
+      "containers": 7,
+      "networks": 8,
+      "volumes": 23
+    },
+    "totals": {
+      "containers": {
+        "missing-label": 2,
+        "owned": 5
+      },
+      "networks": {
+        "missing-label": 1,
+        "owned": 7
+      },
+      "volumes": {
+        "missing-label": 3,
+        "owned": 20
+      }
+    }
+  },
+  "issue": "mrbaron3/servo#123",
+  "legacyOwnershipKeysOnHost": {
+    "count": 0,
+    "establishedBy": "counting keys prefixed com.mrbaron3.workflow. across the three read-only listings above; a P3B binary cannot make this claim from its own classification, because legacy-only and missing-label are indistinguishable to it by design"
+  },
+  "namedVolumeAttachments": [
+    {
+      "container": "agentops-github-broker",
+      "destination": "/run/agentops-github-app",
+      "readOnly": true,
+      "volume": "agentops-github-app-key"
+    },
+    {
+      "container": "agentops-postgres",
+      "destination": "/var/lib/postgresql",
+      "readOnly": false,
+      "volume": "agentops-postgres-data"
+    },
+    {
+      "container": "agentops-runner",
+      "destination": "/run/agentops-credentials",
+      "readOnly": true,
+      "volume": "agentops-runner-credentials"
+    },
+    {
+      "container": "agentops-runner",
+      "destination": "/workspace",
+      "readOnly": false,
+      "volume": "agentops-runner-workspace"
+    },
+    {
+      "container": "agentops-triage",
+      "destination": "/run/agentops-credentials",
+      "readOnly": true,
+      "volume": "agentops-triage-credentials"
+    }
+  ],
+  "notGroundedHere": [
+    "the rollback command's own stop/start/prove sequence: this suite stops and starts the runtime itself around the recovery, so it cannot observe what the command does unaided. Pinned by five command tests instead \u2014 TestRollbackSucceedsAndRestartsExactlyOnce, TestRollbackReportsAFailedRestartOnTheSuccessPath, TestRollbackRestartsTheRuntimeEvenWhenTheStopFails, TestRollbackRestartsUnderACancelledContext, and TestRollbackJoinsAPrimaryFailureWithAFailedRecovery",
+    "the malformed-label diagnostics: a real host carries no malformed resource and seeding one would assert about the seeding tool rather than the reader. Pinned headlessly by TestMalformedReasonNamesTheLabelActuallyAtFault"
+  ],
+  "note": "Identities, classes, states and volume attachments only. No host path, no environment value, and no raw ownership label value is recorded here.",
+  "phase": "LABEL-P3B",
+  "provenOnTheRealRuntime": [
+    "a resource written by this binary is reported by the runtime and reads as owned",
+    "a legacy-only volume is refused AND still present with unchanged labels afterwards",
+    "a legacy-only container is refused by Delete AND still present afterwards",
+    "a dual resource is owned through its current label",
+    "a dual resource whose obsolete legacy value disagrees reads unmanaged from the current one",
+    "a rollback plan is bound to the resolved host, and a plan naming another resource is refused even with correct digests",
+    "rollback restores the recorded bytes and the runtime reports the restored labels",
+    "a foreign label survives the rollback untouched",
+    "a rolled-back resource is invisible to this binary and is not adopted or removed",
+    "the named volume's sentinel data is intact across the offline edit",
+    "the stopped-state proof fails while the runtime is up"
+  ]
+}

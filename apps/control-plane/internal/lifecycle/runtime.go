@@ -19,13 +19,6 @@ import (
 	"time"
 )
 
-const (
-	managedLabelKey   = "com.mrbaron3.workflow.agentopsctl"
-	managedLabelValue = "v1"
-	roleLabelKey      = "com.mrbaron3.workflow.role"
-	specLabelKey      = "com.mrbaron3.workflow.spec-sha256"
-)
-
 var resourceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var credentialEnvironmentKeyPattern = regexp.MustCompile(
 	`(?:^|_)(?:TOKEN|PASSWORD|SECRET|DATABASE_URL|API_KEY|CAPABILITY)$`,
@@ -187,11 +180,37 @@ type Resource struct {
 	} `json:"configuration"`
 }
 
+// ContainerMount is one mount as Apple Container reports it. It is a named
+// type because callers construct and compare mounts directly; an anonymous
+// struct forces every construction site to restate the whole shape, which
+// silently breaks the moment the runtime reports one more field.
+type ContainerMount struct {
+	Destination string `json:"destination"`
+	Source      string `json:"source"`
+	// Options carries Apple Container's per-mount flags. "ro" here is the only
+	// record that a credential volume is mounted read-only, so a migration
+	// that ignores it silently widens access to that credential.
+	Options []string       `json:"options"`
+	Type    map[string]any `json:"type"`
+}
+
+// ContainerNetworkAttachment is one network attachment as Apple Container
+// reports it. Options carries the per-attachment settings (hostname and MTU on
+// 1.1.0). The migration cannot restate them — the specification attaches by
+// name — so they are decoded in order to be *compared*: a replacement that
+// landed on different attachment options is drift the equivalence gate has to
+// see rather than silently accept.
+type ContainerNetworkAttachment struct {
+	Network string         `json:"network"`
+	Options map[string]any `json:"options"`
+}
+
 type ContainerActual struct {
 	ID            string `json:"id"`
 	Configuration struct {
 		Labels   map[string]string `json:"labels"`
 		ReadOnly bool              `json:"readOnly"`
+		UseInit  bool              `json:"useInit"`
 		CapAdd   []string          `json:"capAdd"`
 		CapDrop  []string          `json:"capDrop"`
 		Image    struct {
@@ -202,7 +221,15 @@ type ContainerActual struct {
 		} `json:"image"`
 		InitProcess struct {
 			Environment []string `json:"environment"`
-			User        struct {
+			// Executable, Arguments, and WorkingDirectory are read back only to
+			// prove a migrated replacement kept the image's entrypoint. They are
+			// never rebuilt from: the observed executable is frequently a
+			// relative image default ("node"), which no specification field can
+			// express, so the migration leaves them to the image and verifies.
+			Executable       string   `json:"executable"`
+			Arguments        []string `json:"arguments"`
+			WorkingDirectory string   `json:"workingDirectory"`
+			User             struct {
 				ID struct {
 					UID int `json:"uid"`
 					GID int `json:"gid"`
@@ -214,14 +241,16 @@ type ContainerActual struct {
 		} `json:"initProcess"`
 		PublishedPorts []map[string]any `json:"publishedPorts"`
 		PublishedSock  []map[string]any `json:"publishedSockets"`
-		Mounts         []struct {
-			Destination string         `json:"destination"`
-			Source      string         `json:"source"`
-			Type        map[string]any `json:"type"`
-		} `json:"mounts"`
-		Networks []struct {
-			Network string `json:"network"`
-		} `json:"networks"`
+		Mounts         []ContainerMount `json:"mounts"`
+		// Resources is defaulted by Apple Container rather than requested by any
+		// specification. It is compared across a migration so a replacement that
+		// landed on different defaults is caught instead of accepted.
+		Resources struct {
+			CPUs          int     `json:"cpus"`
+			MemoryInBytes int64   `json:"memoryInBytes"`
+			CPUOverhead   float64 `json:"cpuOverhead"`
+		} `json:"resources"`
+		Networks []ContainerNetworkAttachment `json:"networks"`
 	} `json:"configuration"`
 	Status struct {
 		State    string `json:"state"`
@@ -260,6 +289,24 @@ func (runtime *AppleRuntime) Container(
 	return nil, nil
 }
 
+// Networks lists every network Apple Container knows about. It is read-only,
+// and Phase 3A's ownership inventory depends on it: a managed network still
+// carrying the legacy namespace alone would be read as unowned the moment the
+// legacy reader is removed.
+func (runtime *AppleRuntime) Networks(ctx context.Context) ([]Resource, error) {
+	result := runtime.runner.Run(
+		ctx, []string{"network", "list", "--format", "json"},
+	)
+	if result.Status != 0 {
+		return nil, runtimeError(result, nil)
+	}
+	var resources []Resource
+	if err := json.Unmarshal([]byte(result.Stdout), &resources); err != nil {
+		return nil, fmt.Errorf("parse Apple Container network list: %w", err)
+	}
+	return resources, nil
+}
+
 func (runtime *AppleRuntime) EnsureNetwork(
 	ctx context.Context,
 	name string,
@@ -267,13 +314,9 @@ func (runtime *AppleRuntime) EnsureNetwork(
 	if err := validateResourceName(name); err != nil {
 		return err
 	}
-	result := runtime.runner.Run(ctx, []string{"network", "list", "--format", "json"})
-	if result.Status != 0 {
-		return runtimeError(result, nil)
-	}
-	var resources []Resource
-	if err := json.Unmarshal([]byte(result.Stdout), &resources); err != nil {
-		return fmt.Errorf("parse Apple Container network list: %w", err)
+	resources, err := runtime.Networks(ctx)
+	if err != nil {
+		return err
 	}
 	for _, resource := range resources {
 		resourceName := resource.ID
@@ -283,8 +326,11 @@ func (runtime *AppleRuntime) EnsureNetwork(
 		if resourceName != name {
 			continue
 		}
-		if resource.Configuration.Labels[managedLabelKey] != managedLabelValue {
-			return fmt.Errorf("network %s exists but is not owned by agentopsctl", name)
+		if err := RequireOwned(
+			"network "+name,
+			resource.Configuration.Labels,
+		); err != nil {
+			return err
 		}
 		if resource.Configuration.Mode != "" &&
 			resource.Configuration.Mode != "host" &&
@@ -297,25 +343,34 @@ func (runtime *AppleRuntime) EnsureNetwork(
 		}
 		return nil
 	}
-	return runtime.command(ctx, []string{
-		"network", "create",
-		"--internal",
-		"--label", managedLabelKey + "=" + managedLabelValue,
-		name,
-	}, nil)
+	args := []string{"network", "create", "--internal"}
+	args = append(args, managedOwnershipLabelArgs()...)
+	return runtime.command(ctx, append(args, name), nil)
+}
+
+// Volumes lists every named volume Apple Container knows about. It is
+// read-only, and the Phase 2 label sweep depends on it: after deleting a
+// container that held a volume exclusively, the sweep proves the volume still
+// exists before attaching it to the replacement.
+func (runtime *AppleRuntime) Volumes(ctx context.Context) ([]Resource, error) {
+	result := runtime.runner.Run(ctx, []string{"volume", "list", "--format", "json"})
+	if result.Status != 0 {
+		return nil, runtimeError(result, nil)
+	}
+	var resources []Resource
+	if err := json.Unmarshal([]byte(result.Stdout), &resources); err != nil {
+		return nil, fmt.Errorf("parse Apple Container volume list: %w", err)
+	}
+	return resources, nil
 }
 
 func (runtime *AppleRuntime) EnsureVolume(ctx context.Context, name string) error {
 	if err := validateResourceName(name); err != nil {
 		return err
 	}
-	result := runtime.runner.Run(ctx, []string{"volume", "list", "--format", "json"})
-	if result.Status != 0 {
-		return runtimeError(result, nil)
-	}
-	var resources []Resource
-	if err := json.Unmarshal([]byte(result.Stdout), &resources); err != nil {
-		return fmt.Errorf("parse Apple Container volume list: %w", err)
+	resources, err := runtime.Volumes(ctx)
+	if err != nil {
+		return err
 	}
 	for _, resource := range resources {
 		resourceName := resource.ID
@@ -325,16 +380,11 @@ func (runtime *AppleRuntime) EnsureVolume(ctx context.Context, name string) erro
 		if resourceName != name {
 			continue
 		}
-		if resource.Configuration.Labels[managedLabelKey] != managedLabelValue {
-			return fmt.Errorf("volume %s exists but is not owned by agentopsctl", name)
-		}
-		return nil
+		return RequireOwned("volume "+name, resource.Configuration.Labels)
 	}
-	return runtime.command(ctx, []string{
-		"volume", "create",
-		"--label", managedLabelKey + "=" + managedLabelValue,
-		name,
-	}, nil)
+	args := []string{"volume", "create"}
+	args = append(args, managedOwnershipLabelArgs()...)
+	return runtime.command(ctx, append(args, name), nil)
 }
 
 func (runtime *AppleRuntime) ImageExists(ctx context.Context, image string) bool {
@@ -376,6 +426,127 @@ func (runtime *AppleRuntime) ImageDigest(
 		return "", fmt.Errorf("image %s has no immutable sha256 descriptor", image)
 	}
 	return digest, nil
+}
+
+// ImageConfiguration is the part of an image's own configuration the retired
+// Phase 2 label migration had to reason about. Apple Container reports a
+// container's *effective* process, environment, and working directory without
+// saying which parts came from the image and which were supplied at creation.
+// Reading the image's own declarations is what let that sweep tell them apart
+// before it deleted anything.
+//
+// Nothing deletes now, and no production code calls this: the sweep is retired
+// and the remaining migration edits metadata in place. It is kept because it is
+// the only reader of the image's declared configuration and is covered by
+// TestImageEnvironmentParsesTheRealInspectShape and
+// TestImageEnvironmentRefusesDisagreeingVariants, not because a caller depends
+// on it. A
+// future phase that needs image-versus-effective drift should use it; anything
+// else should leave it alone.
+type ImageConfiguration struct {
+	Environment []string
+	Entrypoint  []string
+	Command     []string
+	WorkingDir  string
+	User        string
+}
+
+// Process is the executable and arguments a container gets from this image
+// alone, which is Entrypoint followed by Cmd exactly as the OCI runtime
+// composes them.
+func (configuration ImageConfiguration) Process() []string {
+	process := append([]string(nil), configuration.Entrypoint...)
+	return append(process, configuration.Command...)
+}
+
+// ImageConfiguration reads one image's declared configuration. Variants that
+// disagree are refused rather than guessed between, because picking the wrong
+// one would silently change what the replacement runs.
+func (runtime *AppleRuntime) ImageConfiguration(
+	ctx context.Context,
+	image string,
+) (ImageConfiguration, error) {
+	result := runtime.runner.Run(ctx, []string{"image", "inspect", image})
+	if result.Status != 0 {
+		return ImageConfiguration{}, runtimeError(result, nil)
+	}
+	type variantConfiguration struct {
+		Env        []string `json:"Env"`
+		Entrypoint []string `json:"Entrypoint"`
+		Cmd        []string `json:"Cmd"`
+		WorkingDir string   `json:"WorkingDir"`
+		User       string   `json:"User"`
+	}
+	type inspection struct {
+		Variants []struct {
+			Config struct {
+				Config variantConfiguration `json:"config"`
+			} `json:"config"`
+		} `json:"variants"`
+	}
+	body := bytes.TrimSpace([]byte(result.Stdout))
+	var items []inspection
+	if len(body) > 0 && body[0] == '[' {
+		if err := json.Unmarshal(body, &items); err != nil {
+			return ImageConfiguration{}, fmt.Errorf(
+				"parse Apple Container image inspect: %w", err,
+			)
+		}
+	} else {
+		var item inspection
+		if err := json.Unmarshal(body, &item); err != nil {
+			return ImageConfiguration{}, fmt.Errorf(
+				"parse Apple Container image inspect: %w", err,
+			)
+		}
+		items = []inspection{item}
+	}
+	var declared ImageConfiguration
+	seen := false
+	for _, item := range items {
+		for _, variant := range item.Variants {
+			candidate := ImageConfiguration{
+				Environment: variant.Config.Config.Env,
+				Entrypoint:  variant.Config.Config.Entrypoint,
+				Command:     variant.Config.Config.Cmd,
+				WorkingDir:  variant.Config.Config.WorkingDir,
+				User:        variant.Config.Config.User,
+			}
+			if !seen {
+				declared = candidate
+				seen = true
+				continue
+			}
+			if !equalStrings(declared.Environment, candidate.Environment) ||
+				!equalStrings(declared.Entrypoint, candidate.Entrypoint) ||
+				!equalStrings(declared.Command, candidate.Command) ||
+				declared.WorkingDir != candidate.WorkingDir ||
+				declared.User != candidate.User {
+				return ImageConfiguration{}, fmt.Errorf(
+					"image %s declares different configurations per variant",
+					image,
+				)
+			}
+		}
+	}
+	if !seen {
+		return ImageConfiguration{}, fmt.Errorf(
+			"image %s reported no configuration variant", image,
+		)
+	}
+	return declared, nil
+}
+
+func equalStrings(first, second []string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (runtime *AppleRuntime) BuildImage(
@@ -420,6 +591,19 @@ type ContainerSpec struct {
 	Command     []string
 	Detach      bool
 	Remove      bool
+	// WorkingDir, CPUs, and MemoryMiB exist so the Phase 2 label migration can
+	// restate what it observed instead of hoping the runtime defaults the same
+	// way twice. That sweep is retired, so nothing sets them today; they are
+	// kept because the merged Phase 2 evidence under evidence/label-p2/ still
+	// decodes through these types and TestMergedPhase2EvidenceStillDecodes pins
+	// that. Do not read this as a live caller — there is none.
+	//
+	// They are left zero by the topology's own specifications, which
+	// deliberately take the image's working directory and the runtime's
+	// resource defaults.
+	WorkingDir string
+	CPUs       int
+	MemoryMiB  int64
 }
 
 func SpecDigest(spec ContainerSpec, imageDigest string) (string, error) {
@@ -458,7 +642,24 @@ func (runtime *AppleRuntime) RunContainer(
 	ctx context.Context,
 	spec ContainerSpec,
 ) (string, error) {
-	args, secrets, err := buildContainerArgs(spec)
+	return runtime.materializeContainer(ctx, "run", spec)
+}
+
+// CreateContainer is deliberately absent. It materialized a container without
+// starting it, for the Phase 2 sweep's replace-a-stopped-container-in-place
+// step; with that sweep retired it had no caller and no test. Together with
+// DeleteExisting it was the delete-and-recreate pair Issue #123 withdrew, and
+// sweep.go states why an unreachable half of it must not be left behind:
+// destructive code no caller can reach is code no test can honestly exercise.
+// Recreate it from materializeContainer if a future phase needs it, and give it
+// a caller in the same change.
+
+func (runtime *AppleRuntime) materializeContainer(
+	ctx context.Context,
+	verb string,
+	spec ContainerSpec,
+) (string, error) {
+	args, secrets, err := containerArgs(verb, spec)
 	if err != nil {
 		return "", err
 	}
@@ -475,6 +676,19 @@ func (runtime *AppleRuntime) RunContainer(
 }
 
 func buildContainerArgs(spec ContainerSpec) ([]string, []string, error) {
+	return containerArgs("run", spec)
+}
+
+// containerArgs renders the argv for one managed container. Apple Container
+// 1.1.0 accepts the identical flag surface for `run` and `create`, and the verb
+// decides only whether the container starts. Keeping both on one builder is
+// what lets the Phase 2 label migration recreate a stopped container without
+// starting it: every hardening flag, mount, and label is rendered by the same
+// code that produced the original.
+func containerArgs(
+	verb string,
+	spec ContainerSpec,
+) ([]string, []string, error) {
 	if err := validateResourceName(spec.Name); err != nil {
 		return nil, nil, err
 	}
@@ -500,23 +714,24 @@ func buildContainerArgs(spec ContainerSpec) ([]string, []string, error) {
 			"added capabilities are restricted to removable volume initialization",
 		)
 	}
-	args := []string{"run"}
+	args := []string{verb}
 	if spec.Detach {
 		args = append(args, "--detach")
 	}
 	if spec.Remove {
 		args = append(args, "--rm")
 	}
-	args = append(args,
-		"--name", spec.Name,
-		"--label", managedLabelKey+"="+managedLabelValue,
-		"--label", roleLabelKey+"="+spec.Role,
-	)
+	args = append(args, "--name", spec.Name)
+	args = append(args, managedOwnershipLabelArgs()...)
+	args = append(args, ownershipLabelArgs(CurrentRoleLabelKey, spec.Role)...)
 	if spec.SpecDigest != "" {
 		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(spec.SpecDigest) {
 			return nil, nil, fmt.Errorf("invalid container specification digest")
 		}
-		args = append(args, "--label", specLabelKey+"="+spec.SpecDigest)
+		args = append(args, ownershipLabelArgs(
+			CurrentSpecLabelKey,
+			spec.SpecDigest,
+		)...)
 	}
 	for _, network := range spec.Networks {
 		if err := validateResourceName(network); err != nil {
@@ -541,6 +756,24 @@ func buildContainerArgs(spec ContainerSpec) ([]string, []string, error) {
 	}
 	if spec.User != "" {
 		args = append(args, "--user", spec.User)
+	}
+	if spec.WorkingDir != "" {
+		if !strings.HasPrefix(spec.WorkingDir, "/") ||
+			strings.Contains(spec.WorkingDir, "..") {
+			return nil, nil, fmt.Errorf(
+				"working directory must be a safe container-absolute path",
+			)
+		}
+		args = append(args, "--workdir", spec.WorkingDir)
+	}
+	if spec.CPUs < 0 || spec.MemoryMiB < 0 {
+		return nil, nil, fmt.Errorf("cpu and memory allocations must not be negative")
+	}
+	if spec.CPUs > 0 {
+		args = append(args, "--cpus", strconv.Itoa(spec.CPUs))
+	}
+	if spec.MemoryMiB > 0 {
+		args = append(args, "--memory", strconv.FormatInt(spec.MemoryMiB, 10)+"MiB")
 	}
 	for _, path := range spec.Tmpfs {
 		if !strings.HasPrefix(path, "/") || strings.Contains(path, ":") {
@@ -621,16 +854,48 @@ func (runtime *AppleRuntime) Stop(ctx context.Context, name string, seconds int)
 	}, nil)
 }
 
+// ErrContainerAbsent reports that an exact identity was already gone. Ordinary
+// teardown treats that as success — deleting what is not there is what it wanted
+// — but a caller that has just proven the container exists and owns it needs to
+// know, because absence then means somebody else is mutating the same name.
+var ErrContainerAbsent = errors.New("container is not present")
+
+// Delete removes a managed container and is idempotent: an absent container is
+// success, because every teardown path wants that. The label sweep uses
+// DeleteExisting instead.
 func (runtime *AppleRuntime) Delete(ctx context.Context, name string) error {
+	err := runtime.DeleteExisting(ctx, name)
+	if errors.Is(err, ErrContainerAbsent) {
+		return nil
+	}
+	return err
+}
+
+// DeleteExisting removes a container the caller has already resolved and proven
+// it owns, and reports ErrContainerAbsent when the identity has since vanished.
+// The label sweep needs that distinction: between its ownership proof and this
+// call the name could have been taken over by another actor, and silently
+// succeeding would let it recreate a container from an observation of a world
+// that no longer exists.
+func (runtime *AppleRuntime) DeleteExisting(
+	ctx context.Context,
+	name string,
+) error {
 	if err := validateResourceName(name); err != nil {
 		return err
 	}
 	actual, err := runtime.Container(ctx, name)
-	if err != nil || actual == nil {
+	if err != nil {
 		return err
 	}
-	if actual.Configuration.Labels[managedLabelKey] != managedLabelValue {
-		return fmt.Errorf("container %s is not owned by agentopsctl", name)
+	if actual == nil {
+		return fmt.Errorf("container %s: %w", name, ErrContainerAbsent)
+	}
+	if err := RequireManaged(
+		"container "+name,
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
 	}
 	return runtime.command(ctx, []string{"delete", name}, nil)
 }

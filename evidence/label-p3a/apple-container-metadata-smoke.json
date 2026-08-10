@@ -1,0 +1,133 @@
+{
+  "phase": "LABEL-P3A",
+  "issue": "https://github.com/mrbaron3/servo/issues/123",
+  "generatedAt": "20260810T080501Z",
+  "appleContainer": {
+    "cli": "container CLI version 1.1.0 (build: release, commit: unspeci)",
+    "apiserver": "container-apiserver version 1.1.0 (build: release, commit: unspeci)"
+  },
+  "noSupportedUpdateRoute": {
+    "claim": "Apple Container 1.1.0 exposes no route that changes an existing volume, network, or container label.",
+    "apiserverXpcRoutes": [
+      "networkCreate",
+      "networkDelete",
+      "networkList",
+      "volumeCreate",
+      "volumeDelete",
+      "volumeInspect",
+      "volumeList"
+    ],
+    "publishedClientVolumeMethods": [
+      "create",
+      "delete",
+      "list",
+      "inspect",
+      "volumeDiskUsage"
+    ],
+    "publishedNetworkClientMethods": [
+      "create",
+      "list",
+      "get",
+      "delete"
+    ],
+    "cliSubcommands": {
+      "volume": [
+        "create",
+        "delete",
+        "list",
+        "inspect",
+        "prune"
+      ],
+      "network": [
+        "create",
+        "delete",
+        "list",
+        "inspect",
+        "prune"
+      ]
+    },
+    "sources": [
+      "installed binary /opt/homebrew/Cellar/container/1.1.0/libexec/container-apiserver",
+      "apple/container Sources/Services/ContainerAPIService/Client/ClientVolume.swift",
+      "apple/container Sources/Services/ContainerAPIService/Client/NetworkClient.swift"
+    ]
+  },
+  "onDiskLayout": {
+    "volume": {
+      "document": "volumes/<name>/entity.json",
+      "labelPath": [
+        "labels"
+      ]
+    },
+    "network": {
+      "document": "networks/<name>/entity.json",
+      "labelPath": [
+        "labels"
+      ]
+    },
+    "containerAlways": {
+      "document": "containers/<id>/runtime-configuration.json",
+      "labelPath": [
+        "containerConfiguration",
+        "labels"
+      ]
+    },
+    "containerAfterFirstStart": {
+      "document": "containers/<id>/config.json",
+      "labelPath": [
+        "labels"
+      ],
+      "note": "materialised by the first start; the listing prefers it"
+    }
+  },
+  "runtimeBehaviourObserved": [
+    "container system start re-serialises volumes/*/entity.json with identical values in a different key order; networks/*/entity.json is not rewritten",
+    "starting a container materialises containers/<id>/config.json from the runtime's in-memory model",
+    "container list reports labels from config.json when it exists, ignoring runtime-configuration.json",
+    "container system status exits non-zero and reports 'apiserver is not running' when stopped, and the data plane also fails"
+  ],
+  "groundedSuite": {
+    "command": "AGENTOPS_TEST_APPLE_CONTAINER=1 AGENTOPS_TEST_APPLE_IMAGE=agentops-postgres:dev go test ./apps/control-plane/internal/lifecycle/ -run AppleContainerMetadata -v -count=1",
+    "result": "PASS",
+    "cases": [
+      {
+        "name": "TestAppleContainerMetadataStagesMigrateAndRollBack",
+        "outcome": "PASS",
+        "seconds": 11.88
+      },
+      {
+        "name": "TestAppleContainerMetadataRefusesWhileTheRuntimeIsUp",
+        "outcome": "PASS",
+        "seconds": 0.57
+      },
+      {
+        "name": "TestAppleContainerMetadataRefusesRetireBeforePrepare",
+        "outcome": "PASS",
+        "seconds": 1.29
+      }
+    ],
+    "proves": [
+      "prepare raises a legacy-only container, volume, and network to dual",
+      "retire lowers all three to current-only with zero legacy residue on disk",
+      "the volume image is byte-size and mtime unchanged across the sweep window",
+      "a sentinel written into the named volume is readable after the sweep",
+      "the probe container still starts and stops after its metadata was rewritten",
+      "rollback returns all three to dual, reconciling config.json created since",
+      "retire reapplies cleanly after a rollback",
+      "the sweep refuses to run while the runtime is up",
+      "retire refuses on a legacy-only resource",
+      "all probes are deleted; the host is left with zero residue"
+    ]
+  },
+  "readOnlyHostInventoryBeforeSweep": {
+    "containers": 7,
+    "volumes": 23,
+    "networks": 8,
+    "classes": {
+      "dual": 5,
+      "legacy-only": 27,
+      "missing-label": 6
+    },
+    "note": "5 dual containers from LABEL-P2; the 27 legacy-only are 20 volumes and 7 networks"
+  }
+}

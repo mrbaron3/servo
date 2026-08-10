@@ -73,19 +73,27 @@ type config struct {
 	ReleaseProviderDefaults     string
 }
 
-func loadConfig() (config, error) {
+// resolveProjectRoot locates the repository without touching anything. It is
+// separate from loadConfig because loading the configuration resolves broker
+// capabilities and persists them, and a read-only command must be able to find
+// the project without creating state on the host.
+func resolveProjectRoot() (string, error) {
 	root := strings.TrimSpace(os.Getenv("AGENTOPSCTL_PROJECT_ROOT"))
 	if root == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return config{}, err
+			return "", err
 		}
 		root, err = reporoot.Find(cwd)
 		if err != nil {
-			return config{}, err
+			return "", err
 		}
 	}
-	root, err := filepath.Abs(root)
+	return filepath.Abs(root)
+}
+
+func loadConfig() (config, error) {
+	root, err := resolveProjectRoot()
 	if err != nil {
 		return config{}, err
 	}

@@ -77,15 +77,13 @@ func TestValidateRunnerActualRequiresFullHardenedTopology(t *testing.T) {
 	actual := &lifecycle.ContainerActual{ID: cfg.RunnerContainer}
 	actual.Status.State = "running"
 	actual.Configuration.Labels = map[string]string{
-		"com.mrbaron3.workflow.agentopsctl": "v1",
-		"com.mrbaron3.workflow.role":        "runner",
+		"com.mrbaron3.servo.agentopsctl": "v1",
+		"com.mrbaron3.servo.role":        "runner",
 	}
 	actual.Configuration.Image.Reference = "docker.io/library/agentops-runner:dev"
 	actual.Configuration.Networks = append(
 		actual.Configuration.Networks,
-		struct {
-			Network string `json:"network"`
-		}{Network: cfg.Network},
+		lifecycle.ContainerNetworkAttachment{Network: cfg.Network},
 	)
 	actual.Configuration.ReadOnly = true
 	actual.Configuration.CapDrop = []string{"ALL"}
@@ -96,11 +94,7 @@ func TestValidateRunnerActualRequiresFullHardenedTopology(t *testing.T) {
 		"/workspace":                cfg.RunnerVolume,
 		"/run/agentops-credentials": cfg.RunnerCredentialVolume,
 	} {
-		mount := struct {
-			Destination string         `json:"destination"`
-			Source      string         `json:"source"`
-			Type        map[string]any `json:"type"`
-		}{Destination: destination}
+		mount := lifecycle.ContainerMount{Destination: destination}
 		if kind == "tmpfs" {
 			mount.Type = map[string]any{"tmpfs": map[string]any{}}
 		} else {
@@ -131,25 +125,19 @@ func TestValidateTriageActualHasNoWorkspaceOrDevelopmentImage(t *testing.T) {
 	actual := &lifecycle.ContainerActual{ID: cfg.TriageContainer}
 	actual.Status.State = "running"
 	actual.Configuration.Labels = map[string]string{
-		"com.mrbaron3.workflow.agentopsctl": "v1",
-		"com.mrbaron3.workflow.role":        "triage",
+		"com.mrbaron3.servo.agentopsctl": "v1",
+		"com.mrbaron3.servo.role":        "triage",
 	}
 	actual.Configuration.Image.Reference = "docker.io/library/agentops-triage:dev"
 	actual.Configuration.Networks = append(
 		actual.Configuration.Networks,
-		struct {
-			Network string `json:"network"`
-		}{Network: cfg.Network},
+		lifecycle.ContainerNetworkAttachment{Network: cfg.Network},
 	)
 	actual.Configuration.ReadOnly = true
 	actual.Configuration.CapDrop = []string{"ALL"}
 	actual.Configuration.InitProcess.User.ID.UID = 65532
 	for _, destination := range []string{"/tmp", "/home/agentops"} {
-		actual.Configuration.Mounts = append(actual.Configuration.Mounts, struct {
-			Destination string         `json:"destination"`
-			Source      string         `json:"source"`
-			Type        map[string]any `json:"type"`
-		}{
+		actual.Configuration.Mounts = append(actual.Configuration.Mounts, lifecycle.ContainerMount{
 			Destination: destination,
 			Type:        map[string]any{"tmpfs": map[string]any{}},
 		})
@@ -161,11 +149,7 @@ func TestValidateTriageActualHasNoWorkspaceOrDevelopmentImage(t *testing.T) {
 	); err != nil {
 		t.Fatalf("valid triage topology rejected: %v", err)
 	}
-	actual.Configuration.Mounts = append(actual.Configuration.Mounts, struct {
-		Destination string         `json:"destination"`
-		Source      string         `json:"source"`
-		Type        map[string]any `json:"type"`
-	}{
+	actual.Configuration.Mounts = append(actual.Configuration.Mounts, lifecycle.ContainerMount{
 		Destination: "/workspace",
 		Type: map[string]any{
 			"volume": map[string]any{"name": "development-workspace"},

@@ -192,8 +192,8 @@ func dashboardControlResult() lifecycle.CommandResult {
 	return lifecycle.CommandResult{
 		Status: 0,
 		Stdout: `[{"id":"agentops-control","configuration":{"labels":{` +
-			`"com.mrbaron3.workflow.agentopsctl":"v1",` +
-			`"com.mrbaron3.workflow.role":"control"},"publishedPorts":[{` +
+			`"com.mrbaron3.servo.agentopsctl":"v1",` +
+			`"com.mrbaron3.servo.role":"control"},"publishedPorts":[{` +
 			`"hostAddress":"127.0.0.1","hostPort":8080,` +
 			`"containerPort":8080,"count":1,"proto":"tcp"}]},` +
 			`"status":{"state":"running"}}]`,
@@ -360,10 +360,14 @@ func TestReplaceControlPreflightFailureHasNoMutationReceipt(t *testing.T) {
 
 func TestReplaceControlPostDeleteFailureReturnsMutationReceipt(t *testing.T) {
 	postgres := `[{"id":"agentops-postgres","configuration":{"labels":` +
-		`{"com.mrbaron3.workflow.agentopsctl":"v1"}},"status":{"state":"running",` +
+		`{"com.mrbaron3.servo.agentopsctl":"v1"}},"status":{"state":"running",` +
 		`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}}]`
+	// The role label is not decoration here: the destructive gate requires it,
+	// because a container carrying the ownership marker alone is one this binary
+	// never wrote.
 	stoppedControl := `[{"id":"agentops-control","configuration":{"labels":` +
-		`{"com.mrbaron3.workflow.agentopsctl":"v1"}},"status":{"state":"stopped"}}]`
+		`{"com.mrbaron3.servo.agentopsctl":"v1",` +
+		`"com.mrbaron3.servo.role":"control"}},"status":{"state":"stopped"}}]`
 	fake := &managerRuntimeRunner{results: []lifecycle.CommandResult{
 		{Status: 0, Stdout: postgres},
 		{Status: 0, Stdout: `{"configuration":{"descriptor":{"digest":"sha256:` +
@@ -409,7 +413,7 @@ func TestValidateSpecActualRejectsImageAndConfigurationDrift(t *testing.T) {
 	actual.ID = spec.Name
 	actual.Configuration.Image.Descriptor.Digest = image
 	actual.Configuration.Labels = map[string]string{
-		"com.mrbaron3.workflow.spec-sha256": digest,
+		"com.mrbaron3.servo.spec-sha256": digest,
 	}
 	actual.Configuration.InitProcess.Environment = []string{"SECRET=first"}
 	if err := validateSpecActual(actual, spec); err != nil {
@@ -542,7 +546,7 @@ func TestPostgresSpecRejectsMutableTagImageAndCredentialDrift(t *testing.T) {
 	actual.ID = cfg.PostgresContainer
 	actual.Configuration.Image.Descriptor.Digest = image
 	actual.Configuration.Labels = map[string]string{
-		"com.mrbaron3.workflow.spec-sha256": digest,
+		"com.mrbaron3.servo.spec-sha256": digest,
 	}
 	actual.Configuration.InitProcess.Environment = []string{
 		"POSTGRES_PASSWORD=postgres-password-first-value-0001",
@@ -871,7 +875,7 @@ func TestCISO07IntegratedModeTopology(t *testing.T) {
 
 func TestPRIntentPostgresRotationUsesEnvironmentCapability(t *testing.T) {
 	postgres := `[{"id":"agentops-postgres","configuration":{"labels":` +
-		`{"com.mrbaron3.workflow.agentopsctl":"v1"}},"status":{"state":"running",` +
+		`{"com.mrbaron3.servo.agentopsctl":"v1"}},"status":{"state":"running",` +
 		`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}}]`
 	fake := &managerRuntimeRunner{results: []lifecycle.CommandResult{
 		{Status: 0, Stdout: "container 0.12.0"},
@@ -924,7 +928,7 @@ func TestPRIntentPostgresRotationFailsClosedAndRedactsRuntimeFailure(t *testing.
 
 	cfg.NextPostgresPassword = "postgres-next-password-value-000002"
 	postgres := `[{"id":"agentops-postgres","configuration":{"labels":` +
-		`{"com.mrbaron3.workflow.agentopsctl":"v1"}},"status":{"state":"running",` +
+		`{"com.mrbaron3.servo.agentopsctl":"v1"}},"status":{"state":"running",` +
 		`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}}]`
 	fake := &managerRuntimeRunner{results: []lifecycle.CommandResult{
 		{Status: 0, Stdout: "container 0.12.0"},
