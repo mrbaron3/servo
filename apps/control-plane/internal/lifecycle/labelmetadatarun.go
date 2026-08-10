@@ -417,11 +417,13 @@ func (plan *RollbackPlan) BindToHost(host *MetadataHost) error {
 			); err != nil {
 				return err
 			}
-			// Document and Backup are the only plan-controlled strings that reach
-			// operator output: RestoreOutcomes prints them and every preflight
-			// error embeds them. Everything else printed from a plan is either
-			// reconstructed here or, like Stage and ClassBefore/ClassAfter,
-			// deliberately never printed at all. Left unchecked they are a free
+			// Document and Backup are plan-controlled strings that reach operator
+			// output: RestoreOutcomes prints them and every preflight error
+			// embeds them. The other one is the resource identity, which
+			// requireExactIdentity constrains to a portable name above for this
+			// same reason; Stage and ClassBefore/ClassAfter are plan-controlled
+			// too but are deliberately never printed. Left unchecked these are a
+			// free
 			// text channel out of a forged plan into the terminal of the one
 			// command still permitted to rewrite runtime metadata — enough for
 			// control characters that corrupt the aligned outcome table, or for a
@@ -498,6 +500,16 @@ func requireExactIdentity(identity string, kind MetadataResourceKind) error {
 		strings.ContainsRune(identity, '/') ||
 		identity != filepath.Clean(identity) {
 		return fmt.Errorf("%q is not an exact %s identity", identity, kind)
+	}
+	// Path shape is not the only property this identity needs. It is
+	// plan-controlled and it is PRINTED — in the aligned outcome table and
+	// inside most binding errors — so a Clean-stable name made of ANSI escapes
+	// would pass every check above and still reach the terminal of the one
+	// command permitted to rewrite runtime metadata. resourceNamePattern is the
+	// same shape validateResourceName demands of every name this binary hands
+	// Apple Container, so nothing a real resource can be named is refused here.
+	if !resourceNamePattern.MatchString(identity) {
+		return fmt.Errorf("%q is not a portable %s identity", identity, kind)
 	}
 	return nil
 }
@@ -633,6 +645,14 @@ func RollbackMetadataSweep(plan *RollbackPlan) error {
 func (application *MetadataApplication) RestoreOutcomes() []string {
 	outcomes := make([]string, 0, len(application.Files))
 	for _, file := range application.Files {
+		// An empty outcome means this document was never restored, or was
+		// restored and then put back by the unwind. Either way it is not in the
+		// reverted half, and listing it with a blank verdict on the failure path
+		// would read as "something happened here" for a document nothing
+		// happened to.
+		if file.RestoredAs == "" {
+			continue
+		}
 		outcomes = append(
 			outcomes,
 			fmt.Sprintf("%s: %s", file.Document, file.RestoredAs),

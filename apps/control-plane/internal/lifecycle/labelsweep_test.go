@@ -447,6 +447,73 @@ func TestRollbackUnwindsALandedRecordedWrite(t *testing.T) {
 			)
 		}
 	}
+	// The record has to agree with the disk. The failure path prints these
+	// outcomes to tell an operator which half of the host is reverted, so an
+	// outcome left on a document the unwind put back is a false statement about
+	// durable state — and the operator's next decision is whether re-running the
+	// plan is safe.
+	if outcomes := record.RestoreOutcomes(); len(outcomes) != 0 {
+		t.Fatalf(
+			"a fully undone rollback still reports restorations: %v", outcomes,
+		)
+	}
+	for _, file := range record.Files {
+		if file.RestoredAs != "" {
+			t.Fatalf(
+				"%s kept outcome %q after being put back",
+				file.Document, file.RestoredAs,
+			)
+		}
+	}
+}
+
+// TestResumedRollbackKeepsWhatTheInterruptedRunAlreadyReverted covers the
+// recovery the runbook actually prescribes. An interrupted rollback leaves some
+// documents reverted; re-running the same plan is documented as idempotent. On
+// that re-run an already-reverted document returns RestoreAlreadyBefore, which
+// reports no write — so it must stay out of the unwind set. Unwinding it would
+// push a document this run merely observed forward to the migrated labels and
+// undo the first run's completed work, which is losing ground, not resuming.
+func TestResumedRollbackKeepsWhatTheInterruptedRunAlreadyReverted(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	before := legacyTriple()
+	record := phase3ARecord(
+		t, MetadataKindContainer, "ctr-started", root, backups, before,
+	)
+	if len(record.Files) != 2 {
+		t.Fatalf("fixture recorded %d documents, want 2", len(record.Files))
+	}
+	// Stand in for the interrupted run: the loop restores in reverse, so the
+	// last file is the one a previous attempt would have completed first.
+	done := record.Files[len(record.Files)-1]
+	backup, err := os.ReadFile(done.BackupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(done.Path, backup, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// `done` needs no write, so the first directory sync of this run belongs to
+	// the other document. Fail it.
+	failDirectorySyncAfter(t, 1)
+	if err := rollbackMetadataApplication(record); err == nil {
+		t.Fatal("a durability-uncertain restore was reported as success")
+	}
+	labels := labelsOnDisk(t, done.Path, done.LabelPath)
+	if !sameLabels(labels, record.BeforeLabels) {
+		t.Fatalf(
+			"the resumed rollback undid work the interrupted run had completed: "+
+				"%s ended at %v, want the pre-migration labels %v",
+			done.Document, labels, record.BeforeLabels,
+		)
+	}
+	if done.RestoredAs != RestoreAlreadyBefore {
+		t.Fatalf(
+			"%s reported %q, want %q",
+			done.Document, done.RestoredAs, RestoreAlreadyBefore,
+		)
+	}
 }
 
 // TestRollbackUnwindsALandedCreatedSinceWrite covers the created-since path,

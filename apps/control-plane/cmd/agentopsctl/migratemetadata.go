@@ -28,8 +28,16 @@ import (
 // refusal happens before the runtime is touched — nothing on that path can stop
 // Apple Container as a side effect of being told no.
 //
-// What remains is `--rollback`, which restores the documents a Phase 3A run
-// recorded, to the exact bytes it recorded for them. It is the one-way boundary
+// What remains is `--rollback`, which returns the documents a Phase 3A run
+// recorded to their pre-migration labels. A document still byte-identical to
+// what the migration wrote is replaced with the backup byte for byte; one the
+// runtime has re-serialised since — `container system start` rewrites
+// volumes/<name>/entity.json, preserving values but not key order — has the
+// recorded labels written back into the document as it now stands, and only
+// after every non-label field is proved equal by value. Writing the old bytes
+// over that would silently revert whatever else the runtime recorded since,
+// which is why the outcome is reported per document rather than promised
+// uniformly. It is the one-way boundary
 // made operable: this binary can undo Phase 3A, it cannot redo it, and a host
 // returned to its pre-Phase-3A labels has to be operated by a pre-Phase-3B
 // binary afterwards.
@@ -100,8 +108,10 @@ func migrateLabelMetadata(
 	)
 	rollback := flags.String(
 		"rollback", "",
-		"path to a rollback plan written by a Phase 3A --apply run; restores "+
-			"every document it rewrote to its exact original bytes",
+		"path to a rollback plan written by a Phase 3A --apply run; returns "+
+			"every document it rewrote to its pre-migration labels, byte for "+
+			"byte where the document is unchanged and by rewriting the labels "+
+			"in place where the runtime has re-serialised it since",
 	)
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -293,17 +303,34 @@ func runMetadataRollback(
 		)
 		return rollbackErr
 	}
-	// Restarted and proved BEFORE any success output, so a rollback that could
-	// not bring the runtime back does not print a success summary. The outcome
-	// table is part of that summary: it reads as "this all worked".
-	if restartErr := restart(); restartErr != nil {
-		return restartErr
-	}
+	// Restarted and proved BEFORE the success summary, so a rollback that could
+	// not bring the runtime back does not report "this all worked".
+	//
+	// The record itself is a different thing from the verdict, and a failed
+	// restart must not swallow it: the rollback DID complete, every resource is
+	// now at its pre-migration labels, and this binary can no longer see any of
+	// them. An operator left with only "services are still not running" starts
+	// the runtime by hand, runs `agentopsctl status`, and finds every managed
+	// resource reported missing-label with nothing connecting that to the
+	// rollback having succeeded — which is the discovery the boundary NOTE below
+	// exists to prevent. So the outcomes and the NOTE print on both paths, and
+	// only the "restored N resource(s)" verdict waits for a proven runtime.
+	restartErr := restart()
 	printRestoreOutcomes()
-	fmt.Printf(
-		"restored %d resource(s) to their pre-migration labels\n",
-		len(plan.Applied),
-	)
+	if restartErr == nil {
+		fmt.Printf(
+			"restored %d resource(s) to their pre-migration labels\n",
+			len(plan.Applied),
+		)
+	} else {
+		fmt.Fprintf(
+			os.Stderr,
+			"NOTE: the rollback itself completed and all %d resource(s) are at "+
+				"their pre-migration labels; only the runtime restart could not "+
+				"be proved.\n",
+			len(plan.Applied),
+		)
+	}
 	// The restored labels may be in the namespace this binary no longer reads,
 	// in which case it can no longer see the resources it just restored. Saying
 	// so here is the difference between a deliberate one-way boundary and an
@@ -313,7 +340,9 @@ func runMetadataRollback(
 			"Phase 3A, operate this host with a pre-Phase-3B binary.\n",
 		lifecycle.CurrentLabelNamespace,
 	)
-	return nil
+	// Returned after the record and the boundary NOTE, not instead of them. The
+	// exit status still reports the failure.
+	return restartErr
 }
 
 // distinctSorted removes the overlap between the two not-running checks, which

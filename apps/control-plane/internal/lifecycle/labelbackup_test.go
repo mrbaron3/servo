@@ -426,6 +426,25 @@ func TestBindToHostRefusesPlanControlledOutputStrings(t *testing.T) {
 	}
 }
 
+// TestBindToHostRefusesANonPortableIdentity covers the third plan-controlled
+// string that reaches operator output. The identity is printed in the aligned
+// outcome table and inside most binding errors, and path-shape checks alone
+// (non-empty, no separator, Clean-stable) accept a name built from ANSI escapes.
+func TestBindToHostRefusesANonPortableIdentity(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	plan := bindablePlan(t, root, backups)
+	// Clean-stable and separator-free, so every path-shape check accepts it.
+	plan.Applied[0].ID = "vol\x1b[2J\x1b[H"
+	err := plan.BindToHost(&MetadataHost{AppRoot: root, CLIVersion: "1.1.0"})
+	if err == nil {
+		t.Fatal("a plan carrying a terminal-escape identity was bound to this host")
+	}
+	if !strings.Contains(err.Error(), "portable") {
+		t.Fatalf("the refusal does not name the identity as non-portable: %v", err)
+	}
+}
+
 // TestBindToHostRefusesAnUnrecognisedFileBeforeStopping proves the layout
 // refusal happens at bind time. It used to live only on the post-stop path, so
 // a `.DS_Store` — ordinary in ~/Library/Application Support once Finder has

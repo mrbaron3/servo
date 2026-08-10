@@ -206,12 +206,26 @@ func rollbackMetadataApplication(application *MetadataApplication) error {
 			// the document was changed, and a document that changed has to be in
 			// the unwind set.
 			file.RestoredAs = outcome
-			restored = append(restored, file)
+			// RestoreAlreadyBefore is the one outcome that reports NO write: the
+			// document was found at its pre-migration labels and left alone. It
+			// must stay out of the unwind set, because the unwind writes
+			// AfterLabels — it would push a document this run merely observed
+			// FORWARD to the migrated labels.
+			//
+			// That case is the supported recovery, not a corner: an interrupted
+			// rollback leaves some documents reverted, the runbook says to re-run
+			// the same plan, and on the re-run those documents return
+			// already-before. Unwinding them would undo the first run's completed
+			// work, so resuming would lose ground exactly where it promises to be
+			// idempotent.
+			if outcome != RestoreAlreadyBefore {
+				restored = append(restored, file)
+			}
 		}
 		if err != nil {
 			// Put back what this rollback already undid, so a failure leaves the
 			// resource in the state it was found in rather than between two.
-			return errors.Join(err, reapply(restored))
+			return errors.Join(err, undoPartialRollback(application, restored))
 		}
 	}
 	for _, pending := range created {
@@ -235,15 +249,36 @@ func rollbackMetadataApplication(application *MetadataApplication) error {
 			application.Reconciled = append(application.Reconciled, pending.name)
 		}
 		if err != nil {
-			return errors.Join(err, reapply(restored))
+			return errors.Join(err, undoPartialRollback(application, restored))
 		}
 	}
 	return nil
 }
 
+// undoPartialRollback puts back everything this rollback had already written
+// and then makes the resource's own record agree with the result.
+//
+// The Reconciled names are cleared only when the undo fully succeeded. A
+// created-since document that was pushed back to its migrated labels was not
+// reconciled by this run, and leaving the name behind would report a document
+// as handled that is sitting in the opposite state. When the undo is partial,
+// the names stay: something may genuinely still be reverted, and over-reporting
+// sends the operator to look, which is the safe direction.
+func undoPartialRollback(
+	application *MetadataApplication,
+	restored []*metadataFileApplication,
+) error {
+	if err := reapply(restored); err != nil {
+		return err
+	}
+	application.Reconciled = nil
+	return nil
+}
+
 // reapply returns documents a failed rollback had already restored to their
 // post-migration content, so the resource ends up wholly migrated rather than
-// partly reverted.
+// partly reverted. Each document it puts back has its recorded outcome cleared,
+// because that outcome describes a restoration that no longer stands.
 func reapply(restored []*metadataFileApplication) error {
 	var failures []error
 	for _, file := range restored {
@@ -263,7 +298,17 @@ func reapply(restored []*metadataFileApplication) error {
 			file.Path, rewritten, state.Mode.Perm(), state.UID, state.GID,
 		); err != nil {
 			failures = append(failures, err)
+			continue
 		}
+		// The document is back to its post-migration content, so it did NOT land
+		// as a restoration. Clearing the outcome here is what keeps the failure
+		// report describing durable on-disk state: the outcome was recorded the
+		// moment the document changed, deliberately, because a changed document
+		// has to be in the unwind set — but once the unwind puts it back, an
+		// outcome left behind tells the operator a document is in the reverted
+		// half when it is in the migrated one. A file whose reapply failed above
+		// keeps its outcome, which is correct: that one really is still reverted.
+		file.RestoredAs = ""
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf(

@@ -145,8 +145,16 @@ P3B の binary は `com.mrbaron3.servo.*` しか読まないので、旧 label �
 **undo できるが redo できない**。P3A の 2 stage（`prepare` / `retire`）は撤去済みで、
 `--stage` を渡すと理由を出して拒否される（runtime には一切触れない）。
 
-- **undo できる**: rollback は保全済み private backup の**逐語 bytes** へ document を戻す。
-  label の中身を解釈しないので、このbinaryが読めない namespace の label でも正しく復元できる。
+- **undo できる**: rollback は document を**移行前の label** へ戻す。label の中身を解釈しない
+  ので、このbinaryが読めない namespace の label でも正しく復元できる。戻し方は document ごとに
+  異なり、その結果は per-document の outcome として出力される。
+  - `bytes`: migration が書いた bytes のままだった document。private backup の**逐語 bytes**
+    で置き換える。
+  - `relabelled`: migration 以降に runtime が再直列化した document（`container system start`
+    は `volumes/<name>/entity.json` を書き直す。値は保つが key 順は保たない）。**label 以外の
+    全 field が値として一致することを証明したうえで**、現状の document へ移行前 label を書き戻す。
+    ここで古い bytes を上書きすると、runtime がその後に記録した内容を黙って巻き戻すことになる。
+  - `already-before`: 既に移行前 label だった document。何も書かない。
 - **redo できない**: 前へ進める stage が無い。もう一度 `current-only` にしたければ
   P3A の binary を使う。
 
@@ -168,10 +176,13 @@ P3B の binary は `com.mrbaron3.servo.*` しか読まないので、旧 label �
 # 1. lease を quiesce したうえで、plan が名指しする container を「削除せずに」停止する。
 #
 #    **`agentopsctl stop` を使ってはならない。** stop は runner / triage /
-#    github-broker / control を gracefulStop の後に delete する。その 4 本は retire
-#    plan が復元対象として記録している container そのものであり、削除すると復元すべき
-#    metadata document ごと消える。document が消えると preflightRestore は ENOENT で
-#    撥ね、BindToHost は最初の失敗で plan 全体を拒否するため、まだ健全な volume 20 本と
+#    github-broker / control を gracefulStop の後に delete し、続けて postgres も
+#    delete する。**計 5 本**であり、これは retire plan が復元対象として記録している
+#    container の全てである。とくに `agentops-postgres` は、排他 attach された named
+#    volume を持つという理由でこの移行が存在する当の container であり、これも道連れに
+#    なる（「postgres は残るから被害は限定的」は誤り）。削除すると復元すべき metadata
+#    document ごと消える。document が消えると preflightRestore は ENOENT で撥ね、
+#    BindToHost は最初の失敗で plan 全体を拒否するため、まだ健全な volume 20 本と
 #    network 7 本まで巻き添えで復元不能になる。意図して受け入れた one-way boundary が
 #    no-way boundary に変わる。
 #
