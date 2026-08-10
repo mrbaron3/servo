@@ -1327,11 +1327,14 @@ func managedDashboardControl(
 	actual *lifecycle.ContainerActual,
 	config config,
 ) bool {
-	return actual != nil &&
-		actual.ID == config.ControlContainer &&
-		actual.Status.State == "running" &&
-		actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] == "v1" &&
-		actual.Configuration.Labels["com.mrbaron3.workflow.role"] == "control" &&
+	if actual == nil ||
+		actual.ID != config.ControlContainer ||
+		actual.Status.State != "running" ||
+		!lifecycle.ClassifyOwnership(actual.Configuration.Labels).Owned() {
+		return false
+	}
+	role, agreement := lifecycle.ReadRoleLabel(actual.Configuration.Labels)
+	return agreement.Agreed() && role == "control" &&
 		exactLoopbackPublication(actual, config.ControlHostPort)
 }
 
@@ -1437,8 +1440,11 @@ func (manager *manager) ensurePostgres(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if actual != nil {
-		if actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] != "v1" {
-			return false, fmt.Errorf("postgres container name is owned by another deployment")
+		if err := lifecycle.RequireOwned(
+			"postgres container "+manager.config.PostgresContainer,
+			actual.Configuration.Labels,
+		); err != nil {
+			return false, err
 		}
 		if err := validatePostgresMajorBoundary(actual); err != nil {
 			return false, err
@@ -2391,10 +2397,11 @@ func (manager *manager) removeRunner(
 	if actual == nil {
 		return mutationReceipt{}, nil
 	}
-	if actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] != "v1" {
-		return mutationReceipt{}, fmt.Errorf(
-			"runner container name is owned by another deployment",
-		)
+	if err := lifecycle.RequireOwned(
+		"runner container "+manager.config.RunnerContainer,
+		actual.Configuration.Labels,
+	); err != nil {
+		return mutationReceipt{}, err
 	}
 	receipt := mutationReceipt{Mutated: true}
 	if err := manager.gracefulStop(
@@ -2638,8 +2645,11 @@ func (manager *manager) gracefulStop(
 	if err != nil || actual == nil || actual.Status.State != "running" {
 		return err
 	}
-	if actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] != "v1" {
-		return fmt.Errorf("container %s is not owned by agentopsctl", name)
+	if err := lifecycle.RequireOwned(
+		"container "+name,
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
 	}
 	if err := manager.runtime.SignalTerm(ctx, name); err != nil {
 		return err
@@ -3083,8 +3093,15 @@ func validateSpecActual(
 	if expected.SpecDigest != expectedDigest {
 		return fmt.Errorf("%s desired specification digest is inconsistent", expected.Name)
 	}
-	if actual.Configuration.Labels["com.mrbaron3.workflow.spec-sha256"] !=
-		expected.SpecDigest {
+	sealed, agreement := lifecycle.ReadSpecLabel(actual.Configuration.Labels)
+	if agreement == lifecycle.LabelConflicting {
+		return lifecycle.ConflictingLabelError(
+			expected.Name, "specification digest",
+			lifecycle.LegacySpecLabelKey, lifecycle.CurrentSpecLabelKey,
+			actual.Configuration.Labels,
+		)
+	}
+	if !agreement.Agreed() || sealed != expected.SpecDigest {
 		return fmt.Errorf("%s immutable image or runtime specification drifted", expected.Name)
 	}
 	actualEnvironment := make(map[string]string)
@@ -3365,9 +3382,21 @@ func validateManagedActual(
 	if actual == nil || actual.Status.State != "running" {
 		return fmt.Errorf("%s container is not running", name)
 	}
-	if actual.ID != name ||
-		actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] != "v1" ||
-		actual.Configuration.Labels["com.mrbaron3.workflow.role"] != role {
+	if actual.ID != name {
+		return fmt.Errorf("%s ownership or role label does not match", name)
+	}
+	if err := lifecycle.RequireOwned(name, actual.Configuration.Labels); err != nil {
+		return err
+	}
+	actualRole, agreement := lifecycle.ReadRoleLabel(actual.Configuration.Labels)
+	if agreement == lifecycle.LabelConflicting {
+		return lifecycle.ConflictingLabelError(
+			name, "role",
+			lifecycle.LegacyRoleLabelKey, lifecycle.CurrentRoleLabelKey,
+			actual.Configuration.Labels,
+		)
+	}
+	if !agreement.Agreed() || actualRole != role {
 		return fmt.Errorf("%s ownership or role label does not match", name)
 	}
 	if !imageReferenceMatches(actual.Configuration.Image.Reference, image) {

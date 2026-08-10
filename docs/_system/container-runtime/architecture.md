@@ -62,6 +62,7 @@
   security/runtime seamとして保ち、PostgreSQLのdurable business coordinationと同一視しない。
   exact schema/checksumと同一revision topologyを保つ間、image群のrelease unitはrepository全体で一体とする
   （ADR-0021）。
+- **ARCH-container-runtime-018 Ownership label compatibility boundary** — publicな形: `ClassifyOwnership`／`RequireOwned`／`ReadDualLabel`。container ownership labelのkey、writer、readerを`internal/lifecycle/ownership.go`へ単一化し、新規resourceへ`com.mrbaron3.workflow.*`と`com.mrbaron3.servo.*`をdual-writeしてどちらのnamespaceからも読む。旧binaryへ戻しても旧keyだけで発見できるrollback契約を保ち、新旧の値が食い違うresourceはunownedではなくfail-closedな部分移行として扱う（[ADR-0022](../../decisions/ADR-0022-servo-product-and-agentops-component-naming.md)、[Issue #123](https://github.com/mrbaron3/servo/issues/123)）。
 
 ## 段階導入
 

@@ -26,3 +26,5 @@
 | LANG-container-runtime-016 | Provider Credential Volume | provider login fileだけをprivate stdinでseedし、ACTIVE workerへread-only mountするnamed volume。 |
 | LANG-container-runtime-017 | Typed Monitor Broker | controlの固定Issue/PR read要求をtriage credential境界内で実行するdurable broker。任意HTTP proxyではない。 |
 | LANG-container-runtime-018 | Isolated Triage | workspace／git／SSHなしでtyped monitor、strict Issue classification、human-ready promotionだけを行うnonroot runtime role。role、image、build targetの正典名は`triage`で揃え、security境界が異なる`runner`を名称aliasにしない。`deploy/Containerfile`と`agentopsctl` image consumerもこの名称へ統一済みである。 |
+| LANG-container-runtime-019 | Ownership Label | `agentopsctl`がcontainer／network／volumeの所有を判定する唯一のlabel。表示名ではなく互換性identifierであり、writer・reader・selectorが同時に移行しないと稼働resourceが孤児化する。key正典は`apps/control-plane/internal/lifecycle/ownership.go`に単一化する。 |
+| LANG-container-runtime-020 | Ownership Class | Ownership Labelから導く6つの明示分類（`legacy-only`／`current-only`／`dual`／`conflicting`／`unmanaged`／`missing-label`）。`conflicting`は部分移行した自分のresourceであり、他人のものを意味する`unmanaged`と同一視せずfail-closeする。 |

@@ -1,0 +1,107 @@
+{
+  "schemaVersion": "1.0",
+  "issue": "mrbaron3/servo#123",
+  "phase": "LABEL-P1",
+  "baseCommit": "a4cdb8cd482e1fd41975ec653b33019656ad4f84",
+  "recordedAt": "2026-08-10T03:26:56Z",
+  "host": {
+    "architecture": "arm64",
+    "runtime": "Apple Container",
+    "runtimeVersion": "container CLI version 1.1.0 (build: release, commit: unspeci)",
+    "installationAction": "none",
+    "systemStart": "apiserver was not running; started with `container system start` for this run"
+  },
+  "scope": {
+    "proves": [
+      "Apple Container stores and returns both ownership label namespaces on the same network, volume, and live container",
+      "the Phase 1 reader classifies old-only, new-only, dual-equal, dual-conflicting, unmanaged, and missing-label resources from real runtime output",
+      "a resource created by the Phase 1 writer still satisfies the pre-migration reader predicate (rollback contract)",
+      "a partially migrated container is refused by delete and survives the refusal"
+    ],
+    "doesNotProve": [
+      "drain/recreate of an existing old-only container (LABEL-P2)",
+      "exclusive named-volume detach/attach across a container replacement (LABEL-P2)",
+      "restart reconciliation of a full managed topology under dual labels (LABEL-P2)",
+      "removal of the legacy namespace (LABEL-P3)"
+    ],
+    "externalSideEffects": false,
+    "mutatedOperatorResources": false,
+    "resourceNaming": "every created resource carried the unique prefix `agentops-labelp1-<pid>-<nanos>`; no selector-based listing or deletion was used"
+  },
+  "automatedGroundedRun": {
+    "command": "AGENTOPS_TEST_APPLE_CONTAINER=1 AGENTOPS_TEST_APPLE_IMAGE=agentops-postgres:ciso07-078330f go test ./apps/control-plane/internal/lifecycle/ -run AppleContainer -v -count=1",
+    "source": "apps/control-plane/internal/lifecycle/ownership_apple_test.go",
+    "result": "passed",
+    "durationSeconds": 18.828,
+    "cases": [
+      {
+        "name": "TestAppleContainerDualWritesAndClassifiesOwnershipLabels",
+        "result": "passed",
+        "detail": {
+          "network": "created through EnsureNetwork; real labels classified as dual",
+          "volume": "created through EnsureVolume; real labels classified as dual",
+          "legacyReaderPredicate": "com.mrbaron3.workflow.agentopsctl=v1 present on both",
+          "rerunIsIdempotent": "the writer accepted the resource it already owned instead of recreating it"
+        }
+      },
+      {
+        "name": "TestAppleContainerReadsEveryOwnershipMigrationStateFromRealVolumes",
+        "result": "passed",
+        "detail": {
+          "old-only": "accepted as owned",
+          "new-only": "accepted as owned",
+          "dual-equal": "accepted as owned",
+          "dual-conflicting": "refused as a partial container label migration, not as unowned",
+          "unmanaged": "refused as not owned by agentopsctl",
+          "missing-label": "refused as not owned by agentopsctl"
+        }
+      },
+      {
+        "name": "TestAppleContainerDualLabelsSurviveOnALiveContainerAndRollbackReader",
+        "result": "passed",
+        "detail": {
+          "image": "agentops-postgres:ciso07-078330f",
+          "liveContainerLabels": [
+            "com.mrbaron3.workflow.agentopsctl=v1",
+            "com.mrbaron3.servo.agentopsctl=v1",
+            "com.mrbaron3.workflow.role=runner",
+            "com.mrbaron3.servo.role=runner",
+            "com.mrbaron3.workflow.spec-sha256=<64-hex>",
+            "com.mrbaron3.servo.spec-sha256=<64-hex>"
+          ],
+          "rollbackReader": "all three legacy keys matched the values the pre-migration binary compared",
+          "conflictingContainerDelete": "refused; the container was still present afterwards",
+          "dualLabelledContainerDelete": "succeeded"
+        }
+      }
+    ]
+  },
+  "readOnlyHostInventory": {
+    "takenAt": "2026-08-10T03:26:56Z",
+    "command": "container list --all --format json",
+    "mutations": "none; classification only",
+    "classification": {
+      "legacy-only": 5,
+      "missing-label": 2,
+      "current-only": 0,
+      "dual": 0,
+      "conflicting": 0,
+      "unmanaged": 0
+    },
+    "containers": [
+      { "id": "agentops-control", "state": "stopped", "class": "legacy-only" },
+      { "id": "agentops-github-broker", "state": "stopped", "class": "legacy-only" },
+      { "id": "agentops-postgres", "state": "stopped", "class": "legacy-only" },
+      { "id": "agentops-runner", "state": "stopped", "class": "legacy-only" },
+      { "id": "agentops-triage", "state": "stopped", "class": "legacy-only" },
+      { "id": "agentops-ciso06-hardening-probe", "state": "stopped", "class": "missing-label" },
+      { "id": "buildkit", "state": "stopped", "class": "missing-label" }
+    ],
+    "interpretation": "This host is entirely pre-migration. Phase 1 keeps all five managed containers owned and claims neither foreign container, so LABEL-P2 has a non-empty old-only work list and LABEL-P3's gate is not met."
+  },
+  "cleanup": {
+    "createdResourcesRemaining": 0,
+    "verifiedWith": "container list --all / volume list / network list filtered by the run prefix"
+  },
+  "result": "passed"
+}
