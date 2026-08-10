@@ -849,6 +849,20 @@ func TestSnapshotCarriesEveryPlannedReplacementBeforeMutating(t *testing.T) {
 			planned.RecreateVerb == "" || planned.ObservedState == "" {
 			t.Fatalf("planned replacement is not actionable: %#v", planned)
 		}
+		// The plan has to carry everything the specification now restates, or
+		// a rollback from it would not reproduce the container.
+		if planned.CPUs != 4 || planned.MemoryMiB != 1024 {
+			t.Fatalf("planned replacement omits resources: %#v", planned)
+		}
+		// The fixture's working directory is the image default, so the plan
+		// records no override while still recording what was observed.
+		if planned.WorkingDirOverride != "" ||
+			planned.ObservedWorkingDirectory != "/app" {
+			t.Fatalf(
+				"working directory representation changed: override=%q observed=%q",
+				planned.WorkingDirOverride, planned.ObservedWorkingDirectory,
+			)
+		}
 	}
 }
 

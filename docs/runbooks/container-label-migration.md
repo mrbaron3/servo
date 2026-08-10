@@ -219,8 +219,13 @@ exact id だけを `--only` に渡して再開する。既に `dual` になっ�
 
 `pre-mutation-<stamp>.json` の `plannedSpecs[]` には、**対象ごとの replacement を作り直すのに必要な
 構成**が入っている: image と digest、role、spec digest、network、named volume の mount（read-only
-含む）、tmpfs、publish、user、entrypoint と command、readOnly / capDropAll / init、観測時の state と
-再作成 verb（`create` か `run`）。sweep は**どれか 1 つでも再構築できなければ、1 件も mutate せずに停止する**
+含む）、tmpfs、publish、user、entrypoint と command、readOnly / capDropAll / init、**cpus と
+memoryMiB**、観測時の state と再作成 verb（`create` か `run`）。
+
+working directory は 2 つ記録される。`workingDirOverride` は **argv で渡す override**（image 既定を
+継承する場合は空）、`observedWorkingDirectory` は**観測された実効値**である。実効値だけを記録して
+作り直すと、image から継承していたものを明示 override に変えてしまい、今日の挙動が同じでも
+container の構成としては別物になる。sweep は**どれか 1 つでも再構築できなければ、1 件も mutate せずに停止する**
 ので、この配列は常に全対象ぶん揃っている。
 
 **環境変数は key だけが記録され、値は記録されない**（durable な evidence に credential を残さないため）。

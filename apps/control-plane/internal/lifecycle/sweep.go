@@ -107,25 +107,38 @@ type SweepReport struct {
 // runbook prescribes; an inventory record alone cannot, because it omits
 // everything the replacement needs.
 type PlannedReplacement struct {
-	Name             string        `json:"name"`
-	Role             string        `json:"role"`
-	Image            string        `json:"image"`
-	ImageDigest      string        `json:"imageDigest"`
-	SpecDigest       string        `json:"specDigest"`
-	Networks         []string      `json:"networks"`
-	Mounts           []Mount       `json:"mounts"`
-	Tmpfs            []string      `json:"tmpfs"`
-	Publish          []Publication `json:"publish"`
-	EnvironmentKeys  []string      `json:"environmentKeys"`
-	ReadOnly         bool          `json:"readOnly"`
-	CapDropAll       bool          `json:"capDropAll"`
-	Init             bool          `json:"init"`
-	User             string        `json:"user"`
-	Entrypoint       string        `json:"entrypoint"`
-	Command          []string      `json:"command"`
-	ObservedState    string        `json:"observedState"`
-	RecreateVerb     string        `json:"recreateVerb"`
-	WorkingDirectory string        `json:"workingDirectory"`
+	Name            string        `json:"name"`
+	Role            string        `json:"role"`
+	Image           string        `json:"image"`
+	ImageDigest     string        `json:"imageDigest"`
+	SpecDigest      string        `json:"specDigest"`
+	Networks        []string      `json:"networks"`
+	Mounts          []Mount       `json:"mounts"`
+	Tmpfs           []string      `json:"tmpfs"`
+	Publish         []Publication `json:"publish"`
+	EnvironmentKeys []string      `json:"environmentKeys"`
+	ReadOnly        bool          `json:"readOnly"`
+	CapDropAll      bool          `json:"capDropAll"`
+	Init            bool          `json:"init"`
+	User            string        `json:"user"`
+	Entrypoint      string        `json:"entrypoint"`
+	Command         []string      `json:"command"`
+	ObservedState   string        `json:"observedState"`
+	RecreateVerb    string        `json:"recreateVerb"`
+	// CPUs and MemoryMiB are what the replacement is created with. They are
+	// part of the plan because the specification now restates them rather than
+	// letting the runtime default twice, so a rollback that omitted them would
+	// not reproduce the container.
+	CPUs      int   `json:"cpus"`
+	MemoryMiB int64 `json:"memoryMiB"`
+	// WorkingDirOverride is the argv override, empty when the working directory
+	// is inherited from the image. ObservedWorkingDirectory is the effective
+	// value the container was running with. Recording only the effective one
+	// would turn an inherited directory into an explicit override on rollback,
+	// which is a different container configuration even when it behaves the
+	// same today.
+	WorkingDirOverride       string `json:"workingDirOverride"`
+	ObservedWorkingDirectory string `json:"observedWorkingDirectory"`
 }
 
 // RedactedReplacement converts a rebuilt specification into its durable form.
@@ -142,25 +155,28 @@ func RedactedReplacement(
 		verb = "run"
 	}
 	return PlannedReplacement{
-		Name:             spec.Name,
-		Role:             spec.Role,
-		Image:            spec.Image,
-		ImageDigest:      actual.Configuration.Image.Descriptor.Digest,
-		SpecDigest:       spec.SpecDigest,
-		Networks:         spec.Networks,
-		Mounts:           spec.Mounts,
-		Tmpfs:            spec.Tmpfs,
-		Publish:          spec.Publish,
-		EnvironmentKeys:  sortedStrings(keys),
-		ReadOnly:         spec.ReadOnly,
-		CapDropAll:       spec.CapDropAll,
-		Init:             spec.Init,
-		User:             spec.User,
-		Entrypoint:       spec.Entrypoint,
-		Command:          spec.Command,
-		ObservedState:    actual.Status.State,
-		RecreateVerb:     verb,
-		WorkingDirectory: actual.Configuration.InitProcess.WorkingDirectory,
+		Name:                     spec.Name,
+		Role:                     spec.Role,
+		Image:                    spec.Image,
+		ImageDigest:              actual.Configuration.Image.Descriptor.Digest,
+		SpecDigest:               spec.SpecDigest,
+		Networks:                 spec.Networks,
+		Mounts:                   spec.Mounts,
+		Tmpfs:                    spec.Tmpfs,
+		Publish:                  spec.Publish,
+		EnvironmentKeys:          sortedStrings(keys),
+		ReadOnly:                 spec.ReadOnly,
+		CapDropAll:               spec.CapDropAll,
+		Init:                     spec.Init,
+		User:                     spec.User,
+		Entrypoint:               spec.Entrypoint,
+		Command:                  spec.Command,
+		ObservedState:            actual.Status.State,
+		RecreateVerb:             verb,
+		CPUs:                     spec.CPUs,
+		MemoryMiB:                spec.MemoryMiB,
+		WorkingDirOverride:       spec.WorkingDir,
+		ObservedWorkingDirectory: actual.Configuration.InitProcess.WorkingDirectory,
 	}
 }
 
