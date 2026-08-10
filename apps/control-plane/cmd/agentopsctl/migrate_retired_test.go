@@ -40,10 +40,13 @@ func TestMigrateLabelsApplyIsRetiredBeforeTouchingTheRuntime(t *testing.T) {
 	if runner.called {
 		t.Fatal("the refusal came after the runtime was queried")
 	}
-	// The message has to name the replacement: an operator who reaches this is
-	// mid-migration and needs the next command, not just a refusal.
+	// The message has to say what replaced it and what replaced that. Through
+	// Phase 3A it named the staged `migrate-label-metadata` commands; Phase 3B
+	// retires those too, so what an operator needs now is to know that no
+	// forward container label migration remains anywhere in this binary.
 	for _, expected := range []string{
-		"retired", "migrate-label-metadata", "prepare", "retire",
+		"retired", "migrate-label-metadata", "Phase 3B",
+		"com.mrbaron3.servo", "read-only inventory",
 	} {
 		if !strings.Contains(err.Error(), expected) {
 			t.Errorf("refusal does not mention %q: %v", expected, err)

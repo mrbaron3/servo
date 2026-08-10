@@ -1,25 +1,150 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// The cases below pin the ownership contract that Issue #123 migrates from
-// `com.mrbaron3.workflow.*` to `com.mrbaron3.servo.*`.
+// The cases below pin the ownership contract at the end of Issue #123's
+// migration from `com.mrbaron3.workflow.*` to `com.mrbaron3.servo.*`.
 //
-// Phase 3A stops writing the legacy namespace: a resource this binary creates
-// now carries `com.mrbaron3.servo.*` alone. The reader is deliberately left
-// dual, which is what keeps the change reversible. Rolling back to the Phase 1
-// or Phase 2 binary is safe because both read either namespace and therefore
-// still discover a current-only resource; rolling back past Phase 1, to a
-// binary that reads the legacy keys only, is not, and that is the boundary this
-// phase knowingly crosses once its sweep has moved every managed resource
-// forward.
+// Phase 3A stopped writing the legacy namespace. Phase 3B stops reading it, so
+// the current namespace is now the sole evidence of ownership. Two consequences
+// are asserted throughout: a resource carrying only the legacy namespace is
+// unreadable and therefore never adopted, mutated, or deleted; and a resource
+// whose current labels are incomplete fails closed rather than reading as one
+// this binary does not own.
+//
+// The legacy strings below are spelled literally on purpose. They are no longer
+// constants anywhere in the production tree, and a test that referenced a
+// production constant for them could not detect the constant coming back.
+const (
+	legacyLabelNamespace  = "com.mrbaron3.workflow"
+	legacyManagedLabelKey = legacyLabelNamespace + ".agentopsctl"
+	legacyRoleLabelKey    = legacyLabelNamespace + ".role"
+	legacySpecLabelKey    = legacyLabelNamespace + ".spec-sha256"
+)
 
-const legacyManagedLabel = "com.mrbaron3.workflow.agentopsctl"
+// labelValueSentinel is a label value chosen so that finding it in an error
+// message can only mean the message echoed the value itself. It shares no
+// substring with the subjects or key names these cases use.
+const labelValueSentinel = "zzz-label-value-must-not-leak-zzz"
+
+// TestNoProductionCodeReferencesTheLegacyNamespace is the structural half of
+// Phase 3B. Every other case here proves a behaviour; this one proves the
+// namespace is not reachable at all, so a future edit cannot reintroduce a read
+// through a constant no behavioural test happens to cover.
+//
+// It scans every tracked file that is not obviously binary rather than an
+// allowlist of extensions. An allowlist missed exactly the file most able to
+// write a container label: `deploy/Containerfile` has no extension and carries a
+// real LABEL directive, and so do `githooks/*` and the `.toml`/`.md` files
+// outside `docs/`.
+//
+// In Go it checks each string literal AND the concatenation of every literal in
+// the file, so a key split across `"com.mrbaron3." + "workflow.agentopsctl"` is
+// caught too. Go comments are exempt: this phase is a compatibility boundary,
+// and a boundary nobody may describe is one the next reader has to rediscover.
+//
+// Three directories are excluded by name and each for its own reason:
+// `evidence/` is the migration's own audit trail, `docs/` is where the
+// compatibility history is deliberately written down, and `_test.go` files pin
+// the behaviour of resources that still carry the retired namespace.
+func TestNoProductionCodeReferencesTheLegacyNamespace(t *testing.T) {
+	root := repositoryRootForTest(t)
+	tracked, err := exec.Command(
+		"git", "-C", root, "ls-files", "-z",
+	).Output()
+	if err != nil {
+		t.Fatalf("list tracked files: %v", err)
+	}
+	skipDirectories := map[string]struct{}{
+		"evidence": {}, "docs": {},
+	}
+	fileSet := token.NewFileSet()
+	scannedGo, scannedText := 0, 0
+	for _, relative := range strings.Split(string(tracked), "\x00") {
+		if relative == "" || strings.HasSuffix(relative, "_test.go") {
+			continue
+		}
+		if _, skip := skipDirectories[strings.SplitN(relative, "/", 2)[0]]; skip {
+			continue
+		}
+		path := filepath.Join(root, relative)
+		source, err := os.ReadFile(path)
+		if err != nil {
+			// A tracked path that is not a readable regular file (a submodule,
+			// a symlink to nowhere) is not source this test can speak about.
+			continue
+		}
+		// "Not obviously binary" rather than an extension allowlist: a NUL byte
+		// is the same signal git itself uses.
+		if bytes.IndexByte(source, 0) >= 0 {
+			continue
+		}
+		if filepath.Ext(path) == ".go" {
+			parsed, err := parser.ParseFile(fileSet, path, source, 0)
+			if err != nil {
+				t.Fatalf("%s: %v", relative, err)
+			}
+			scannedGo++
+			var joined strings.Builder
+			ast.Inspect(parsed, func(node ast.Node) bool {
+				literal, ok := node.(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					return true
+				}
+				if unquoted, err := strconv.Unquote(literal.Value); err == nil {
+					joined.WriteString(unquoted)
+				} else {
+					joined.WriteString(literal.Value)
+				}
+				if strings.Contains(literal.Value, legacyLabelNamespace) {
+					t.Errorf(
+						"%s:%d has the string literal %s, which names the "+
+							"retired namespace",
+						relative, fileSet.Position(literal.Pos()).Line,
+						literal.Value,
+					)
+				}
+				return true
+			})
+			// A key assembled from adjacent literals is still a reference.
+			if strings.Contains(joined.String(), legacyLabelNamespace) {
+				t.Errorf(
+					"%s builds the retired namespace out of separate string "+
+						"literals", relative,
+				)
+			}
+			continue
+		}
+		scannedText++
+		if strings.Contains(string(source), legacyLabelNamespace) {
+			t.Errorf(
+				"%s references the retired namespace %q",
+				relative, legacyLabelNamespace,
+			)
+		}
+	}
+	// A scan that silently stopped reaching the tree would make this test pass
+	// for the worst possible reason.
+	if scannedGo == 0 || scannedText == 0 {
+		t.Fatalf(
+			"scanned %d Go and %d text files; the scan is not reaching the tree",
+			scannedGo, scannedText,
+		)
+	}
+}
 
 func TestRunArgsWriteOnlyTheCurrentNamespace(t *testing.T) {
 	args, _, err := buildContainerArgs(ContainerSpec{
@@ -40,13 +165,10 @@ func TestRunArgsWriteOnlyTheCurrentNamespace(t *testing.T) {
 			t.Fatalf("current label %q is absent from %s", expected, rendered)
 		}
 	}
-	// The legacy namespace must not appear at all. Checking the prefix rather
-	// than the three exact keys means a fourth ownership label added later
-	// cannot reintroduce the namespace unnoticed.
-	if strings.Contains(rendered, LegacyLabelNamespace) {
-		t.Fatalf(
-			"Phase 3A still writes the legacy namespace: %s", rendered,
-		)
+	// Checking the prefix rather than the three exact keys means a fourth
+	// ownership label added later cannot reintroduce the namespace unnoticed.
+	if strings.Contains(rendered, legacyLabelNamespace) {
+		t.Fatalf("the writer still emits the legacy namespace: %s", rendered)
 	}
 }
 
@@ -82,7 +204,7 @@ func TestEnsureNetworkAndVolumeWriteOnlyTheCurrentNamespaceOnCreate(t *testing.T
 					name, rendered,
 				)
 			}
-			if strings.Contains(rendered, LegacyLabelNamespace) {
+			if strings.Contains(rendered, legacyLabelNamespace) {
 				t.Fatalf(
 					"%s create still writes the legacy namespace: %s",
 					name, rendered,
@@ -92,32 +214,52 @@ func TestEnsureNetworkAndVolumeWriteOnlyTheCurrentNamespaceOnCreate(t *testing.T
 	}
 }
 
-func TestEnsureVolumeAcceptsLegacyOwnedVolumeAndRejectsForeignVolume(t *testing.T) {
-	owned := &fakeRuntimeRunner{results: []CommandResult{{
+// TestEnsureVolumeRefusesALegacyOnlyVolumeWithoutTouchingIt is the inversion
+// Phase 3B performs, and the single most consequential one in the change. Before
+// this phase a legacy-only volume read as owned and was accepted. It is now
+// unreadable, and the property that matters is what happens next: the volume is
+// refused, and no create, delete, or any other mutation is issued against the
+// name. Apple Container attaches a named volume exclusively, so a volume this
+// binary cannot see must be left exactly where it is.
+func TestEnsureVolumeRefusesALegacyOnlyVolumeWithoutTouchingIt(t *testing.T) {
+	legacy := &fakeRuntimeRunner{results: []CommandResult{{
 		Status: 0,
 		Stdout: `[{"id":"agentops-postgres-data","configuration":{"labels":` +
-			`{"com.mrbaron3.workflow.agentopsctl":"v1"}}}]`,
+			`{"` + legacyManagedLabelKey + `":"v1"}}}]`,
 	}}}
-	if err := NewAppleRuntimeForTest(owned).EnsureVolume(
+	err := NewAppleRuntimeForTest(legacy).EnsureVolume(
 		context.Background(),
 		"agentops-postgres-data",
-	); err != nil {
-		t.Fatalf("legacy-owned volume was rejected: %v", err)
+	)
+	if err == nil {
+		t.Fatal("a legacy-only volume was adopted after the reader was narrowed")
 	}
-	if len(owned.args) != 1 {
-		t.Fatalf("an owned volume was recreated: %#v", owned.args)
+	if !strings.Contains(err.Error(), "is not owned by agentopsctl") {
+		t.Fatalf("a legacy-only volume was not reported as unowned: %v", err)
 	}
+	// One call: the listing. Nothing was created and nothing was removed.
+	if len(legacy.args) != 1 {
+		t.Fatalf("a legacy-only volume reached a mutation: %#v", legacy.args)
+	}
+}
 
-	foreign := &fakeRuntimeRunner{results: []CommandResult{{
+func TestDeleteRefusesALegacyOnlyContainer(t *testing.T) {
+	fake := &fakeRuntimeRunner{results: []CommandResult{{
 		Status: 0,
-		Stdout: `[{"id":"agentops-postgres-data","configuration":{"labels":` +
-			`{"com.example.other":"v1"}}}]`,
+		Stdout: `[{"id":"agentops-runner","configuration":{"labels":` +
+			`{"` + legacyManagedLabelKey + `":"v1"}},` +
+			`"status":{"state":"stopped"}}]`,
 	}}}
-	if err := NewAppleRuntimeForTest(foreign).EnsureVolume(
+	if err := NewAppleRuntimeForTest(fake).Delete(
 		context.Background(),
-		"agentops-postgres-data",
+		"agentops-runner",
 	); err == nil {
-		t.Fatal("a foreign volume name was accepted")
+		t.Fatal("a legacy-only container was deleted")
+	}
+	for _, args := range fake.args {
+		if len(args) != 0 && args[0] == "delete" {
+			t.Fatalf("a legacy-only container reached delete: %#v", fake.args)
+		}
 	}
 }
 
@@ -142,25 +284,21 @@ func TestDeleteRefusesContainerWithoutOwnershipLabel(t *testing.T) {
 	owned := &fakeRuntimeRunner{results: []CommandResult{{
 		Status: 0,
 		Stdout: `[{"id":"agentops-runner","configuration":{"labels":` +
-			`{"` + legacyManagedLabel + `":"v1"}},"status":{"state":"stopped"}}]`,
+			`{"` + CurrentManagedLabelKey + `":"v1"}},` +
+			`"status":{"state":"stopped"}}]`,
 	}}}
 	if err := NewAppleRuntimeForTest(owned).Delete(
 		context.Background(),
 		"agentops-runner",
 	); err != nil {
-		t.Fatalf("a legacy-owned container was not deleted: %v", err)
+		t.Fatalf("an owned container was not deleted: %v", err)
 	}
 	if len(owned.args) != 2 || owned.args[1][0] != "delete" {
 		t.Fatalf("delete was not issued: %#v", owned.args)
 	}
 }
 
-// The remaining cases are the Phase 1 acceptance surface: every classification
-// Issue #123 enumerates is explicit, conflicts fail closed instead of reading
-// as unowned, and a newly created resource is discoverable through either
-// namespace.
-
-func TestClassifyOwnershipCoversEveryMigrationState(t *testing.T) {
+func TestClassifyOwnershipReadsTheCurrentNamespaceAlone(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
 		labels   map[string]string
@@ -178,54 +316,92 @@ func TestClassifyOwnershipCoversEveryMigrationState(t *testing.T) {
 			expected: OwnershipMissingLabel,
 		},
 		{
-			name:     "old-only",
-			labels:   map[string]string{LegacyManagedLabelKey: "v1"},
-			expected: OwnershipLegacyOnly,
-			owned:    true,
-		},
-		{
-			name:     "new-only",
+			name:     "current-only",
 			labels:   map[string]string{CurrentManagedLabelKey: "v1"},
-			expected: OwnershipCurrentOnly,
+			expected: OwnershipOwned,
 			owned:    true,
 		},
 		{
-			name: "dual-equal",
+			// The whole point of Phase 3B: a resource that used to read as owned
+			// through the legacy namespace is now simply not ours.
+			name:     "legacy-only is no longer owned",
+			labels:   map[string]string{legacyManagedLabelKey: "v1"},
+			expected: OwnershipMissingLabel,
+		},
+		{
+			name: "legacy-only role and digest are not ours either",
 			labels: map[string]string{
-				LegacyManagedLabelKey:  "v1",
+				legacyManagedLabelKey: "v1",
+				legacyRoleLabelKey:    "runner",
+				legacySpecLabelKey:    strings.Repeat("a", 64),
+			},
+			expected: OwnershipMissingLabel,
+		},
+		{
+			name: "dual-equal reads as owned through the current key",
+			labels: map[string]string{
+				legacyManagedLabelKey:  "v1",
 				CurrentManagedLabelKey: "v1",
 			},
-			expected: OwnershipDual,
+			expected: OwnershipOwned,
 			owned:    true,
 		},
 		{
-			name: "dual-conflicting values",
+			// A dual resource is evaluated from its current labels. The obsolete
+			// legacy value is not consulted even when it disagrees, which is what
+			// makes the current namespace authoritative rather than merely
+			// preferred.
+			name: "current value wins when the obsolete legacy value disagrees",
 			labels: map[string]string{
-				LegacyManagedLabelKey:  "v1",
+				legacyManagedLabelKey:  "v1",
 				CurrentManagedLabelKey: "v2",
 			},
-			expected: OwnershipConflicting,
+			expected: OwnershipUnmanaged,
 		},
 		{
-			name: "half-written pair is conflicting, not owned",
+			name: "current value wins in the other direction too",
 			labels: map[string]string{
-				LegacyManagedLabelKey:  "v1",
+				legacyManagedLabelKey:  "v2",
+				CurrentManagedLabelKey: "v1",
+			},
+			expected: OwnershipOwned,
+			owned:    true,
+		},
+		{
+			// The old contract called this "conflicting". With one namespace it
+			// is a half-written marker, and it must still fail closed rather than
+			// fall through to "somebody else's name".
+			name:     "blank current marker is malformed",
+			labels:   map[string]string{CurrentManagedLabelKey: ""},
+			expected: OwnershipMalformed,
+		},
+		{
+			name:     "whitespace-only current marker is malformed",
+			labels:   map[string]string{CurrentManagedLabelKey: "   "},
+			expected: OwnershipMalformed,
+		},
+		{
+			name: "blank current marker beside a legacy one is still malformed",
+			labels: map[string]string{
+				legacyManagedLabelKey:  "v1",
 				CurrentManagedLabelKey: "",
 			},
-			expected: OwnershipConflicting,
+			expected: OwnershipMalformed,
 		},
 		{
-			name: "conflicting stays conflicting when neither side is managed",
+			// A partially labelled resource of ours. Reporting it as
+			// missing-label would make it indistinguishable from a name nobody
+			// owns, which is the reading that lets the name be reused.
+			name:     "current role without a marker is malformed",
+			labels:   map[string]string{CurrentRoleLabelKey: "runner"},
+			expected: OwnershipMalformed,
+		},
+		{
+			name: "current digest without a marker is malformed",
 			labels: map[string]string{
-				LegacyManagedLabelKey:  "v2",
-				CurrentManagedLabelKey: "v3",
+				CurrentSpecLabelKey: strings.Repeat("a", 64),
 			},
-			expected: OwnershipConflicting,
-		},
-		{
-			name:     "unmanaged legacy value",
-			labels:   map[string]string{LegacyManagedLabelKey: "v2"},
-			expected: OwnershipUnmanaged,
+			expected: OwnershipMalformed,
 		},
 		{
 			name:     "unmanaged current value",
@@ -233,9 +409,47 @@ func TestClassifyOwnershipCoversEveryMigrationState(t *testing.T) {
 			expected: OwnershipUnmanaged,
 		},
 		{
+			// An unknown marker used to win outright, which reported a
+			// half-written resource as somebody else's name and dropped it out
+			// of the pre-stop gate. The blank label decides first now.
+			name: "unknown marker beside a blank role is malformed",
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v2",
+				CurrentRoleLabelKey:    "",
+			},
+			expected: OwnershipMalformed,
+		},
+		{
+			name: "unknown marker beside a blank digest is malformed",
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v2",
+				CurrentSpecLabelKey:    "   ",
+			},
+			expected: OwnershipMalformed,
+		},
+		{
+			name: "managed marker beside a blank role is malformed",
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v1",
+				CurrentRoleLabelKey:    "",
+			},
+			expected: OwnershipMalformed,
+		},
+		{
+			// A legacy marker cannot rescue a blank current label either.
+			name: "legacy marker beside a blank current role is malformed",
+			labels: map[string]string{
+				legacyManagedLabelKey: "v1",
+				CurrentRoleLabelKey:   "",
+			},
+			expected: OwnershipMalformed,
+		},
+		{
+			// A legacy marker alongside a foreign-looking current one is read
+			// entirely from the current key.
 			name: "unmanaged agreement across both namespaces",
 			labels: map[string]string{
-				LegacyManagedLabelKey:  "v2",
+				legacyManagedLabelKey:  "v2",
 				CurrentManagedLabelKey: "v2",
 			},
 			expected: OwnershipUnmanaged,
@@ -244,130 +458,165 @@ func TestClassifyOwnershipCoversEveryMigrationState(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			class := ClassifyOwnership(testCase.labels)
 			if class != testCase.expected {
-				t.Fatalf("ClassifyOwnership() = %q, want %q", class, testCase.expected)
+				t.Fatalf(
+					"ClassifyOwnership() = %q, want %q",
+					class, testCase.expected,
+				)
 			}
 			if class.Owned() != testCase.owned {
-				t.Fatalf("%q.Owned() = %v, want %v", class, class.Owned(), testCase.owned)
+				t.Fatalf(
+					"%q.Owned() = %v, want %v",
+					class, class.Owned(), testCase.owned,
+				)
 			}
 		})
 	}
 }
 
-func TestRequireOwnedReportsConflictSeparatelyFromForeignOwnership(t *testing.T) {
-	conflicting := map[string]string{
-		LegacyManagedLabelKey:  "v1",
-		CurrentManagedLabelKey: "v2",
-	}
-	err := RequireOwned("container agentops-runner", conflicting)
-	if err == nil {
-		t.Fatal("a conflicting container was accepted as owned")
-	}
-	if strings.Contains(err.Error(), "is not owned by agentopsctl") {
-		t.Fatalf("a partially migrated container was reported as unowned: %v", err)
-	}
-	for _, expected := range []string{
-		"conflicting ownership labels",
-		LegacyManagedLabelKey,
-		CurrentManagedLabelKey,
-		"partial container label migration",
+func TestRequireOwnedReportsMalformedSeparatelyFromForeignOwnership(t *testing.T) {
+	for name, labels := range map[string]map[string]string{
+		// Every fixture carries the sentinel on a label the classifier is handed,
+		// so the leak assertion below has something it could actually find. A
+		// fixture without it would make that assertion unfalsifiable.
+		"blank marker": {
+			CurrentManagedLabelKey: "",
+			CurrentRoleLabelKey:    labelValueSentinel,
+		},
+		"marker-less role":   {CurrentRoleLabelKey: labelValueSentinel},
+		"marker-less digest": {CurrentSpecLabelKey: labelValueSentinel},
+		"blank beside a legacy": {
+			legacyManagedLabelKey:  labelValueSentinel,
+			CurrentManagedLabelKey: "",
+			CurrentSpecLabelKey:    labelValueSentinel,
+		},
 	} {
-		if !strings.Contains(err.Error(), expected) {
-			t.Fatalf("conflict error omits %q: %v", expected, err)
-		}
+		t.Run(name, func(t *testing.T) {
+			err := RequireOwned("container agentops-postgres", labels)
+			if err == nil {
+				t.Fatal("an incompletely labelled container was accepted as owned")
+			}
+			if !errors.Is(err, ErrMalformedOwnershipLabels) {
+				t.Fatalf("not reported as a fail-closed condition: %v", err)
+			}
+			if strings.Contains(err.Error(), "is not owned by agentopsctl") {
+				t.Fatalf(
+					"an incompletely labelled container was reported as unowned: %v",
+					err,
+				)
+			}
+			if !strings.Contains(err.Error(), CurrentManagedLabelKey) {
+				t.Fatalf("the error does not name the key at fault: %v", err)
+			}
+			// A label value is accident- or attacker-supplied text that reaches
+			// operator output and the durable lifecycle failure record, so the
+			// message names keys and never values. The guard below proves the
+			// fixture could detect a leak before asserting that there is none:
+			// without it this assertion cannot fail, whatever the message says.
+			if !fixtureCarriesSentinel(labels) {
+				t.Fatalf("fixture %q cannot detect a leak: %v", name, labels)
+			}
+			if strings.Contains(err.Error(), labelValueSentinel) {
+				t.Fatalf("the error echoes a label value: %v", err)
+			}
+		})
 	}
 
-	foreign := RequireOwned(
-		"container agentops-runner",
-		map[string]string{LegacyManagedLabelKey: "v2"},
-	)
-	if foreign == nil ||
-		!strings.Contains(foreign.Error(), "is not owned by agentopsctl") {
-		t.Fatalf("a foreign container was not reported as unowned: %v", foreign)
+	for name, labels := range map[string]map[string]string{
+		"foreign current value": {CurrentManagedLabelKey: "v2"},
+		"legacy-only":           {legacyManagedLabelKey: "v1"},
+		"no labels at all":      {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := RequireOwned("container agentops-runner", labels)
+			if err == nil ||
+				!strings.Contains(err.Error(), "is not owned by agentopsctl") {
+				t.Fatalf("not reported as unowned: %v", err)
+			}
+			if errors.Is(err, ErrMalformedOwnershipLabels) {
+				t.Fatalf("an unowned resource was reported as malformed: %v", err)
+			}
+		})
 	}
 }
 
-func TestReadDualLabelResolvesRoleAndSpecPairs(t *testing.T) {
+func TestReadOwnershipLabelResolvesRoleAndSpec(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	for _, testCase := range []struct {
-		name          string
-		labels        map[string]string
-		role          string
-		roleAgreement LabelAgreement
-		specDigest    string
-		specAgreement LabelAgreement
+		name         string
+		labels       map[string]string
+		role         string
+		rolePresence LabelPresence
+		specDigest   string
+		specPresence LabelPresence
 	}{
 		{
-			name:          "absent",
-			labels:        map[string]string{},
-			roleAgreement: LabelAbsent,
-			specAgreement: LabelAbsent,
+			name:         "absent",
+			labels:       map[string]string{},
+			rolePresence: LabelAbsent,
+			specPresence: LabelAbsent,
 		},
 		{
-			name: "old-only",
+			name: "legacy-only reads as absent",
 			labels: map[string]string{
-				LegacyRoleLabelKey: "runner",
-				LegacySpecLabelKey: digest,
+				legacyRoleLabelKey: "runner",
+				legacySpecLabelKey: digest,
 			},
-			role:          "runner",
-			roleAgreement: LabelLegacyOnly,
-			specDigest:    digest,
-			specAgreement: LabelLegacyOnly,
+			rolePresence: LabelAbsent,
+			specPresence: LabelAbsent,
 		},
 		{
-			name: "new-only",
+			name: "current-only",
 			labels: map[string]string{
 				CurrentRoleLabelKey: "runner",
 				CurrentSpecLabelKey: digest,
 			},
-			role:          "runner",
-			roleAgreement: LabelCurrentOnly,
-			specDigest:    digest,
-			specAgreement: LabelCurrentOnly,
+			role:         "runner",
+			rolePresence: LabelPresent,
+			specDigest:   digest,
+			specPresence: LabelPresent,
 		},
 		{
-			name: "dual-equal",
+			name: "the current value is taken even when legacy disagrees",
 			labels: map[string]string{
-				LegacyRoleLabelKey:  "runner",
+				legacyRoleLabelKey:  "triage",
 				CurrentRoleLabelKey: "runner",
-				LegacySpecLabelKey:  digest,
+				legacySpecLabelKey:  strings.Repeat("b", 64),
 				CurrentSpecLabelKey: digest,
 			},
-			role:          "runner",
-			roleAgreement: LabelDual,
-			specDigest:    digest,
-			specAgreement: LabelDual,
+			role:         "runner",
+			rolePresence: LabelPresent,
+			specDigest:   digest,
+			specPresence: LabelPresent,
 		},
 		{
-			name: "dual-conflicting",
+			name: "blank current values are half-written, not values",
 			labels: map[string]string{
-				LegacyRoleLabelKey:  "runner",
-				CurrentRoleLabelKey: "triage",
-				LegacySpecLabelKey:  digest,
-				CurrentSpecLabelKey: strings.Repeat("b", 64),
+				CurrentRoleLabelKey: "",
+				CurrentSpecLabelKey: "  ",
 			},
-			roleAgreement: LabelConflicting,
-			specAgreement: LabelConflicting,
+			rolePresence: LabelBlank,
+			specPresence: LabelBlank,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			role, roleAgreement := ReadRoleLabel(testCase.labels)
-			if role != testCase.role || roleAgreement != testCase.roleAgreement {
+			role, rolePresence := ReadRoleLabel(testCase.labels)
+			if role != testCase.role || rolePresence != testCase.rolePresence {
 				t.Fatalf(
 					"ReadRoleLabel() = %q, %q; want %q, %q",
-					role, roleAgreement, testCase.role, testCase.roleAgreement,
+					role, rolePresence, testCase.role, testCase.rolePresence,
 				)
 			}
-			sealed, specAgreement := ReadSpecLabel(testCase.labels)
+			sealed, specPresence := ReadSpecLabel(testCase.labels)
 			if sealed != testCase.specDigest ||
-				specAgreement != testCase.specAgreement {
+				specPresence != testCase.specPresence {
 				t.Fatalf(
 					"ReadSpecLabel() = %q, %q; want %q, %q",
-					sealed, specAgreement, testCase.specDigest, testCase.specAgreement,
+					sealed, specPresence,
+					testCase.specDigest, testCase.specPresence,
 				)
 			}
-			if roleAgreement.Agreed() != (testCase.roleAgreement != LabelAbsent &&
-				testCase.roleAgreement != LabelConflicting) {
-				t.Fatalf("%q.Agreed() is inconsistent", roleAgreement)
+			if rolePresence.Readable() != (testCase.rolePresence == LabelPresent) {
+				t.Fatalf("%q.Readable() is inconsistent", rolePresence)
 			}
 		})
 	}
@@ -394,27 +643,26 @@ func TestRunArgsWriteEveryOwnershipLabelInTheCurrentNamespace(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		LegacyManagedLabelKey, LegacyRoleLabelKey, LegacySpecLabelKey,
+		legacyManagedLabelKey, legacyRoleLabelKey, legacySpecLabelKey,
 	} {
 		if strings.Contains(rendered, forbidden) {
 			t.Fatalf("legacy label %q is still written: %s", forbidden, rendered)
 		}
 	}
-	// A container created here classifies as current-only, which every reader
-	// in this phase still treats as owned. That equivalence is the entire
-	// reason the writer may move before the reader.
+	// Writer and reader are asserted against one another: what this binary
+	// creates is exactly what it can still read back as fully owned.
 	labels := labelsFromArgs(args)
-	if class := ClassifyOwnership(labels); class != OwnershipCurrentOnly {
+	if class := ClassifyOwnership(labels); class != OwnershipOwned {
 		t.Fatalf("newly created container classifies as %q", class)
 	}
 	if err := RequireManaged("container", labels); err != nil {
 		t.Fatalf("a container this binary just created is not managed: %v", err)
 	}
 	if err := RequireRole("container", "runner", labels); err != nil {
-		t.Fatalf("role label unreadable after the writer change: %v", err)
+		t.Fatalf("role label unreadable: %v", err)
 	}
 	if err := RequireSpecDigest("container", digest, labels); err != nil {
-		t.Fatalf("spec label unreadable after the writer change: %v", err)
+		t.Fatalf("spec label unreadable: %v", err)
 	}
 }
 
@@ -432,7 +680,7 @@ func labelsFromArgs(args []string) map[string]string {
 	return labels
 }
 
-func TestEnsureNetworkAndVolumeCreateCurrentOnlyAndReadEitherNamespace(t *testing.T) {
+func TestEnsureNetworkAndVolumeCreateOwnedResources(t *testing.T) {
 	network := &fakeRuntimeRunner{results: []CommandResult{{Status: 0, Stdout: `[]`}}}
 	if err := NewAppleRuntimeForTest(network).EnsureNetwork(
 		context.Background(),
@@ -445,7 +693,7 @@ func TestEnsureNetworkAndVolumeCreateCurrentOnlyAndReadEitherNamespace(t *testin
 	}
 	if class := ClassifyOwnership(
 		labelsFromArgs(network.args[1]),
-	); class != OwnershipCurrentOnly {
+	); class != OwnershipOwned {
 		t.Fatalf("created network classifies as %q", class)
 	}
 	if network.args[1][len(network.args[1])-1] != "agentops-internal" {
@@ -464,7 +712,7 @@ func TestEnsureNetworkAndVolumeCreateCurrentOnlyAndReadEitherNamespace(t *testin
 	}
 	if class := ClassifyOwnership(
 		labelsFromArgs(volume.args[1]),
-	); class != OwnershipCurrentOnly {
+	); class != OwnershipOwned {
 		t.Fatalf("created volume classifies as %q", class)
 	}
 	if volume.args[1][len(volume.args[1])-1] != "agentops-postgres-data" {
@@ -472,87 +720,126 @@ func TestEnsureNetworkAndVolumeCreateCurrentOnlyAndReadEitherNamespace(t *testin
 	}
 }
 
-// TestReadersStillAcceptEveryLegacyShape is the other half of Phase 3A. The
-// writer moved; the reader must not, because the host is full of resources the
-// sweep has not reached yet and because a Phase 2 binary has to remain a valid
-// rollback target.
-func TestReadersStillAcceptEveryLegacyShape(t *testing.T) {
+// TestReadersAcceptOnlyTheCurrentNamespace is the counterpart to the Phase 3A
+// test that required the reader to accept every legacy shape. The requirement
+// has inverted: only the current namespace proves ownership, and a resource
+// carrying a complete legacy triple is refused as thoroughly as an unlabelled
+// one.
+func TestReadersAcceptOnlyTheCurrentNamespace(t *testing.T) {
 	digest := strings.Repeat("b", 64)
-	for name, testCase := range map[string]struct {
-		labels map[string]string
-		class  OwnershipClass
-	}{
-		"legacy-only": {
-			labels: map[string]string{
-				LegacyManagedLabelKey: "v1",
-				LegacyRoleLabelKey:    "runner",
-				LegacySpecLabelKey:    digest,
-			},
-			class: OwnershipLegacyOnly,
-		},
-		"dual": {
-			labels: map[string]string{
-				LegacyManagedLabelKey:  "v1",
-				CurrentManagedLabelKey: "v1",
-				LegacyRoleLabelKey:     "runner",
-				CurrentRoleLabelKey:    "runner",
-				LegacySpecLabelKey:     digest,
-				CurrentSpecLabelKey:    digest,
-			},
-			class: OwnershipDual,
-		},
-		"current-only": {
-			labels: map[string]string{
-				CurrentManagedLabelKey: "v1",
-				CurrentRoleLabelKey:    "runner",
-				CurrentSpecLabelKey:    digest,
-			},
-			class: OwnershipCurrentOnly,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if class := ClassifyOwnership(testCase.labels); class != testCase.class {
-				t.Fatalf("classified %q, want %q", class, testCase.class)
-			}
-			if err := RequireManaged("resource", testCase.labels); err != nil {
-				t.Fatalf("reader stopped owning a %s resource: %v", name, err)
-			}
-			if err := RequireRole(
-				"resource", "runner", testCase.labels,
-			); err != nil {
-				t.Fatalf("role unreadable for %s: %v", name, err)
-			}
-			if err := RequireSpecDigest(
-				"resource", digest, testCase.labels,
-			); err != nil {
-				t.Fatalf("spec digest unreadable for %s: %v", name, err)
-			}
-		})
-	}
+	t.Run("current-only", func(t *testing.T) {
+		labels := map[string]string{
+			CurrentManagedLabelKey: "v1",
+			CurrentRoleLabelKey:    "runner",
+			CurrentSpecLabelKey:    digest,
+		}
+		if class := ClassifyOwnership(labels); class != OwnershipOwned {
+			t.Fatalf("classified %q, want %q", class, OwnershipOwned)
+		}
+		if err := RequireManaged("resource", labels); err != nil {
+			t.Fatalf("reader stopped owning a current-only resource: %v", err)
+		}
+		if err := RequireRole("resource", "runner", labels); err != nil {
+			t.Fatalf("role unreadable: %v", err)
+		}
+		if err := RequireSpecDigest("resource", digest, labels); err != nil {
+			t.Fatalf("spec digest unreadable: %v", err)
+		}
+	})
+	t.Run("dual", func(t *testing.T) {
+		// The legacy half is inert: the resource is owned because of its current
+		// labels, and would be owned identically without the legacy ones.
+		labels := map[string]string{
+			legacyManagedLabelKey:  "v1",
+			CurrentManagedLabelKey: "v1",
+			legacyRoleLabelKey:     "runner",
+			CurrentRoleLabelKey:    "runner",
+			legacySpecLabelKey:     digest,
+			CurrentSpecLabelKey:    digest,
+		}
+		if class := ClassifyOwnership(labels); class != OwnershipOwned {
+			t.Fatalf("classified %q, want %q", class, OwnershipOwned)
+		}
+		if err := RequireManaged("resource", labels); err != nil {
+			t.Fatalf("a dual resource is not managed: %v", err)
+		}
+		if err := RequireRole("resource", "runner", labels); err != nil {
+			t.Fatalf("role unreadable on a dual resource: %v", err)
+		}
+	})
+	t.Run("legacy-only", func(t *testing.T) {
+		labels := map[string]string{
+			legacyManagedLabelKey: "v1",
+			legacyRoleLabelKey:    "runner",
+			legacySpecLabelKey:    digest,
+		}
+		if class := ClassifyOwnership(labels); class != OwnershipMissingLabel {
+			t.Fatalf("classified %q, want %q", class, OwnershipMissingLabel)
+		}
+		if err := RequireManaged("resource", labels); err == nil {
+			t.Fatal("a legacy-only resource passed the destructive gate")
+		}
+		if err := RequireRole("resource", "runner", labels); err == nil {
+			t.Fatal("a legacy-only role label was read")
+		}
+		if err := RequireSpecDigest("resource", digest, labels); err == nil {
+			t.Fatal("a legacy-only specification digest was read")
+		}
+	})
+	t.Run("legacy role disagrees with current", func(t *testing.T) {
+		// Only the current value is consulted, so the stale legacy role neither
+		// blocks the read nor changes its answer.
+		labels := map[string]string{
+			CurrentManagedLabelKey: "v1",
+			legacyRoleLabelKey:     "triage",
+			CurrentRoleLabelKey:    "runner",
+		}
+		if err := RequireRole("resource", "runner", labels); err != nil {
+			t.Fatalf("an obsolete legacy role blocked the current one: %v", err)
+		}
+		if err := RequireManaged("resource", labels); err != nil {
+			t.Fatalf("an obsolete legacy role blocked the destructive gate: %v", err)
+		}
+	})
 }
 
-func TestEnsureVolumeClassifiesEveryMigrationStateWithoutRecreating(t *testing.T) {
+func TestEnsureVolumeClassifiesEveryStateWithoutRecreating(t *testing.T) {
 	for _, testCase := range []struct {
-		name     string
-		labels   string
-		accepted bool
-		conflict bool
+		name      string
+		labels    string
+		accepted  bool
+		malformed bool
 	}{
-		{name: "old-only", labels: `{"` + LegacyManagedLabelKey + `":"v1"}`, accepted: true},
-		{name: "new-only", labels: `{"` + CurrentManagedLabelKey + `":"v1"}`, accepted: true},
+		{
+			name:     "current-only",
+			labels:   `{"` + CurrentManagedLabelKey + `":"v1"}`,
+			accepted: true,
+		},
 		{
 			name: "dual-equal",
-			labels: `{"` + LegacyManagedLabelKey + `":"v1","` +
+			labels: `{"` + legacyManagedLabelKey + `":"v1","` +
 				CurrentManagedLabelKey + `":"v1"}`,
 			accepted: true,
 		},
 		{
-			name: "dual-conflicting",
-			labels: `{"` + LegacyManagedLabelKey + `":"v1","` +
+			// Current is authoritative: the obsolete legacy v1 does not rescue a
+			// current value this binary does not manage.
+			name: "legacy disagrees and current is unmanaged",
+			labels: `{"` + legacyManagedLabelKey + `":"v1","` +
 				CurrentManagedLabelKey + `":"v2"}`,
-			conflict: true,
 		},
-		{name: "unmanaged", labels: `{"` + LegacyManagedLabelKey + `":"v2"}`},
+		{name: "legacy-only", labels: `{"` + legacyManagedLabelKey + `":"v1"}`},
+		{
+			name:      "blank current marker",
+			labels:    `{"` + CurrentManagedLabelKey + `":""}`,
+			malformed: true,
+		},
+		{
+			name:      "current role without a marker",
+			labels:    `{"` + CurrentRoleLabelKey + `":"runner"}`,
+			malformed: true,
+		},
+		{name: "unmanaged", labels: `{"` + CurrentManagedLabelKey + `":"v2"}`},
 		{name: "missing-label", labels: `{}`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -577,33 +864,40 @@ func TestEnsureVolumeClassifiesEveryMigrationStateWithoutRecreating(t *testing.T
 			if err == nil {
 				t.Fatal("a volume this binary does not own was accepted")
 			}
+			// Whatever the reason for refusal, the existing volume is never
+			// touched. This is the property that keeps PostgreSQL's data safe.
 			if len(fake.args) != 1 {
 				t.Fatalf("a rejected volume reached a mutation: %#v", fake.args)
 			}
-			assertOwnershipRejection(t, err, testCase.conflict)
+			assertOwnershipRejection(t, err, testCase.malformed)
 		})
 	}
 }
 
-func TestDeleteNeverRemovesConflictingOrForeignContainers(t *testing.T) {
+func TestDeleteNeverRemovesMalformedOrUnownedContainers(t *testing.T) {
 	for _, testCase := range []struct {
 		name    string
 		labels  string
 		deleted bool
 	}{
-		{name: "old-only", labels: `{"` + LegacyManagedLabelKey + `":"v1"}`, deleted: true},
-		{name: "new-only", labels: `{"` + CurrentManagedLabelKey + `":"v1"}`, deleted: true},
 		{
-			name: "dual-equal",
-			labels: `{"` + LegacyManagedLabelKey + `":"v1","` +
-				CurrentManagedLabelKey + `":"v1"}`,
+			name:    "current-only",
+			labels:  `{"` + CurrentManagedLabelKey + `":"v1"}`,
 			deleted: true,
 		},
 		{
-			name: "dual-conflicting",
-			labels: `{"` + LegacyManagedLabelKey + `":"v1","` +
+			name: "dual-equal",
+			labels: `{"` + legacyManagedLabelKey + `":"v1","` +
+				CurrentManagedLabelKey + `":"v1"}`,
+			deleted: true,
+		},
+		{name: "legacy-only", labels: `{"` + legacyManagedLabelKey + `":"v1"}`},
+		{
+			name: "legacy disagrees and current is unmanaged",
+			labels: `{"` + legacyManagedLabelKey + `":"v1","` +
 				CurrentManagedLabelKey + `":"v2"}`,
 		},
+		{name: "blank current marker", labels: `{"` + CurrentManagedLabelKey + `":""}`},
 		{name: "unmanaged", labels: `{"` + CurrentManagedLabelKey + `":"v2"}`},
 		{name: "missing-label", labels: `{}`},
 	} {
@@ -633,102 +927,209 @@ func TestDeleteNeverRemovesConflictingOrForeignContainers(t *testing.T) {
 	}
 }
 
-// assertOwnershipRejection checks that a rejection names the right reason: a
-// partially migrated resource must never be reported as one this binary does
-// not own, because "unowned" is what later phases read as "somebody else's".
-func assertOwnershipRejection(t *testing.T, err error, conflict bool) {
+// assertOwnershipRejection checks that a rejection names the right reason: an
+// incompletely labelled resource must never be reported as one this binary does
+// not own, because "unowned" is what tells later logic a name is somebody
+// else's.
+func assertOwnershipRejection(t *testing.T, err error, malformed bool) {
 	t.Helper()
 	if err == nil {
 		t.Fatal("a resource this binary does not own was accepted")
 	}
-	if conflict {
-		if !strings.Contains(err.Error(), "conflicting ownership labels") ||
-			!strings.Contains(err.Error(), "partial container label migration") {
-			t.Fatalf("a partially migrated resource was not reported as such: %v", err)
+	if malformed {
+		if !errors.Is(err, ErrMalformedOwnershipLabels) {
+			t.Fatalf(
+				"an incompletely labelled resource was not reported as such: %v",
+				err,
+			)
 		}
 		if strings.Contains(err.Error(), "is not owned by agentopsctl") {
-			t.Fatalf("a partially migrated resource was reported as unowned: %v", err)
+			t.Fatalf(
+				"an incompletely labelled resource was reported as unowned: %v",
+				err,
+			)
 		}
 		return
 	}
 	if !strings.Contains(err.Error(), "is not owned by agentopsctl") {
 		t.Fatalf("a foreign resource was not reported as unowned: %v", err)
 	}
+	if errors.Is(err, ErrMalformedOwnershipLabels) {
+		t.Fatalf("an unowned resource was reported as malformed: %v", err)
+	}
 }
 
-// Ownership is not the only pair that can be half-written. A container whose
-// role or specification namespaces disagree is just as partially migrated, and
-// the destructive paths are where that has to stop the caller.
+// The ownership marker is not the only label that can be half-written. A
+// container whose role or specification label is blank is just as incomplete,
+// and the destructive paths are where that has to stop the caller.
 
-func TestRequireManagedRefusesSecondaryLabelConflicts(t *testing.T) {
-	owned := map[string]string{
-		LegacyManagedLabelKey:  "v1",
-		CurrentManagedLabelKey: "v1",
-	}
-	for name, extra := range map[string]map[string]string{
-		"role": {
-			LegacyRoleLabelKey:  "runner",
-			CurrentRoleLabelKey: "triage",
-		},
-		"specification digest": {
-			LegacySpecLabelKey:  strings.Repeat("a", 64),
-			CurrentSpecLabelKey: strings.Repeat("b", 64),
-		},
+func TestRequireManagedRefusesBlankSecondaryLabels(t *testing.T) {
+	owned := map[string]string{CurrentManagedLabelKey: "v1"}
+	for name, key := range map[string]string{
+		"role":                 CurrentRoleLabelKey,
+		"specification digest": CurrentSpecLabelKey,
 	} {
-		labels := map[string]string{}
-		for key, value := range owned {
-			labels[key] = value
-		}
-		for key, value := range extra {
-			labels[key] = value
-		}
-		// Ownership alone still reads as owned, which is exactly the trap.
-		if err := RequireOwned("container agentops-runner", labels); err != nil {
-			t.Fatalf("%s fixture is not ownership-clean: %v", name, err)
-		}
-		err := RequireManaged("container agentops-runner", labels)
-		if err == nil {
-			t.Fatalf("a %s conflict passed the destructive gate", name)
-		}
-		if !errors.Is(err, ErrConflictingLabels) ||
-			!strings.Contains(err.Error(), name) {
-			t.Fatalf("%s conflict was not reported as a partial migration: %v", name, err)
-		}
+		t.Run(name, func(t *testing.T) {
+			labels := map[string]string{CurrentManagedLabelKey: "v1", key: ""}
+			// A blank ancillary label outranks the marker, so ownership itself
+			// now fails closed rather than leaving the trap to RequireManaged.
+			if err := RequireOwned(
+				"container agentops-runner", labels,
+			); !errors.Is(err, ErrMalformedOwnershipLabels) {
+				t.Fatalf("a blank %s did not fail ownership closed: %v", name, err)
+			}
+			err := RequireManaged("container agentops-runner", labels)
+			if err == nil {
+				t.Fatalf("a blank %s label passed the destructive gate", name)
+			}
+			if !errors.Is(err, ErrMalformedOwnershipLabels) ||
+				!strings.Contains(err.Error(), name) {
+				t.Fatalf("a blank %s was not reported as incomplete: %v", name, err)
+			}
+		})
 	}
 
-	// A resource with no secondary pairs at all — every network and volume — is
-	// still managed once ownership is proven.
+	// A resource with no secondary labels at all — every network and volume — is
+	// still managed once ownership is proven. Absent is not blank.
 	if err := RequireManaged("volume agentops-postgres-data", owned); err != nil {
 		t.Fatalf("an owned volume was refused: %v", err)
 	}
 }
 
-func TestDeleteRefusesContainersWithConflictingRoleOrSpecLabels(t *testing.T) {
+func TestDeleteRefusesContainersWithBlankRoleOrSpecLabels(t *testing.T) {
 	for name, extra := range map[string]string{
-		"role": `"` + LegacyRoleLabelKey + `":"runner","` +
-			CurrentRoleLabelKey + `":"triage"`,
-		"specification digest": `"` + LegacySpecLabelKey + `":"` +
-			strings.Repeat("a", 64) + `","` + CurrentSpecLabelKey + `":"` +
-			strings.Repeat("b", 64) + `"`,
+		"role":                 `"` + CurrentRoleLabelKey + `":""`,
+		"specification digest": `"` + CurrentSpecLabelKey + `":"  "`,
 	} {
-		fake := &fakeRuntimeRunner{results: []CommandResult{{
-			Status: 0,
-			Stdout: `[{"id":"agentops-runner","configuration":{"labels":{` +
-				`"` + LegacyManagedLabelKey + `":"v1","` +
-				CurrentManagedLabelKey + `":"v1",` + extra +
-				`}},"status":{"state":"stopped"}}]`,
-		}}}
-		err := NewAppleRuntimeForTest(fake).Delete(
-			context.Background(),
-			"agentops-runner",
-		)
-		if !errors.Is(err, ErrConflictingLabels) {
-			t.Fatalf("a %s conflict did not fail closed on delete: %v", name, err)
-		}
-		for _, args := range fake.args {
-			if len(args) != 0 && args[0] == "delete" {
-				t.Fatalf("a %s-conflicting container was deleted: %#v", name, fake.args)
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeRuntimeRunner{results: []CommandResult{{
+				Status: 0,
+				Stdout: `[{"id":"agentops-runner","configuration":{"labels":{` +
+					`"` + CurrentManagedLabelKey + `":"v1",` + extra +
+					`}},"status":{"state":"stopped"}}]`,
+			}}}
+			err := NewAppleRuntimeForTest(fake).Delete(
+				context.Background(),
+				"agentops-runner",
+			)
+			if !errors.Is(err, ErrMalformedOwnershipLabels) {
+				t.Fatalf("a blank %s did not fail closed on delete: %v", name, err)
 			}
+			for _, args := range fake.args {
+				if len(args) != 0 && args[0] == "delete" {
+					t.Fatalf(
+						"a container with a blank %s was deleted: %#v",
+						name, fake.args,
+					)
+				}
+			}
+		})
+	}
+}
+
+// fixtureCarriesSentinel reports whether a fixture actually contains the value
+// the leak assertion looks for. It exists so a fixture that lost the sentinel
+// fails loudly rather than making the assertion above vacuously true.
+func fixtureCarriesSentinel(labels map[string]string) bool {
+	for _, value := range labels {
+		if value == labelValueSentinel {
+			return true
 		}
+	}
+	return false
+}
+
+// TestMalformedReasonNamesTheLabelActuallyAtFault pins the diagnostic against
+// the classifier. ClassifyOwnership treats a blank role or specification label
+// as malformed whatever the marker says, so the reason has to decide in the same
+// order — otherwise a container with a valid marker beside a blank role is
+// reported as having no marker at all, and the operator goes looking for a label
+// that is present and correct on a resource no destructive path may touch.
+func TestMalformedReasonNamesTheLabelActuallyAtFault(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for name, testCase := range map[string]struct {
+		labels  map[string]string
+		names   string
+		absents []string
+	}{
+		"blank marker": {
+			labels: map[string]string{CurrentManagedLabelKey: ""},
+			names:  CurrentManagedLabelKey + " is present but empty",
+		},
+		"managed marker and a blank role": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v1",
+				CurrentRoleLabelKey:    "",
+			},
+			names: CurrentRoleLabelKey + " is present but empty",
+			// The marker is present and valid; saying it is absent is the bug.
+			absents: []string{"is absent"},
+		},
+		"managed marker and a blank digest": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v1",
+				CurrentSpecLabelKey:    "   ",
+			},
+			names:   CurrentSpecLabelKey + " is present but empty",
+			absents: []string{"is absent"},
+		},
+		"unknown marker and a blank role": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v2",
+				CurrentRoleLabelKey:    "",
+			},
+			names:   CurrentRoleLabelKey + " is present but empty",
+			absents: []string{"is absent"},
+		},
+		"unknown marker and a blank digest": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v2",
+				CurrentSpecLabelKey:    "",
+			},
+			names:   CurrentSpecLabelKey + " is present but empty",
+			absents: []string{"is absent"},
+		},
+		"absent marker beside a present role": {
+			labels: map[string]string{CurrentRoleLabelKey: "runner"},
+			names:  CurrentManagedLabelKey + " is absent",
+		},
+		"absent marker beside a present digest": {
+			labels: map[string]string{CurrentSpecLabelKey: digest},
+			names:  CurrentManagedLabelKey + " is absent",
+		},
+		"a blank marker outranks a blank role": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "",
+				CurrentRoleLabelKey:    "",
+			},
+			names: CurrentManagedLabelKey + " is present but empty",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The fixture has to actually be malformed, or the reason is moot.
+			if class := ClassifyOwnership(testCase.labels); class != OwnershipMalformed {
+				t.Fatalf("fixture classifies as %q, want malformed", class)
+			}
+			err := RequireOwned("container agentops-postgres", testCase.labels)
+			if !errors.Is(err, ErrMalformedOwnershipLabels) {
+				t.Fatalf("not reported as fail-closed: %v", err)
+			}
+			if !strings.Contains(err.Error(), testCase.names) {
+				t.Fatalf("the reason does not name the label at fault: %v", err)
+			}
+			for _, forbidden := range testCase.absents {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("the reason claims %q about a present label: %v",
+						forbidden, err)
+				}
+			}
+			// Keys only, never values.
+			for _, value := range testCase.labels {
+				if trimmed := strings.TrimSpace(value); trimmed != "" &&
+					strings.Contains(err.Error(), trimmed) {
+					t.Fatalf("the reason echoes a label value: %v", err)
+				}
+			}
+		})
 	}
 }

@@ -27,7 +27,6 @@ func (runtime *countingSweepRuntime) Containers(
 func TestApplyRefusesBeforeTouchingTheRuntime(t *testing.T) {
 	runtime := &countingSweepRuntime{}
 	sweeper := NewLabelSweeper(runtime)
-	sweeper.Only = []string{"agentops-runner"}
 	report, err := sweeper.Apply(context.Background())
 	if err == nil {
 		t.Fatal("the retired sweep applied something")
@@ -65,6 +64,15 @@ func TestPlanStillTakesAReadOnlyInventory(t *testing.T) {
 // holds records produced by the sweep before it was withdrawn, and they are
 // part of the epic's audit trail — so they have to keep decoding into the types
 // this package still exports.
+//
+// What "keep decoding" means is narrower than it looks, and the assertions below
+// say which parts are actually guaranteed. Identity, state, disposition, and the
+// volume attachments survive verbatim. The per-record `roleAgreement` and
+// `specAgreement` fields do NOT: Phase 3B replaced a relation between two
+// namespaces with the presence of one label, and there is no honest value to
+// decode `"dual"` or `"legacy-only"` into. They are readable in the committed
+// JSON, which is where that history belongs, and this test does not pretend the
+// Go types still carry them.
 func TestMergedPhase2EvidenceStillDecodes(t *testing.T) {
 	root := repositoryRootForTest(t)
 	directory := filepath.Join(root, "evidence", "label-p2")
@@ -111,6 +119,26 @@ func TestMergedPhase2EvidenceStillDecodes(t *testing.T) {
 				if volume.Name == "" {
 					t.Fatalf("%s decoded a nameless volume record", entry.Name())
 				}
+			}
+		}
+		// Dispositions the retired sweep produced decode as plain values of the
+		// defined string type, which is what keeps the totals readable without a
+		// constant for each. Asserting it here is what makes migration.go's claim
+		// to that effect a tested one rather than a comment.
+		for disposition, count := range evidence.Plan.Totals {
+			if disposition == "" {
+				t.Fatalf("%s decoded a nameless disposition", entry.Name())
+			}
+			if count < 0 {
+				t.Fatalf("%s decoded a negative total", entry.Name())
+			}
+		}
+		for _, record := range evidence.Plan.Records {
+			if record.ID == "" || record.Disposition == "" {
+				t.Fatalf(
+					"%s decoded an unusable inventory record: %#v",
+					entry.Name(), record,
+				)
 			}
 		}
 		if len(evidence.PlannedSpecs) > 0 {

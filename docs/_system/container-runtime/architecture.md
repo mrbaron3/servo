@@ -62,7 +62,7 @@
   security/runtime seamとして保ち、PostgreSQLのdurable business coordinationと同一視しない。
   exact schema/checksumと同一revision topologyを保つ間、image群のrelease unitはrepository全体で一体とする
   （ADR-0021）。
-- **ARCH-container-runtime-018 Ownership label compatibility boundary** — publicな形: `ClassifyOwnership`／`RequireOwned`／`ReadDualLabel`。container ownership labelのkey、writer、readerを`internal/lifecycle/ownership.go`へ単一化し、新規resourceへ`com.mrbaron3.workflow.*`と`com.mrbaron3.servo.*`をdual-writeしてどちらのnamespaceからも読む。旧binaryへ戻しても旧keyだけで発見できるrollback契約を保ち、新旧の値が食い違うresourceはunownedではなくfail-closedな部分移行として扱う（[ADR-0022](../../decisions/ADR-0022-servo-product-and-agentops-component-naming.md)、[Issue #123](https://github.com/mrbaron3/servo/issues/123)）。
+- **ARCH-container-runtime-018 Ownership label compatibility boundary** — publicな形: `ClassifyOwnership`／`RequireOwned`／`ReadOwnershipLabel`。container ownership labelのkey、writer、readerを`internal/lifecycle/ownership.go`へ単一化する。**P3B時点でnamespaceは`com.mrbaron3.servo.*`ただ1つ**であり、writerもreaderもそれだけを扱う（P1のdual-write、P3Aのcurrent-only write、P3Bのcurrent-only readという順で移行した。writeを先に止め、掃討が終わってからreadを消す順序が安全性そのものである）。旧namespaceだけを持つresourceは`missing-label`＝非所有として**採用も変更も削除もしない**。current namespaceが中途半端に書かれたresourceはunownedではなく`malformed`としてfail-closeする。P1/P2/P3Aへのrollbackは自動fallbackではなく、保全済みprivate backupとP3B以前のbinaryを要する意図的な運用判断である（[ADR-0022](../../decisions/ADR-0022-servo-product-and-agentops-component-naming.md)、[Issue #123](https://github.com/mrbaron3/servo/issues/123)、[runbook](../../runbooks/container-label-migration.md)）。
 
 ## 段階導入
 

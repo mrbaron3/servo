@@ -2,82 +2,106 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/mrbaron3/servo/apps/control-plane/internal/lifecycle"
 )
 
-// `migrate-label-metadata` is the Phase 3A operator surface. Apple Container
+// `migrate-label-metadata` was the Phase 3A operator surface. Apple Container
 // 1.1.0 has no route that changes an existing resource's labels — the complete
 // XPC surface is create, delete, inspect, list, and prune — so a volume's labels
-// can only be corrected by rewriting the runtime's own metadata while it is
+// could only be corrected by rewriting the runtime's own metadata while it was
 // stopped. Recreating the volume instead would destroy the PostgreSQL data it
-// holds, which is why that option does not appear here at all.
+// holds, which is why that option never appeared here at all.
 //
-// The default spelling is a read-only plan for the same reason `migrate-labels`
-// defaults to an inventory: the mutating form takes the runtime down and edits
-// files that belong to another program, and the safe word has to be the short
-// one.
+// Phase 3B retires the forward stages. `--stage prepare` added the current label
+// pair beside the legacy one and `--stage retire` removed the legacy pair; both
+// decided what to write by comparing the two namespaces, and this binary now
+// reads one. The flags are still declared so that an operator who reaches for
+// them gets the reason rather than "flag provided but not defined", and the
+// refusal happens before the runtime is touched — nothing on that path can stop
+// Apple Container as a side effect of being told no.
+//
+// What remains is `--rollback`, which restores the documents a Phase 3A run
+// recorded, to the exact bytes it recorded for them. It is the one-way boundary
+// made operable: this binary can undo Phase 3A, it cannot redo it, and a host
+// returned to its pre-Phase-3A labels has to be operated by a pre-Phase-3B
+// binary afterwards.
 
 // serviceRestartTimeout bounds the mandatory restart. It is generous: bringing
 // the runtime back matters more than finishing quickly, and the alternative to
 // waiting is leaving the operator's machine without a container runtime.
 const serviceRestartTimeout = 3 * time.Minute
 
-// metadataEvidence is the durable record of one plan, application, or rollback.
-// Every path in it is relative to the application root, so a file that is
-// committed to the repository never records where the operator's home
-// directory is.
-type metadataEvidence struct {
-	GeneratedAt string                         `json:"generatedAt"`
-	Mode        string                         `json:"mode"`
-	Stage       lifecycle.MetadataStage        `json:"stage"`
-	Host        lifecycle.MetadataHost         `json:"host"`
-	Inventory   *lifecycle.OwnershipInventory  `json:"inventory,omitempty"`
-	Plan        *lifecycle.MetadataSweepPlan   `json:"plan,omitempty"`
-	Report      *lifecycle.MetadataSweepReport `json:"report,omitempty"`
-	VerifiedBy  *lifecycle.OwnershipInventory  `json:"verifiedInventory,omitempty"`
-}
+// errForwardMetadataSweepRetired explains why no forward stage remains. It names
+// the rollback path, because an operator who typed `--stage` is mid-incident and
+// the next thing they need to know is what this command can still do.
+var errForwardMetadataSweepRetired = fmt.Errorf(
+	"migrate-label-metadata --stage is retired as of Phase 3B of Issue #123.\n"+
+		"Both stages existed to move ownership labels between two namespaces, "+
+		"and this binary now reads %s.* alone — there is no legacy namespace "+
+		"left to migrate from or to.\n"+
+		"What remains is recovery:\n"+
+		"  agentopsctl migrate-label-metadata --rollback "+
+		"<backup-root>/<stage>-<stamp>/rollback-plan.json\n"+
+		"That restores the documents a Phase 3A run rewrote to their exact "+
+		"recorded bytes. Operating the host after a rollback requires "+
+		"deliberately running a pre-Phase-3B binary, which reads both "+
+		"namespaces; this one will not see the restored labels.",
+	lifecycle.CurrentLabelNamespace,
+)
 
 func runMigrateLabelMetadata(ctx context.Context, args []string) error {
+	return migrateLabelMetadata(ctx, args, lifecycle.NewAppleRuntime())
+}
+
+// migrateLabelMetadata takes the runtime as a parameter so a test can prove the
+// central claim of this command: that every retired flag is refused before
+// anything reaches Apple Container. A constructor called inside the function
+// would make that claim untestable, and it is the claim most worth pinning —
+// the failure it guards against is stopping an operator's container runtime on
+// the way to printing "retired".
+func migrateLabelMetadata(
+	ctx context.Context,
+	args []string,
+	runtime *lifecycle.AppleRuntime,
+) error {
 	flags := flag.NewFlagSet("migrate-label-metadata", flag.ContinueOnError)
+	// The retired flags stay declared, with help text that says so, so the
+	// refusal below is what an operator reads rather than a parse error.
 	stage := flags.String(
-		"stage",
-		string(lifecycle.MetadataStagePrepare),
-		"prepare (add the current pair beside the legacy one) or retire "+
-			"(remove the legacy pair once the current one is proven)",
+		"stage", "",
+		"retired in Phase 3B; no forward label migration remains",
 	)
 	apply := flags.Bool(
-		"apply",
-		false,
-		"stop Apple Container, rewrite the named resources' metadata, and "+
-			"start it again; without this the command only plans",
+		"apply", false,
+		"retired in Phase 3B with --stage; --rollback is the remaining "+
+			"mutating path",
 	)
 	only := flags.String(
-		"only",
-		"",
-		"comma separated exact targets as kind/identity, for example "+
-			"volume/agentops-postgres-data; required with --apply",
+		"only", "",
+		"retired in Phase 3B with --stage",
 	)
 	evidenceDir := flags.String(
-		"evidence-dir", "", "where to write the durable plan and report",
+		"evidence-dir", "",
+		"retired in Phase 3B with --stage; a rollback records its outcome in "+
+			"the private backup root it restores from",
 	)
 	backupDir := flags.String(
 		"backup-dir", "",
-		"private directory for the pre-migration copy of every rewritten "+
-			"document; defaults to $XDG_STATE_HOME/agentops/label-metadata-"+
-			"backups and must sit outside every git work tree",
+		"retired in Phase 3B with --stage; --rollback reads the absolute "+
+			"locations out of the plan it is given",
 	)
 	rollback := flags.String(
 		"rollback", "",
-		"path to a report written by an earlier --apply; restores every "+
-			"document it rewrote to its exact original bytes",
+		"path to a rollback plan written by a Phase 3A --apply run; restores "+
+			"every document it rewrote to its exact original bytes",
 	)
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -85,243 +109,53 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 	if flags.NArg() != 0 {
 		return usageError()
 	}
-	migrationStage := lifecycle.MetadataStage(*stage)
-	switch migrationStage {
-	case lifecycle.MetadataStagePrepare, lifecycle.MetadataStageRetire:
-	default:
-		return fmt.Errorf(
-			"--stage must be %q or %q",
-			lifecycle.MetadataStagePrepare, lifecycle.MetadataStageRetire,
-		)
+	// The refusal precedes every runtime call, including the host resolution the
+	// rollback path performs. A retired flag must not be able to reach anything
+	// that inspects, stops, or starts Apple Container.
+	for _, retired := range []struct {
+		name string
+		set  bool
+	}{
+		{"--stage", strings.TrimSpace(*stage) != ""},
+		{"--apply", *apply},
+		{"--only", strings.TrimSpace(*only) != ""},
+		{"--evidence-dir", strings.TrimSpace(*evidenceDir) != ""},
+		{"--backup-dir", strings.TrimSpace(*backupDir) != ""},
+	} {
+		if retired.set {
+			return fmt.Errorf("%s: %w", retired.name, errForwardMetadataSweepRetired)
+		}
 	}
-	runtime := lifecycle.NewAppleRuntime()
-	if strings.TrimSpace(*rollback) != "" {
-		// Rollback writes to the same documents as the forward path, so it has
-		// to clear the same gates: the exact version allowlist that makes this
-		// layout knowable at all, and the running-container check, which cannot
-		// be made once the services are stopped.
-		if _, err := runtime.ResolveMetadataHost(ctx); err != nil {
-			return err
-		}
-		inventory, err := lifecycle.TakeOwnershipInventory(ctx, runtime)
-		if err != nil {
-			return err
-		}
-		if running := inventory.RunningManagedContainers(); len(running) > 0 {
-			return fmt.Errorf(
-				"%d managed container(s) are not stopped (%s); stop them before "+
-					"rolling back runtime metadata",
-				len(running), strings.Join(running, ", "),
-			)
-		}
-		return runMetadataRollback(ctx, runtime, *rollback)
+	if *rollback != "" && strings.TrimSpace(*rollback) == "" {
+		// A path of only whitespace is a mistake worth naming, not the same
+		// thing as asking for the retired forward stage.
+		return fmt.Errorf("--rollback needs the path to a rollback plan")
+	}
+	if *rollback == "" {
+		// With no forward stage there is no useful default action, and defaulting
+		// to a mutating one would be the opposite of this command's convention
+		// that the safe spelling is the short one.
+		return errForwardMetadataSweepRetired
 	}
 
-	// The host has to be identified while the services are up: a stopped
-	// apiserver reports neither its application root nor its version, and both
-	// are gates this command refuses to run without.
+	// Rollback writes to Apple Container's own documents, so it clears the same
+	// gates the forward path did: the exact version allowlist that makes this
+	// layout knowable at all, and the not-running check, which cannot be made
+	// once the services are stopped.
 	host, err := runtime.ResolveMetadataHost(ctx)
 	if err != nil {
 		return err
 	}
-	inventory, err := lifecycle.TakeOwnershipInventory(ctx, runtime)
-	if err != nil {
-		return err
-	}
-	if err := inventory.RequireConflictFree(); err != nil {
-		return err
-	}
-	targets, err := parseMetadataTargets(*only)
-	if err != nil {
-		return err
-	}
-	if !*apply && len(targets) == 0 {
-		// Planning the whole managed host is the rehearsal an operator reads
-		// before choosing --only, so the default plan covers everything owned.
-		targets = inventory.ManagedTargets()
-	}
-	if *apply && len(targets) == 0 {
-		return fmt.Errorf(
-			"--apply requires --only with the exact targets to migrate; run " +
-				"without --apply to see the plan the host currently supports",
-		)
-	}
-	// Retiring the legacy pair anywhere is only safe once it is redundant
-	// everywhere, so the gate is evaluated against the whole host rather than
-	// against the named targets.
-	if migrationStage == lifecycle.MetadataStageRetire {
-		if err := inventory.RequireCurrentOwnershipEverywhere(); err != nil {
-			return err
-		}
-	}
-	states := make(map[string]string, len(inventory.Records))
-	for _, record := range inventory.Records {
-		states[lifecycle.MetadataTargetRef{
-			Kind: record.Kind, ID: record.ID,
-		}.String()] = record.State
-	}
-	plan, err := lifecycle.PlanMetadataSweep(host, migrationStage, targets, states)
-	if err != nil {
-		return err
-	}
-	stamp := time.Now().UTC().Format("20060102T150405Z")
-	printMetadataPlan(plan, inventory)
-
-	if !*apply {
-		if strings.TrimSpace(*evidenceDir) != "" {
-			path, err := writeMetadataEvidence(
-				*evidenceDir, fmt.Sprintf("plan-%s-%s.json", *stage, stamp),
-				metadataEvidence{
-					GeneratedAt: stamp, Mode: "plan", Stage: migrationStage,
-					Host: *host, Inventory: inventory, Plan: plan,
-				},
-			)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("\nevidence: %s\n", path)
-		}
-		return nil
-	}
-
-	// A backup is a verbatim copy of a container's configuration, which carries
-	// initProcess.environment with values. The root is therefore resolved to a
-	// private 0700 directory outside every git work tree, so a copy of a live
-	// credential can never be staged from a checkout the sweep was run in.
-	resolvedBackupRoot, err := lifecycle.ResolveBackupRoot(*backupDir)
-	if err != nil {
-		return err
-	}
-	// A stopped managed container can be rewritten safely because nothing is
-	// reading its configuration. A running one cannot: the runtime holds its
-	// own view of the labels, and the file would be overwritten underneath it.
-	if running := inventory.RunningManagedContainers(); len(running) > 0 {
-		return fmt.Errorf(
-			"%d managed container(s) are not stopped (%s); stop them before "+
-				"editing runtime metadata",
-			len(running), strings.Join(running, ", "),
-		)
-	}
-	if plan.ChangeCount == 0 {
-		fmt.Println("\nevery named target already satisfies this stage")
-		return nil
-	}
-	backupRoot := filepath.Join(
-		resolvedBackupRoot, fmt.Sprintf("%s-%s", *stage, stamp),
-	)
-
-	fmt.Printf("\nstopping Apple Container services\n")
-	if err := runtime.StopSystem(ctx); err != nil {
-		return fmt.Errorf("stop Apple Container: %w", err)
-	}
-	// Whatever happens next, the runtime is brought back up. A host left with
-	// its services down is a worse outcome than a failed migration. The flag
-	// keeps the success path from starting it a second time: the redundant call
-	// can fail merely because the services are already up, and printing
-	// "Apple Container did not start again" after a run that succeeded and
-	// verified would make the most alarming line of the output the least true.
-	started := false
-	defer func() {
-		if started {
-			return
-		}
-		// The restart must not inherit this command's context. main wires it to
-		// signal.NotifyContext, so a SIGINT arriving inside the stopped window
-		// cancels it — and exec.CommandContext will not launch with a cancelled
-		// context. The one operation that must always run would be exactly the
-		// one cancellation disables, leaving the operator's runtime down.
-		// Cancellation aborts the migration; it must not abort the recovery.
-		restartCtx, cancelRestart := context.WithTimeout(
-			context.WithoutCancel(ctx), serviceRestartTimeout,
-		)
-		defer cancelRestart()
-		if err := runtime.StartSystem(restartCtx); err != nil {
-			fmt.Fprintf(
-				os.Stderr,
-				"WARNING: Apple Container did not start again: %v\n", err,
-			)
-		}
-	}()
-	report, applyErr := lifecycle.ApplyMetadataSweep(
-		ctx, runtime, host, migrationStage, targets, backupRoot,
-	)
-	if applyErr != nil {
-		// The report is written even when the sweep halted: which stage stopped
-		// it is precisely what an operator needs in that case.
-		if report != nil {
-			if path, err := writeMetadataEvidence(
-				evidenceOrDefault(*evidenceDir),
-				fmt.Sprintf("halted-%s-%s.json", *stage, stamp),
-				metadataEvidence{
-					GeneratedAt: stamp, Mode: "halted", Stage: migrationStage,
-					Host: *host, Plan: plan, Report: report,
-				},
-			); err == nil {
-				fmt.Printf("halted report: %s\n", path)
-			}
-			if len(report.Applied) > 0 {
-				fmt.Printf(
-					"%d resource(s) were already rewritten. Undo them with:\n"+
-						"  agentopsctl migrate-label-metadata --rollback %s\n",
-					len(report.Applied), lifecycle.RollbackPlanPath(backupRoot),
-				)
-				if report.PlanStaleAfter != "" {
-					fmt.Fprintf(
-						os.Stderr,
-						"WARNING: the rollback plan could NOT be updated for %s. "+
-							"That resource is migrated and the plan does not "+
-							"describe it; its backup is under %s and must be "+
-							"restored by hand.\n",
-						report.PlanStaleAfter, backupRoot,
-					)
-				}
-			}
-		}
-		return applyErr
-	}
-
-	fmt.Printf("starting Apple Container services\n")
-	if err := runtime.StartSystem(ctx); err != nil {
-		return fmt.Errorf("start Apple Container: %w", err)
-	}
-	started = true
-	if err := lifecycle.VerifyMetadataSweep(ctx, runtime, report); err != nil {
-		return fmt.Errorf(
-			"the sweep wrote its documents but the runtime does not report "+
-				"the expected labels: %w", err,
-		)
-	}
-	verified, err := lifecycle.TakeOwnershipInventory(ctx, runtime)
-	if err != nil {
-		return err
-	}
-	path, err := writeMetadataEvidence(
-		evidenceOrDefault(*evidenceDir),
-		fmt.Sprintf("applied-%s-%s.json", *stage, stamp),
-		metadataEvidence{
-			GeneratedAt: stamp, Mode: "applied", Stage: migrationStage,
-			Host: *host, Plan: plan, Report: report, VerifiedBy: verified,
-		},
-	)
-	if err != nil {
-		return err
-	}
-	// The rollback plan was written inside the sweep as each resource landed, so
-	// it already exists here and also exists on every failure path above.
-	rollbackPath := lifecycle.RollbackPlanPath(backupRoot)
-	printMetadataReport(report)
-	fmt.Printf("\nevidence: %s\n", path)
-	fmt.Printf("backups:  %s\n", backupRoot)
-	fmt.Printf("rollback: agentopsctl migrate-label-metadata --rollback %s\n", rollbackPath)
-	return nil
+	return runMetadataRollback(ctx, runtime, host, strings.TrimSpace(*rollback))
 }
 
 // runMetadataRollback restores every document a recorded run rewrote.
 func runMetadataRollback(
 	ctx context.Context,
 	runtime *lifecycle.AppleRuntime,
+	host *lifecycle.MetadataHost,
 	reportPath string,
-) error {
+) (err error) {
 	raw, err := os.ReadFile(reportPath)
 	if err != nil {
 		return fmt.Errorf("read report: %w", err)
@@ -330,29 +164,111 @@ func runMetadataRollback(
 	if err != nil {
 		return fmt.Errorf("%s: %w", reportPath, err)
 	}
-	fmt.Printf("stopping Apple Container services\n")
-	if err := runtime.StopSystem(ctx); err != nil {
-		return fmt.Errorf("stop Apple Container: %w", err)
+	// Every path in the plan is an absolute location read verbatim out of a
+	// file. Binding them to the resolved host before the runtime is stopped is
+	// what keeps a stale or substituted plan from taking Apple Container down and
+	// then rewriting a document it has no business touching.
+	if err := plan.BindToHost(host); err != nil {
+		return fmt.Errorf("%s: %w", reportPath, err)
 	}
-	defer func() {
-		// Same reasoning as the apply path: a cancelled context must not be able
-		// to leave Apple Container stopped.
+	// The not-running gate is taken after the plan is known, so it can name the
+	// plan's own targets as well as the containers this binary can classify. A
+	// resumed rollback's earlier resources are already back on the retired
+	// namespace and unclassifiable, and they are exactly the ones about to be
+	// rewritten again.
+	inventory, err := lifecycle.TakeOwnershipInventory(ctx, runtime)
+	if err != nil {
+		return err
+	}
+	running := append(
+		inventory.RunningIdentifiableContainers(),
+		inventory.RunningNamed(plan.ContainerTargets())...,
+	)
+	if unique := distinctSorted(running); len(unique) > 0 {
+		return fmt.Errorf(
+			"%d container(s) are not stopped (%s); stop them before rolling "+
+				"back runtime metadata",
+			len(unique), strings.Join(unique, ", "),
+		)
+	}
+	// The restart is one closure with two callers, and it runs at most once.
+	//
+	// Recovery is ONE closure that both starts the runtime and proves it came
+	// back, and it runs at most once.
+	//
+	// Starting and proving belong together because every path that leaves this
+	// function has the same obligation. A deferred start alone is not enough:
+	// the success path has to prove the runtime is up, and a check written after
+	// the function body runs before any defer fires, so it would read a stopped
+	// runtime on every successful rollback. An explicit start alone is not
+	// enough either: a stop that fails partway, a cancelled run, and a failed
+	// restore never reach it. And a proof that lives outside the closure is
+	// worst of both — the fallback paths start the runtime and never check it,
+	// so `StartSystem` returning nil while the services stay down is reported as
+	// nothing at all.
+	//
+	// `restarted` is what keeps the two callers from starting the runtime twice.
+	restarted := false
+	restart := func() error {
+		if restarted {
+			return nil
+		}
+		restarted = true
+		// A cancelled context must not be able to leave Apple Container stopped.
+		// main wires ctx to signal.NotifyContext, so a SIGINT arriving inside the
+		// stopped window would otherwise disable exactly the one operation that
+		// must always run. Cancellation aborts the rollback; it must not abort
+		// the recovery — including its proof, which is why the capability probe
+		// below runs on this context too rather than on the caller's.
 		restartCtx, cancelRestart := context.WithTimeout(
 			context.WithoutCancel(ctx), serviceRestartTimeout,
 		)
 		defer cancelRestart()
-		if err := runtime.StartSystem(restartCtx); err != nil {
-			fmt.Fprintf(
-				os.Stderr,
-				"WARNING: Apple Container did not start again: %v\n", err,
+		if startErr := runtime.StartSystem(restartCtx); startErr != nil {
+			return fmt.Errorf("start Apple Container: %w", startErr)
+		}
+		// The runtime's own answer, not this process's belief about it. A start
+		// that exits zero while the apiserver stays down is the case this exists
+		// for, and it is invisible to StartSystem's return value.
+		if capability := runtime.Capability(restartCtx); !capability.ServiceRunning {
+			return fmt.Errorf(
+				"Apple Container reports its services are still not running; " +
+					"start them with `container system start`",
 			)
 		}
-	}()
-	if err := runtime.RequireServicesStopped(ctx); err != nil {
-		return err
+		return nil
 	}
-	if err := lifecycle.RollbackMetadataSweep(plan); err != nil {
-		return err
+
+	fmt.Printf("stopping Apple Container services\n")
+	// Registered BEFORE the stop, not after it succeeds: returning from a failed
+	// stop without a registered restart is how an operator's machine is left
+	// without a container runtime by a command that only meant to refuse.
+	defer func() {
+		if restarted {
+			return
+		}
+		if restartErr := restart(); restartErr != nil {
+			fmt.Fprintf(
+				os.Stderr,
+				"WARNING: Apple Container did not start again: %v\n", restartErr,
+			)
+			// Joined into the returned error rather than only printed. A defer
+			// cannot change the exit status by printing, and "the rollback
+			// failed AND the runtime is down" is not the same incident as
+			// either one alone.
+			err = errors.Join(err, fmt.Errorf(
+				"Apple Container did not start again: %w", restartErr,
+			))
+		}
+	}()
+	if stopErr := runtime.StopSystem(ctx); stopErr != nil {
+		return fmt.Errorf("stop Apple Container: %w", stopErr)
+	}
+	if stoppedErr := runtime.RequireServicesStopped(ctx); stoppedErr != nil {
+		return stoppedErr
+	}
+	if rollbackErr := lifecycle.RollbackMetadataSweep(plan); rollbackErr != nil {
+		return rollbackErr
 	}
 	for _, application := range plan.Applied {
 		for _, file := range application.RestoreOutcomes() {
@@ -363,106 +279,35 @@ func runMetadataRollback(
 		"restored %d resource(s) to their pre-migration labels\n",
 		len(plan.Applied),
 	)
+	// Restarted and proved here rather than left to the defer, so a rollback
+	// that could not bring the runtime back does not print a success summary.
+	if restartErr := restart(); restartErr != nil {
+		return restartErr
+	}
+	// The restored labels may be in the namespace this binary no longer reads,
+	// in which case it can no longer see the resources it just restored. Saying
+	// so here is the difference between a deliberate one-way boundary and an
+	// operator discovering it at the next `agentopsctl status`.
+	fmt.Printf(
+		"NOTE: this binary reads %s.* only. If the restored labels predate "+
+			"Phase 3A, operate this host with a pre-Phase-3B binary.\n",
+		lifecycle.CurrentLabelNamespace,
+	)
 	return nil
 }
 
-func parseMetadataTargets(raw string) ([]lifecycle.MetadataTargetRef, error) {
-	targets := make([]lifecycle.MetadataTargetRef, 0)
-	for _, candidate := range strings.Split(raw, ",") {
-		if strings.TrimSpace(candidate) == "" {
+// distinctSorted removes the overlap between the two not-running checks, which
+// deliberately cover intersecting sets.
+func distinctSorted(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, already := seen[value]; already {
 			continue
 		}
-		reference, err := lifecycle.ParseMetadataTargetRef(candidate)
-		if err != nil {
-			return nil, err
-		}
-		targets = append(targets, reference)
+		seen[value] = struct{}{}
+		unique = append(unique, value)
 	}
-	if len(targets) > 0 {
-		if err := lifecycle.RequireDistinctTargets(targets); err != nil {
-			return nil, err
-		}
-	}
-	return targets, nil
-}
-
-func evidenceOrDefault(directory string) string {
-	if strings.TrimSpace(directory) != "" {
-		return directory
-	}
-	root, err := resolveProjectRoot()
-	if err != nil {
-		return "."
-	}
-	return filepath.Join(root, "evidence", "label-p3a")
-}
-
-func writeMetadataEvidence(
-	directory, name string,
-	evidence metadataEvidence,
-) (string, error) {
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return "", fmt.Errorf("create evidence directory: %w", err)
-	}
-	encoded, err := json.MarshalIndent(evidence, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode evidence: %w", err)
-	}
-	path := filepath.Join(directory, name)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return "", fmt.Errorf("write evidence: %w", err)
-	}
-	defer file.Close()
-	if _, err := file.Write(append(encoded, '\n')); err != nil {
-		return "", fmt.Errorf("write evidence: %w", err)
-	}
-	return path, nil
-}
-
-func printMetadataPlan(
-	plan *lifecycle.MetadataSweepPlan,
-	inventory *lifecycle.OwnershipInventory,
-) {
-	fmt.Printf(
-		"Apple Container %s (apiserver %s)\n",
-		plan.Host.CLIVersion, plan.Host.APIServerVersion,
-	)
-	fmt.Printf("ownership inventory\n")
-	for class, count := range inventory.Totals {
-		fmt.Printf("  %-14s %d\n", class, count)
-	}
-	fmt.Printf("\n%s plan\n", plan.Stage)
-	for _, entry := range plan.Entries {
-		action := "migrate"
-		if entry.Satisfied {
-			action = "satisfied"
-		}
-		fmt.Printf(
-			"  %-10s %-46s %-13s -> %-13s %s\n",
-			entry.Kind, entry.ID, entry.ClassBefore, entry.ClassAfter, action,
-		)
-		for _, document := range entry.Documents {
-			fmt.Printf(
-				"      %s  %s\n", document.BeforeSHA256[:12], document.RelativePath,
-			)
-		}
-	}
-	fmt.Printf("  ---\n  %d resource(s) would change\n", plan.ChangeCount)
-}
-
-func printMetadataReport(report *lifecycle.MetadataSweepReport) {
-	fmt.Printf("\n%s applied\n", report.Stage)
-	for _, application := range report.Applied {
-		fmt.Printf(
-			"  %-10s %-46s %-13s -> %-13s keys=%s\n",
-			application.Kind, application.ID,
-			application.ClassBefore, application.ClassAfter,
-			strings.Join(application.ChangedKeys, ","),
-		)
-	}
-	if len(report.Skipped) > 0 {
-		fmt.Printf("  %d already satisfied\n", len(report.Skipped))
-	}
-	fmt.Printf("  runtime verified: %t\n", report.VerifiedByAPI)
+	sort.Strings(unique)
+	return unique
 }

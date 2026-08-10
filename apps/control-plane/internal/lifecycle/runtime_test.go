@@ -279,11 +279,34 @@ func TestVolumeInitCanAddOnlyChownCapability(t *testing.T) {
 func TestEnsureNetworkAcceptsOwnedHostOnlyResource(t *testing.T) {
 	fake := &fakeRuntimeRunner{results: []CommandResult{{
 		Status: 0,
-		Stdout: `[{"id":"agentops-internal","configuration":{"mode":"hostOnly","labels":{"com.mrbaron3.workflow.agentopsctl":"v1"}}}]`,
+		Stdout: `[{"id":"agentops-internal","configuration":{"mode":"hostOnly","labels":{"com.mrbaron3.servo.agentopsctl":"v1"}}}]`,
 	}}}
 	runtime := NewAppleRuntimeForTest(fake)
 	if err := runtime.EnsureNetwork(context.Background(), "agentops-internal"); err != nil {
 		t.Fatalf("owned host-only network was rejected: %v", err)
+	}
+}
+
+// The mode check must be reached only for a network this binary owns. Since
+// Phase 3B a legacy-only network is not owned, so it is refused on ownership
+// before its mode is ever considered — and, crucially, without being recreated.
+func TestEnsureNetworkRefusesALegacyOnlyNetworkWithoutRecreatingIt(t *testing.T) {
+	fake := &fakeRuntimeRunner{results: []CommandResult{{
+		Status: 0,
+		Stdout: `[{"id":"agentops-internal","configuration":{"mode":"hostOnly",` +
+			`"labels":{"com.mrbaron3.workflow.agentopsctl":"v1"}}}]`,
+	}}}
+	err := NewAppleRuntimeForTest(fake).EnsureNetwork(
+		context.Background(), "agentops-internal",
+	)
+	if err == nil {
+		t.Fatal("a legacy-only network was adopted")
+	}
+	if !strings.Contains(err.Error(), "is not owned by agentopsctl") {
+		t.Fatalf("a legacy-only network was not reported as unowned: %v", err)
+	}
+	if len(fake.args) != 1 {
+		t.Fatalf("a legacy-only network reached a mutation: %#v", fake.args)
 	}
 }
 

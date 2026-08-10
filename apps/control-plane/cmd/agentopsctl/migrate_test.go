@@ -49,10 +49,10 @@ func TestMigrateLabelsCreatesNoCapabilityStateOnInvocation(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("AGENTOPSCTL_PROJECT_ROOT", t.TempDir())
 
-	// --apply without --only fails on the argument contract alone; reaching
-	// that error proves the command ran without loading the configuration.
+	// --apply is refused outright; reaching that error proves the command ran
+	// without loading the configuration.
 	err := run([]string{"migrate-labels", "--apply"})
-	if err == nil || !strings.Contains(err.Error(), "--only") {
+	if err == nil || !strings.Contains(err.Error(), "retired") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// -h must be equally inert.

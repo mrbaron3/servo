@@ -75,7 +75,7 @@ type metadataFileApplication struct {
 	// the private rollback plan instead.
 	BeforeLabels map[string]string `json:"-"`
 	AfterLabels  map[string]string `json:"-"`
-	// BeforeOwnership and AfterOwnership are the six ownership keys alone, which
+	// BeforeOwnership and AfterOwnership are the ownership keys alone, which
 	// is what the evidence is allowed to publish.
 	BeforeOwnership map[string]string `json:"beforeOwnershipLabels"`
 	AfterOwnership  map[string]string `json:"afterOwnershipLabels"`
@@ -100,6 +100,12 @@ func digestOf(data []byte) string {
 // target is a symbolic link. Checking the final file alone is not enough: a
 // symlinked parent directory presents a perfectly ordinary regular file while
 // the write lands somewhere the operator never named.
+//
+// Through Phase 3A this guarded the resolution of an operator-supplied identity
+// into a document path. Phase 3B removed that resolution with the forward
+// stages, and this guard came out with it — which was wrong: the retained
+// rollback reads its paths out of a plan file, and a plan is exactly the kind of
+// input this check exists for. It now guards plan validation instead.
 func requireNoSymlinkInPath(path, root string) error {
 	relative, err := filepath.Rel(root, path)
 	if err != nil {
@@ -123,6 +129,64 @@ func requireNoSymlinkInPath(path, root string) error {
 		}
 	}
 	return nil
+}
+
+// requireOutsideGitWorkTree refuses a path inside a repository checkout. It
+// walks the ancestry looking for a `.git` entry rather than shelling out, so it
+// gives the same answer with or without git installed, and it catches the
+// worktree case where `.git` is a file rather than a directory.
+//
+// A backup is a verbatim copy of an Apple Container metadata document, and a
+// container's config.json carries initProcess.environment with values —
+// POSTGRES_PASSWORD among them on this project's own topology. A backup root is
+// therefore a credential store, not an artifact. Phase 3A enforced this when it
+// *chose* the root; Phase 3B removed that resolution along with the forward
+// stages, so the rule is enforced here, where a retained plan's root is read.
+func requireOutsideGitWorkTree(path string) error {
+	current := path
+	for {
+		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+			return fmt.Errorf(
+				"%s is inside the git work tree at %s; backups are verbatim "+
+					"copies of container configuration, which carries "+
+					"environment values, and must never sit where they can be "+
+					"committed",
+				path, current,
+			)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+		current = parent
+	}
+}
+
+// resolveExistingAncestor resolves symlinks over the part of a path that
+// exists, then reattaches the components that do not exist yet. EvalSymlinks
+// alone fails on a path whose leaf has not been created. Without it, a
+// ~/.local/state symlinked into a dotfiles repository — an ordinary stow
+// arrangement — would pass the work-tree refusal while the backups land inside
+// a checkout after all.
+func resolveExistingAncestor(path string) (string, error) {
+	missing := make([]string, 0)
+	current := path
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf(
+				"no existing ancestor of %s could be resolved", path,
+			)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 // requireOwnedByCurrentUser refuses a document owned by anybody else. Apple
@@ -426,10 +490,18 @@ func writeThroughDirectory(
 	// reporting it as an ordinary failure would make the caller drop the record
 	// it needs to unwind — leaving a multi-document resource half-migrated with
 	// nothing to roll back from.
-	if err := directory.sync(); err != nil {
+	if err := syncDirectoryEntry(directory); err != nil {
 		return errDurabilityUncertain{err: err}
 	}
 	return nil
+}
+
+// syncDirectoryEntry is the seam a test uses to make a write land without being
+// durable. That state is unreachable otherwise — it needs an fsync to fail after
+// a rename has succeeded — and it is precisely the state whose mishandling
+// leaves a container half-reverted, so it has to be exercisable.
+var syncDirectoryEntry = func(directory *directoryHandle) error {
+	return directory.sync()
 }
 
 // errDurabilityUncertain marks a write whose rename succeeded but whose
@@ -586,6 +658,15 @@ func restoreMetadataFile(
 		if err := writeFileAtomically(
 			application.Path, backup, mode, uid, gid,
 		); err != nil {
+			// A write whose rename succeeded but whose directory entry could not
+			// be flushed HAS replaced the document. Returning the outcome
+			// alongside the error is what lets the caller record it and unwind
+			// it; discarding it leaves this document rolled back while its
+			// siblings are pushed forward again — a half-reverted resource, on
+			// the document the listing prefers.
+			if WriteLanded(err) {
+				return RestoreExactBytes, err
+			}
 			return "", err
 		}
 		restored, err := os.ReadFile(application.Path)
@@ -647,6 +728,9 @@ func restoreMetadataFile(
 	if err := writeFileAtomically(
 		application.Path, relabelled, mode, uid, gid,
 	); err != nil {
+		if WriteLanded(err) {
+			return RestoreRelabelled, err
+		}
 		return "", err
 	}
 	// Read the file back rather than the buffer that was just written to it.

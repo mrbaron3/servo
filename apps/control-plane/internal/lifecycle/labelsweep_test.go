@@ -4,185 +4,25 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
 
-func legacyTriple(role, digest string) map[string]string {
-	return map[string]string{
-		LegacyManagedLabelKey: ManagedLabelValue,
-		LegacyRoleLabelKey:    role,
-		LegacySpecLabelKey:    digest,
-	}
-}
+// These cases cover what Phase 3B keeps of the Phase 3A metadata migration: the
+// path that returns a document to the exact bytes a Phase 3A run recorded for
+// it.
+//
+// Every fixture here is reconstructed rather than produced. The forward stages
+// are gone, so no test can migrate a document and then roll it back; instead each
+// one writes the documents a Phase 3A run would have left on disk plus the
+// backups it would have taken, which is precisely what an operator's retained
+// backup root contains. Building the fixture this way is not a workaround — it is
+// the only input the recovery path will ever see again.
 
-func dualTriple(role, digest string) map[string]string {
-	return map[string]string{
-		LegacyManagedLabelKey:  ManagedLabelValue,
-		LegacyRoleLabelKey:     role,
-		LegacySpecLabelKey:     digest,
-		CurrentManagedLabelKey: ManagedLabelValue,
-		CurrentRoleLabelKey:    role,
-		CurrentSpecLabelKey:    digest,
-	}
-}
-
-func currentTriple(role, digest string) map[string]string {
-	return map[string]string{
-		CurrentManagedLabelKey: ManagedLabelValue,
-		CurrentRoleLabelKey:    role,
-		CurrentSpecLabelKey:    digest,
-	}
-}
-
-func TestPlanOwnershipLabelsPrepareRaisesLegacyOnlyToDual(t *testing.T) {
-	planned, err := planOwnershipLabels(
-		legacyTriple("postgres", "abc"), MetadataStagePrepare,
-	)
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	if !reflect.DeepEqual(planned, dualTriple("postgres", "abc")) {
-		t.Fatalf("prepare produced %#v", planned)
-	}
-}
-
-func TestPlanOwnershipLabelsRetireDropsLegacyFromDual(t *testing.T) {
-	planned, err := planOwnershipLabels(
-		dualTriple("postgres", "abc"), MetadataStageRetire,
-	)
-	if err != nil {
-		t.Fatalf("retire: %v", err)
-	}
-	if !reflect.DeepEqual(planned, currentTriple("postgres", "abc")) {
-		t.Fatalf("retire produced %#v", planned)
-	}
-}
-
-func TestPlanOwnershipLabelsIsIdempotent(t *testing.T) {
-	for name, testCase := range map[string]struct {
-		labels map[string]string
-		stage  MetadataStage
-	}{
-		"prepare on dual":         {dualTriple("r", "d"), MetadataStagePrepare},
-		"prepare on current only": {currentTriple("r", "d"), MetadataStagePrepare},
-		"retire on current only":  {currentTriple("r", "d"), MetadataStageRetire},
-	} {
-		t.Run(name, func(t *testing.T) {
-			planned, err := planOwnershipLabels(testCase.labels, testCase.stage)
-			if err != nil {
-				t.Fatalf("plan: %v", err)
-			}
-			if !reflect.DeepEqual(planned, testCase.labels) {
-				t.Fatalf(
-					"expected no change; got %#v from %#v",
-					planned, testCase.labels,
-				)
-			}
-		})
-	}
-}
-
-func TestPlanOwnershipLabelsRefusesRetireBeforePrepare(t *testing.T) {
-	// Retiring a legacy-only resource would erase its only ownership marker and
-	// leave it unowned, which is precisely the orphaning Issue #123 exists to
-	// avoid.
-	if _, err := planOwnershipLabels(
-		legacyTriple("postgres", "abc"), MetadataStageRetire,
-	); err == nil {
-		t.Fatal("expected retire on a legacy-only resource to be refused")
-	}
-}
-
-func TestPlanOwnershipLabelsRefusesConflictingPairs(t *testing.T) {
-	conflicting := map[string]string{
-		LegacyManagedLabelKey:  ManagedLabelValue,
-		CurrentManagedLabelKey: "v2",
-	}
-	for _, stage := range []MetadataStage{
-		MetadataStagePrepare, MetadataStageRetire,
-	} {
-		if _, err := planOwnershipLabels(conflicting, stage); err == nil {
-			t.Fatalf("expected %s to refuse a conflicting pair", stage)
-		} else if !errors.Is(err, ErrConflictingLabels) {
-			t.Fatalf("%s reported %v, want a conflicting-label error", stage, err)
-		}
-	}
-}
-
-func TestPlanOwnershipLabelsRefusesPartialPairs(t *testing.T) {
-	// A pair whose two sides disagree on presence of a value is half written.
-	// Phase 3A treats it the same way every other reader does: it stops.
-	halfWritten := map[string]string{
-		LegacyManagedLabelKey:  ManagedLabelValue,
-		CurrentManagedLabelKey: "",
-	}
-	for _, stage := range []MetadataStage{
-		MetadataStagePrepare, MetadataStageRetire,
-	} {
-		if _, err := planOwnershipLabels(halfWritten, stage); err == nil {
-			t.Fatalf("expected %s to refuse a half written pair", stage)
-		}
-	}
-}
-
-func TestPlanOwnershipLabelsRefusesUnmanagedAndUnlabelled(t *testing.T) {
-	for name, labels := range map[string]map[string]string{
-		"unmanaged":     {LegacyManagedLabelKey: "v2"},
-		"missing-label": {},
-		"foreign only":  {"com.example.thing": "1"},
-	} {
-		for _, stage := range []MetadataStage{
-			MetadataStagePrepare, MetadataStageRetire,
-		} {
-			if _, err := planOwnershipLabels(labels, stage); err == nil {
-				t.Fatalf(
-					"expected %s to refuse a %s resource", stage, name,
-				)
-			}
-		}
-	}
-}
-
-func TestPlanOwnershipLabelsNeverTouchesForeignLabels(t *testing.T) {
-	labels := dualTriple("postgres", "abc")
-	labels["com.example.owner"] = "someone-else"
-	labels["com.apple.thing"] = "1"
-	planned, err := planOwnershipLabels(labels, MetadataStageRetire)
-	if err != nil {
-		t.Fatalf("retire: %v", err)
-	}
-	if planned["com.example.owner"] != "someone-else" ||
-		planned["com.apple.thing"] != "1" {
-		t.Fatalf("foreign labels were disturbed: %#v", planned)
-	}
-	// Only the six ownership keys may differ between before and after.
-	for key := range planned {
-		if _, owned := ownershipKeySet()[key]; owned {
-			continue
-		}
-		if planned[key] != labels[key] {
-			t.Fatalf("non ownership label %q changed", key)
-		}
-	}
-}
-
-func TestChangedKeysAreOnlyOwnershipKeys(t *testing.T) {
-	before := dualTriple("postgres", "abc")
-	after, err := planOwnershipLabels(before, MetadataStageRetire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range changedLabelKeys(before, after) {
-		if _, owned := ownershipKeySet()[key]; !owned {
-			t.Fatalf("stage changed non ownership key %q", key)
-		}
-	}
-}
-
-// --- target resolution -------------------------------------------------
-
+// seedAppRoot writes an application root holding one volume, one network, and
+// two containers, all labelled the way Phase 3A's sweep left them: current
+// namespace only.
 func seedAppRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -197,354 +37,457 @@ func seedAppRoot(t *testing.T) string {
 	}
 	write(
 		filepath.Join(root, "volumes", "vol-a", "entity.json"),
-		`{"name":"vol-a","labels":{"`+LegacyManagedLabelKey+`":"v1"}}`,
+		`{"name":"vol-a","labels":{"`+CurrentManagedLabelKey+`":"v1"}}`,
 	)
 	write(filepath.Join(root, "volumes", "vol-a", "volume.img"), "")
 	write(
 		filepath.Join(root, "networks", "net-a", "entity.json"),
-		`{"name":"net-a","labels":{"`+LegacyManagedLabelKey+`":"v1"}}`,
+		`{"name":"net-a","labels":{"`+CurrentManagedLabelKey+`":"v1"}}`,
 	)
 	write(filepath.Join(root, "networks", "net-a", "service.plist"), "")
 	// A container that was started carries both documents; one that was only
 	// created carries just the runtime configuration.
 	write(
 		filepath.Join(root, "containers", "ctr-started", "config.json"),
-		`{"id":"ctr-started","labels":{"`+LegacyManagedLabelKey+`":"v1"}}`,
+		`{"id":"ctr-started","labels":{"`+CurrentManagedLabelKey+`":"v1"}}`,
 	)
 	write(
 		filepath.Join(
 			root, "containers", "ctr-started", "runtime-configuration.json",
 		),
 		`{"containerConfiguration":{"id":"ctr-started","labels":{"`+
-			LegacyManagedLabelKey+`":"v1"}}}`,
+			CurrentManagedLabelKey+`":"v1"}}}`,
 	)
 	write(
 		filepath.Join(
 			root, "containers", "ctr-created", "runtime-configuration.json",
 		),
 		`{"containerConfiguration":{"id":"ctr-created","labels":{"`+
-			LegacyManagedLabelKey+`":"v1"}}}`,
+			CurrentManagedLabelKey+`":"v1"}}}`,
 	)
 	return root
 }
 
-func TestResolveMetadataTargetFindsEveryPresentDocument(t *testing.T) {
-	root := seedAppRoot(t)
-	target, err := resolveMetadataTarget(root, MetadataKindContainer, "ctr-started")
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if len(target.Files) != 2 {
-		t.Fatalf("expected both container documents, got %#v", target.Files)
-	}
-	created, err := resolveMetadataTarget(root, MetadataKindContainer, "ctr-created")
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if len(created.Files) != 1 {
-		t.Fatalf("expected one document, got %#v", created.Files)
+// legacyTriple is the label map a resource carried before Phase 3A migrated it,
+// including a foreign label so every test asserts that recovery restores a
+// complete map rather than the ownership keys it happens to recognise.
+func legacyTriple() map[string]string {
+	return map[string]string{
+		legacyManagedLabelKey: "v1",
+		"com.example.foreign": "keep-me",
 	}
 }
 
-func TestResolveMetadataTargetRejectsAbsentResource(t *testing.T) {
-	root := seedAppRoot(t)
-	if _, err := resolveMetadataTarget(
-		root, MetadataKindVolume, "does-not-exist",
-	); err == nil {
-		t.Fatal("expected an absent target to be refused")
+// phase3ARecord reconstructs the record a Phase 3A run left behind for one
+// resource: backups holding the labels it replaced, and the digests and complete
+// label maps that let recovery prove what it is putting back.
+func phase3ARecord(
+	t *testing.T,
+	kind MetadataResourceKind,
+	id, appRoot, backupRoot string,
+	before map[string]string,
+) *MetadataApplication {
+	t.Helper()
+	layout, err := layoutFor(kind)
+	if err != nil {
+		t.Fatal(err)
 	}
+	directory := filepath.Join(appRoot, layout.directory, id)
+	names := make([]string, 0, len(layout.documents))
+	for name := range layout.documents {
+		if _, err := os.Lstat(filepath.Join(directory, name)); err == nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		t.Fatalf("%s %s has no metadata document to seed a record from", kind, id)
+	}
+	application := &MetadataApplication{
+		Kind:         kind,
+		ID:           id,
+		Stage:        "retire",
+		Directory:    directory,
+		BackupRoot:   backupRoot,
+		ClassBefore:  "legacy-only",
+		ClassAfter:   "current-only",
+		BeforeLabels: before,
+	}
+	for _, name := range names {
+		ref := metadataFileRef{
+			Path: filepath.Join(directory, name), LabelPath: layout.documents[name],
+		}
+		state, err := inspectMetadataFile(ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backupBytes, err := rewriteLabels(state.Bytes, ref.LabelPath, before)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backupPath := filepath.Join(backupRoot, string(kind), id, name)
+		if err := writeBackup(backupPath, backupBytes); err != nil {
+			t.Fatal(err)
+		}
+		application.AfterLabels = state.Labels
+		application.Files = append(application.Files, &metadataFileApplication{
+			Path:            ref.Path,
+			LabelPath:       ref.LabelPath,
+			BackupPath:      backupPath,
+			Document:        filepath.Join(layout.directory, id, name),
+			Backup:          filepath.Join(string(kind), id, name),
+			BeforeSHA256:    digestOf(backupBytes),
+			AfterSHA256:     state.SHA256,
+			BackupSHA256:    digestOf(backupBytes),
+			Mode:            state.Mode.Perm(),
+			BeforeLabels:    before,
+			AfterLabels:     state.Labels,
+			BeforeOwnership: ownershipLabelSubset(before),
+			AfterOwnership:  ownershipLabelSubset(state.Labels),
+		})
+	}
+	return application
 }
 
-func TestResolveMetadataTargetRejectsIdentityEscapingTheAppRoot(t *testing.T) {
-	root := seedAppRoot(t)
-	for _, identity := range []string{
-		"../escape", "a/b", ".", "", "..",
+func labelsOnDisk(t *testing.T, path string, labelPath []string) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels, err := readLabelsAtPath(raw, labelPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return labels
+}
+
+func TestLayoutForKnowsEveryResourceFamilyAndNothingElse(t *testing.T) {
+	for _, kind := range []MetadataResourceKind{
+		MetadataKindVolume, MetadataKindNetwork, MetadataKindContainer,
 	} {
-		if _, err := resolveMetadataTarget(
-			root, MetadataKindVolume, identity,
-		); err == nil {
-			t.Fatalf("expected identity %q to be refused", identity)
+		layout, err := layoutFor(kind)
+		if err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+		if layout.directory == "" || len(layout.documents) == 0 {
+			t.Fatalf("%s has an empty layout: %#v", kind, layout)
+		}
+	}
+	if _, err := layoutFor(MetadataResourceKind("image")); err == nil {
+		t.Fatal("an unknown resource kind was accepted")
+	}
+}
+
+func TestRollbackRestoresEveryDocumentToItsExactBytes(t *testing.T) {
+	for _, testCase := range []struct {
+		kind MetadataResourceKind
+		id   string
+	}{
+		{MetadataKindVolume, "vol-a"},
+		{MetadataKindNetwork, "net-a"},
+		// Two documents, which is where a partial restore would be worst: the
+		// listing prefers config.json, so a half-reverted container would report
+		// one set of labels while its other document held another.
+		{MetadataKindContainer, "ctr-started"},
+		{MetadataKindContainer, "ctr-created"},
+	} {
+		t.Run(string(testCase.kind)+"/"+testCase.id, func(t *testing.T) {
+			root := seedAppRoot(t)
+			backups := filepath.Join(t.TempDir(), "private-backups")
+			before := legacyTriple()
+			record := phase3ARecord(
+				t, testCase.kind, testCase.id, root, backups, before,
+			)
+			if err := rollbackMetadataApplication(record); err != nil {
+				t.Fatalf("rollback: %v", err)
+			}
+			for _, file := range record.Files {
+				if file.RestoredAs != RestoreExactBytes {
+					t.Fatalf(
+						"%s restored as %q, want %q",
+						file.Document, file.RestoredAs, RestoreExactBytes,
+					)
+				}
+				labels := labelsOnDisk(t, file.Path, file.LabelPath)
+				if !sameLabels(labels, before) {
+					t.Fatalf("%s holds %v, want %v", file.Document, labels, before)
+				}
+				// A foreign label must survive: the plan carries complete maps so
+				// recovery cannot drop somebody else's key.
+				if labels["com.example.foreign"] != "keep-me" {
+					t.Fatalf("%s lost its foreign label: %v", file.Document, labels)
+				}
+			}
+		})
+	}
+}
+
+// TestRollbackIsIdempotent matters because rollback is the recovery path. It has
+// to survive being run twice, and being resumed after an interruption partway
+// through, without reporting the second run as a failure.
+func TestRollbackIsIdempotent(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	before := legacyTriple()
+	record := phase3ARecord(
+		t, MetadataKindContainer, "ctr-started", root, backups, before,
+	)
+	if err := rollbackMetadataApplication(record); err != nil {
+		t.Fatalf("first rollback: %v", err)
+	}
+	if err := rollbackMetadataApplication(record); err != nil {
+		t.Fatalf("second rollback: %v", err)
+	}
+	for _, file := range record.Files {
+		if file.RestoredAs != RestoreAlreadyBefore {
+			t.Fatalf(
+				"%s reported %q on the second run, want %q",
+				file.Document, file.RestoredAs, RestoreAlreadyBefore,
+			)
+		}
+		if labels := labelsOnDisk(
+			t, file.Path, file.LabelPath,
+		); !sameLabels(labels, before) {
+			t.Fatalf("%s drifted on the second run: %v", file.Document, labels)
 		}
 	}
 }
 
-func TestResolveMetadataTargetRejectsUnknownFilesInTheResourceDirectory(t *testing.T) {
+// TestRollbackReconcilesADocumentCreatedSinceTheMigration covers the case the
+// recovery path exists in its current shape for. Starting a container
+// materialises config.json from the runtime's in-memory model, so a rollback
+// that restored only the documents it had recorded would leave the container
+// reporting its migrated labels through the document the listing prefers.
+func TestRollbackReconcilesADocumentCreatedSinceTheMigration(t *testing.T) {
 	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	before := legacyTriple()
+	record := phase3ARecord(
+		t, MetadataKindContainer, "ctr-created", root, backups, before,
+	)
+	if len(record.Files) != 1 {
+		t.Fatalf("fixture recorded %d documents, want 1", len(record.Files))
+	}
+	// The runtime materialises config.json carrying the labels the migration
+	// wrote.
+	created := filepath.Join(root, "containers", "ctr-created", "config.json")
 	if err := os.WriteFile(
-		filepath.Join(root, "volumes", "vol-a", "surprise.json"),
-		[]byte("{}"), 0o644,
+		created,
+		[]byte(`{"id":"ctr-created","labels":{"`+CurrentManagedLabelKey+`":"v1"}}`),
+		0o644,
 	); err != nil {
 		t.Fatal(err)
 	}
-	_, err := resolveMetadataTarget(root, MetadataKindVolume, "vol-a")
-	if err == nil || !strings.Contains(err.Error(), "surprise.json") {
-		t.Fatalf("expected an unknown file to be refused, got %v", err)
-	}
-}
-
-func TestReadMetadataTargetRequiresEveryDocumentToAgree(t *testing.T) {
-	root := seedAppRoot(t)
-	// Diverge the two container documents: only one carries the current pair.
-	path := filepath.Join(
-		root, "containers", "ctr-started", "runtime-configuration.json",
-	)
-	if err := os.WriteFile(path, []byte(
-		`{"containerConfiguration":{"id":"ctr-started","labels":{"`+
-			LegacyManagedLabelKey+`":"v1","`+CurrentManagedLabelKey+`":"v1"}}}`,
-	), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	target, err := resolveMetadataTarget(root, MetadataKindContainer, "ctr-started")
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	// A container whose two on-disk documents disagree is exactly the state a
-	// half-completed migration leaves behind, and continuing from it would
-	// migrate one document and silently skip the other.
-	if _, err := readMetadataTarget(target); err == nil {
-		t.Fatal("expected disagreeing documents to be refused")
-	}
-}
-
-func TestReadMetadataTargetReturnsAgreedLabels(t *testing.T) {
-	root := seedAppRoot(t)
-	target, err := resolveMetadataTarget(root, MetadataKindContainer, "ctr-started")
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	state, err := readMetadataTarget(target)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if state.Labels[LegacyManagedLabelKey] != "v1" {
-		t.Fatalf("unexpected labels: %#v", state.Labels)
-	}
-	if len(state.Files) != 2 {
-		t.Fatalf("expected two verified documents, got %d", len(state.Files))
-	}
-}
-
-// --- staged application ------------------------------------------------
-
-func TestApplyMetadataStageWritesEveryDocumentAndRollsBackExactly(t *testing.T) {
-	root := seedAppRoot(t)
-	backups := filepath.Join(t.TempDir(), "backup")
-	target, err := resolveMetadataTarget(root, MetadataKindContainer, "ctr-started")
-	if err != nil {
-		t.Fatal(err)
-	}
-	originals := map[string][]byte{}
-	for _, file := range target.Files {
-		data, err := os.ReadFile(file.Path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		originals[file.Path] = data
-	}
-	applied, err := applyMetadataStage(target, MetadataStagePrepare, backups, root)
-	if err != nil {
-		t.Fatalf("apply: %v", err)
-	}
-	if len(applied.Files) != 2 {
-		t.Fatalf("expected both documents rewritten, got %d", len(applied.Files))
-	}
-	for _, file := range target.Files {
-		data, err := os.ReadFile(file.Path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		labels, err := readLabelsAtPath(data, file.LabelPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if labels[CurrentManagedLabelKey] != "v1" {
-			t.Fatalf("%s did not gain the current label: %s", file.Path, data)
-		}
-	}
-	if err := rollbackMetadataApplication(applied); err != nil {
+	if err := rollbackMetadataApplication(record); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	for path, want := range originals {
-		got, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
+	if len(record.Reconciled) != 1 || record.Reconciled[0] != "config.json" {
+		t.Fatalf("rollback did not record the reconciliation: %#v", record.Reconciled)
+	}
+	if labels := labelsOnDisk(
+		t, created, []string{"labels"},
+	); !sameLabels(labels, before) {
+		t.Fatalf("the created-since document was not reconciled: %v", labels)
+	}
+}
+
+func TestRollbackRefusesACreatedSinceDocumentItCannotAccountFor(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	record := phase3ARecord(
+		t, MetadataKindContainer, "ctr-created", root, backups, legacyTriple(),
+	)
+	// Neither the labels the migration wrote nor the ones it replaced.
+	if err := os.WriteFile(
+		filepath.Join(root, "containers", "ctr-created", "config.json"),
+		[]byte(`{"id":"ctr-created","labels":{"com.example.other":"v9"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err := rollbackMetadataApplication(record)
+	if err == nil {
+		t.Fatal("a document the rollback cannot account for was written anyway")
+	}
+	if !strings.Contains(err.Error(), "resolve it by hand") {
+		t.Fatalf("unexpected refusal: %v", err)
+	}
+	// Nothing may have been restored: the check precedes every write, so the
+	// resource is left whole rather than between two states.
+	if labels := labelsOnDisk(
+		t,
+		record.Files[0].Path,
+		record.Files[0].LabelPath,
+	); labels[CurrentManagedLabelKey] != "v1" {
+		t.Fatalf("a refused rollback still rewrote the recorded document: %v", labels)
+	}
+}
+
+func TestRollbackRefusesADocumentInAnUnknownState(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	record := phase3ARecord(
+		t, MetadataKindVolume, "vol-a", root, backups, legacyTriple(),
+	)
+	// A non-label field changed since the migration: restoring the old bytes over
+	// it would revert whatever else recorded that change.
+	if err := os.WriteFile(
+		record.Files[0].Path,
+		[]byte(`{"name":"vol-renamed","labels":{"`+CurrentManagedLabelKey+`":"v1"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err := rollbackMetadataApplication(record)
+	if !errors.Is(err, ErrRollbackUnknownState) {
+		t.Fatalf("an unrecognised document was accepted for restore: %v", err)
+	}
+}
+
+func TestRollbackRefusesACorruptedBackup(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	record := phase3ARecord(
+		t, MetadataKindVolume, "vol-a", root, backups, legacyTriple(),
+	)
+	if err := os.WriteFile(
+		record.Files[0].BackupPath,
+		[]byte(`{"name":"vol-a","labels":{"com.example.tampered":"yes"}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err := rollbackMetadataApplication(record)
+	if err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("a backup that no longer matches its digest was restored: %v", err)
+	}
+	if labels := labelsOnDisk(
+		t, record.Files[0].Path, record.Files[0].LabelPath,
+	); labels[CurrentManagedLabelKey] != "v1" {
+		t.Fatalf("a refused rollback still rewrote the document: %v", labels)
+	}
+}
+
+// TestRollbackRestoresLabelsThisBinaryCannotRead is the property that makes the
+// retained path safe to keep at all. It restores recorded maps verbatim and
+// never consults a label key, so it works on exactly the namespace Phase 3B
+// removed from the reader.
+func TestRollbackRestoresLabelsThisBinaryCannotRead(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	before := legacyTriple()
+	record := phase3ARecord(t, MetadataKindVolume, "vol-a", root, backups, before)
+	if class := ClassifyOwnership(record.AfterLabels); class != OwnershipOwned {
+		t.Fatalf("the fixture is not owned before rollback: %q", class)
+	}
+	if err := rollbackMetadataApplication(record); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	restored := labelsOnDisk(t, record.Files[0].Path, record.Files[0].LabelPath)
+	if restored[legacyManagedLabelKey] != "v1" {
+		t.Fatalf("the retired namespace was not restored: %v", restored)
+	}
+	// And the resource is now invisible to this binary, which is the one-way
+	// boundary the runbook documents.
+	if class := ClassifyOwnership(restored); class != OwnershipMissingLabel {
+		t.Fatalf("a rolled-back resource still classifies as %q", class)
+	}
+}
+
+// A write whose rename succeeded but whose directory entry could not be flushed
+// has already replaced the document. It is the one state that can leave a
+// container half-reverted — one document rolled back, its sibling pushed
+// forward — and it is unreachable without forcing an fsync failure after a
+// successful rename. These cases force it.
+
+// failDirectorySyncAfter makes the Nth directory sync fail, counting from one.
+func failDirectorySyncAfter(t *testing.T, n int) {
+	t.Helper()
+	original := syncDirectoryEntry
+	calls := 0
+	syncDirectoryEntry = func(directory *directoryHandle) error {
+		calls++
+		if calls == n {
+			return errors.New("injected directory sync failure")
 		}
-		if string(got) != string(want) {
+		return original(directory)
+	}
+	t.Cleanup(func() { syncDirectoryEntry = original })
+}
+
+// TestRollbackUnwindsALandedRecordedWrite covers the primary path: a recorded
+// document is restored, its directory sync fails, and the resource must end
+// wholly migrated rather than partly reverted.
+func TestRollbackUnwindsALandedRecordedWrite(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	before := legacyTriple()
+	record := phase3ARecord(
+		t, MetadataKindContainer, "ctr-started", root, backups, before,
+	)
+	if len(record.Files) != 2 {
+		t.Fatalf("fixture recorded %d documents, want 2", len(record.Files))
+	}
+	// The first restore in the loop is the last file; fail its sync.
+	failDirectorySyncAfter(t, 1)
+	err := rollbackMetadataApplication(record)
+	if err == nil {
+		t.Fatal("a durability-uncertain restore was reported as success")
+	}
+	// Every document must be back at what the migration wrote. A document left
+	// at the pre-migration labels while its sibling holds the migrated ones is
+	// the half-reverted container this path exists to prevent.
+	for _, file := range record.Files {
+		labels := labelsOnDisk(t, file.Path, file.LabelPath)
+		if !sameLabels(labels, record.AfterLabels) {
 			t.Fatalf(
-				"rollback did not restore %s byte for byte:\n want %s\n got  %s",
-				path, want, got,
+				"%s ended at %v, want the migrated labels %v",
+				file.Document, labels, record.AfterLabels,
 			)
 		}
 	}
 }
 
-func TestApplyMetadataStageIsAtomicAcrossDocuments(t *testing.T) {
+// TestRollbackUnwindsALandedCreatedSinceWrite covers the created-since path,
+// whose record runs the opposite way round: applyMetadataFile records "what I
+// found" and "what I wrote", so handing it to reapply unswapped would rewrite
+// the rollback destination that is already on disk.
+func TestRollbackUnwindsALandedCreatedSinceWrite(t *testing.T) {
 	root := seedAppRoot(t)
-	target, err := resolveMetadataTarget(root, MetadataKindContainer, "ctr-started")
-	if err != nil {
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	before := legacyTriple()
+	record := phase3ARecord(
+		t, MetadataKindContainer, "ctr-created", root, backups, before,
+	)
+	if len(record.Files) != 1 {
+		t.Fatalf("fixture recorded %d documents, want 1", len(record.Files))
+	}
+	created := filepath.Join(root, "containers", "ctr-created", "config.json")
+	if err := os.WriteFile(
+		created,
+		[]byte(`{"id":"ctr-created","labels":{"`+CurrentManagedLabelKey+`":"v1"}}`),
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
-	if len(target.Files) != 2 {
-		t.Fatalf("expected two documents, got %d", len(target.Files))
+	// Sync 1 is the recorded document's restore; sync 2 is the created-since
+	// write, which is the one whose record direction was wrong.
+	failDirectorySyncAfter(t, 2)
+	err := rollbackMetadataApplication(record)
+	if err == nil {
+		t.Fatal("a durability-uncertain reconciliation was reported as success")
 	}
-	originals := make(map[string][]byte, len(target.Files))
-	for _, file := range target.Files {
-		data, err := os.ReadFile(file.Path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		originals[file.Path] = data
-	}
-	// The second document's backup destination is pre-occupied. Both container
-	// documents live in the same directory, so making that directory unwritable
-	// — the obvious way to fail the second write — fails the FIRST one too, and
-	// the test would then pass without the unwind path ever running. Blocking
-	// only the second document's O_EXCL backup fails exactly one write, after
-	// the other has already succeeded.
-	backups := filepath.Join(t.TempDir(), "backups")
-	second := filepath.Base(target.Files[1].Path)
-	occupied := filepath.Join(backups, "container", "ctr-started", second)
-	if err := os.MkdirAll(filepath.Dir(occupied), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(occupied, []byte("earlier run"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := applyMetadataStage(
-		target, MetadataStagePrepare, backups, root,
-	); err == nil {
-		t.Fatal("expected the stage to fail on the second document")
-	}
-	// A resource whose documents disagree is worse than one that was never
-	// touched, so the failure has to unwind what it already wrote.
-	for path, want := range originals {
-		got, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != string(want) {
+	for path, labelPath := range map[string][]string{
+		created:              {"labels"},
+		record.Files[0].Path: record.Files[0].LabelPath,
+	} {
+		labels := labelsOnDisk(t, path, labelPath)
+		if !sameLabels(labels, record.AfterLabels) {
 			t.Fatalf(
-				"a failed stage left %s migrated:\n want %s\n got  %s",
-				filepath.Base(path), want, got,
+				"%s ended at %v, want the migrated labels %v",
+				filepath.Base(path), labels, record.AfterLabels,
 			)
 		}
-	}
-}
-
-// TestApplyMetadataStageUnwindActuallyRuns proves the previous test exercises
-// the unwind rather than trivially observing an untouched first document.
-func TestApplyMetadataStageUnwindActuallyRuns(t *testing.T) {
-	root := seedAppRoot(t)
-	target, err := resolveMetadataTarget(root, MetadataKindContainer, "ctr-started")
-	if err != nil {
-		t.Fatal(err)
-	}
-	backups := filepath.Join(t.TempDir(), "backups")
-	second := filepath.Base(target.Files[1].Path)
-	occupied := filepath.Join(backups, "container", "ctr-started", second)
-	if err := os.MkdirAll(filepath.Dir(occupied), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(occupied, []byte("earlier run"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := applyMetadataStage(
-		target, MetadataStagePrepare, backups, root,
-	); err == nil {
-		t.Fatal("expected failure")
-	}
-	// The first document's backup exists, which is only true if that document
-	// was actually written before the second one failed.
-	first := filepath.Base(target.Files[0].Path)
-	if _, err := os.Stat(
-		filepath.Join(backups, "container", "ctr-started", first),
-	); err != nil {
-		t.Fatalf(
-			"the first document was never written, so the unwind path was "+
-				"never exercised: %v", err,
-		)
-	}
-}
-
-func TestApplyMetadataStageRefusesToReuseABackupDirectory(t *testing.T) {
-	root := seedAppRoot(t)
-	backups := filepath.Join(t.TempDir(), "backup")
-	target, err := resolveMetadataTarget(root, MetadataKindVolume, "vol-a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := applyMetadataStage(
-		target, MetadataStagePrepare, backups, root,
-	); err != nil {
-		t.Fatalf("first apply: %v", err)
-	}
-	// Re-running into the same backup directory would overwrite the only record
-	// of the original bytes.
-	if _, err := applyMetadataStage(
-		target, MetadataStageRetire, backups, root,
-	); err == nil {
-		t.Fatal("expected the second run to refuse the used backup directory")
-	}
-}
-
-// The retire gate is keyed on ClassifyOwnership, which resolves the managed key
-// alone. A resource whose ownership marker is dual but whose role pair is still
-// legacy-only classifies as "dual" and would otherwise pass a host-wide gate,
-// leaving the legacy namespace behind after the phase claimed it was gone.
-func TestRetireGateSeesALegacyOnlyRolePairOnADualResource(t *testing.T) {
-	inventory := &OwnershipInventory{
-		Totals:  map[OwnershipClass]int{},
-		ByKind:  map[MetadataResourceKind]int{},
-		Managed: map[MetadataResourceKind]int{},
-	}
-	inventory.add(OwnershipInventoryRecord{
-		Kind:  MetadataKindContainer,
-		ID:    "agentops-runner",
-		Class: OwnershipDual,
-		Labels: map[string]string{
-			LegacyManagedLabelKey:  ManagedLabelValue,
-			CurrentManagedLabelKey: ManagedLabelValue,
-			// The role pair never made it across.
-			LegacyRoleLabelKey: "runner",
-		},
-	})
-	if inventory.Records[0].Class != OwnershipDual {
-		t.Fatalf("fixture is not dual: %q", inventory.Records[0].Class)
-	}
-	if err := inventory.RequireCurrentOwnershipEverywhere(); err == nil {
-		t.Fatal("retire gate passed a resource with a legacy-only role pair")
-	}
-}
-
-func TestOwnershipInventoryLegacyListIsDeterministic(t *testing.T) {
-	build := func() []string {
-		inventory := &OwnershipInventory{
-			Totals:  map[OwnershipClass]int{},
-			ByKind:  map[MetadataResourceKind]int{},
-			Managed: map[MetadataResourceKind]int{},
-		}
-		for _, record := range []OwnershipInventoryRecord{
-			{Kind: MetadataKindVolume, ID: "vol-b", Class: OwnershipLegacyOnly},
-			{Kind: MetadataKindNetwork, ID: "net-a", Class: OwnershipLegacyOnly},
-			{Kind: MetadataKindVolume, ID: "vol-a", Class: OwnershipLegacyOnly},
-		} {
-			inventory.add(record)
-		}
-		sortOwnershipInventory(inventory)
-		rendered := make([]string, 0, len(inventory.Legacy))
-		for _, record := range inventory.Legacy {
-			rendered = append(rendered, string(record.Kind)+"/"+record.ID)
-		}
-		return rendered
-	}
-	first := build()
-	for attempt := 0; attempt < 5; attempt++ {
-		if got := build(); !reflect.DeepEqual(got, first) {
-			t.Fatalf("legacy list reordered between runs: %v vs %v", first, got)
-		}
-	}
-	want := []string{"network/net-a", "volume/vol-a", "volume/vol-b"}
-	if !reflect.DeepEqual(first, want) {
-		t.Fatalf("legacy list = %v, want %v", first, want)
 	}
 }

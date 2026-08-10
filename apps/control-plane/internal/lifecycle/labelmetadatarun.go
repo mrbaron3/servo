@@ -8,13 +8,17 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
-// This file is the operator-facing shape of Phase 3A's sweep: an inventory that
-// classifies every managed resource, a plan naming exact targets, and a staged
-// application that stops the runtime, rewrites metadata, starts it again, and
-// proves the result through the runtime's own API rather than through the files
-// it just wrote.
+// This file is the operator-facing shape of what survives Phase 3A's sweep: an
+// inventory that classifies every managed resource from the current ownership
+// namespace, and the recovery path that can return a resource to the labels a
+// Phase 3A run recorded for it.
+//
+// The forward halves — the plan, the staged application, and the post-restart
+// verification — are gone with Phase 3B. Each of them decided what to write by
+// comparing the two namespaces, and there is now only one.
 
 // OwnershipInventoryRecord is one resource's ownership as the runtime reports
 // it. It carries no host path: the durable evidence records identities and
@@ -28,12 +32,16 @@ type OwnershipInventoryRecord struct {
 }
 
 // OwnershipInventory is the whole host, classified.
+//
+// Phase 3A carried a `legacyOnly` list here, which was the gate its retire stage
+// read. Phase 3B removes it: a resource carrying only the retired namespace is
+// no longer distinguishable from one carrying no ownership label at all, and
+// publishing an always-empty list would suggest this binary still looks.
 type OwnershipInventory struct {
 	Records []OwnershipInventoryRecord   `json:"records"`
 	Totals  map[OwnershipClass]int       `json:"totals"`
 	ByKind  map[MetadataResourceKind]int `json:"byKind"`
 	Managed map[MetadataResourceKind]int `json:"managed"`
-	Legacy  []OwnershipInventoryRecord   `json:"legacyOnly"`
 }
 
 // TakeOwnershipInventory classifies every container, volume, and network.
@@ -86,22 +94,18 @@ func TakeOwnershipInventory(
 	return inventory, nil
 }
 
-// sortOwnershipInventory puts both lists into a stable order. Legacy is sorted
-// as well as Records: it is emitted into committed evidence and into the retire
-// gate's refusal message, and it is populated while ranging over a map whose
-// iteration order Go randomises per run — so without this the same unchanged
-// host produces a different diff every time it is inventoried.
+// sortOwnershipInventory puts the listing into a stable order. It is emitted
+// into committed evidence and populated while ranging over a map whose iteration
+// order Go randomises per run, so without this the same unchanged host produces
+// a different diff every time it is inventoried.
 func sortOwnershipInventory(inventory *OwnershipInventory) {
-	byKindThenID := func(records []OwnershipInventoryRecord) func(int, int) bool {
-		return func(first, second int) bool {
-			if records[first].Kind != records[second].Kind {
-				return records[first].Kind < records[second].Kind
-			}
-			return records[first].ID < records[second].ID
+	records := inventory.Records
+	sort.Slice(records, func(first, second int) bool {
+		if records[first].Kind != records[second].Kind {
+			return records[first].Kind < records[second].Kind
 		}
-	}
-	sort.Slice(inventory.Records, byKindThenID(inventory.Records))
-	sort.Slice(inventory.Legacy, byKindThenID(inventory.Legacy))
+		return records[first].ID < records[second].ID
+	})
 }
 
 func (inventory *OwnershipInventory) add(record OwnershipInventoryRecord) {
@@ -111,36 +115,36 @@ func (inventory *OwnershipInventory) add(record OwnershipInventoryRecord) {
 	if record.Class.Owned() {
 		inventory.Managed[record.Kind]++
 	}
-	// The gate has to see a resource whose ownership marker is already dual but
-	// whose role or specification pair is still legacy-only. ClassifyOwnership
-	// resolves the managed key alone, so such a resource reports "dual" and
-	// would slip through a gate keyed on the class — leaving the legacy
-	// namespace behind after the phase claimed it was gone.
-	if record.Class == OwnershipLegacyOnly ||
-		(record.Class.Owned() && carriesLegacyOnlyPair(record.Labels)) {
-		inventory.Legacy = append(inventory.Legacy, record)
-	}
 }
 
-// ManagedTargets returns every owned resource, which is the complete set the
-// sweep may act on.
-func (inventory *OwnershipInventory) ManagedTargets() []MetadataTargetRef {
-	targets := make([]MetadataTargetRef, 0, len(inventory.Records))
-	for _, record := range inventory.Records {
-		if record.Class.Owned() {
-			targets = append(
-				targets, MetadataTargetRef{Kind: record.Kind, ID: record.ID},
-			)
+// ContainerTargets lists the container identities a plan will rewrite. The
+// rollback gate needs these by name: a resource an interrupted rollback already
+// reverted classifies as missing-label, so a gate keyed on classification alone
+// stops seeing exactly the containers a resumed run is about to touch.
+func (plan *RollbackPlan) ContainerTargets() []string {
+	targets := make([]string, 0, len(plan.Applied))
+	for _, application := range plan.Applied {
+		if application.Kind == MetadataKindContainer {
+			targets = append(targets, application.ID)
 		}
 	}
 	return targets
 }
 
-// RunningManagedContainers lists owned containers that are not stopped.
-func (inventory *OwnershipInventory) RunningManagedContainers() []string {
+// RunningNamed lists identities from `names` that the inventory reports as a
+// container in any state other than stopped, whatever this binary makes of its
+// labels.
+func (inventory *OwnershipInventory) RunningNamed(names []string) []string {
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[name] = struct{}{}
+	}
 	running := make([]string, 0)
 	for _, record := range inventory.Records {
-		if record.Kind != MetadataKindContainer || !record.Class.Owned() {
+		if record.Kind != MetadataKindContainer {
+			continue
+		}
+		if _, want := wanted[record.ID]; !want {
 			continue
 		}
 		if record.State != "stopped" {
@@ -150,401 +154,67 @@ func (inventory *OwnershipInventory) RunningManagedContainers() []string {
 	return running
 }
 
-// RequireConflictFree stops before any stage when a resource is partially
-// migrated. A conflict is neither owned nor foreign, and the runbook sends the
-// operator to `container inspect` rather than to this tool.
-func (inventory *OwnershipInventory) RequireConflictFree() error {
-	conflicting := make([]string, 0)
+// RunningIdentifiableContainers lists containers that are not stopped and that
+// this binary has some claim on: owned, or incompletely labelled in the current
+// namespace.
+//
+// Malformed is included deliberately. Through Phase 3A the equivalent gate
+// counted owned containers only, and that was complete because every shape this
+// binary could own was owned. Since Phase 3B a half-labelled container of ours
+// classifies as malformed, and leaving it out would let a rollback stop the
+// runtime underneath a container it is about to rewrite.
+//
+// Missing-label and unmanaged are still excluded here, and that is not an
+// oversight: stopping Apple Container affects the whole host, but blocking on
+// `buildkit` or on another deployment's container would make rollback impossible
+// on any real machine. The containers a plan actually targets are covered
+// separately and by name, through RunningNamed — which is what catches a resumed
+// rollback whose earlier resources are already back on the retired namespace and
+// therefore unclassifiable.
+//
+// Both are courtesy checks. RequireServicesStopped, which demands two
+// independent signals that the runtime is down, is what actually proves no
+// document is rewritten under a live apiserver.
+func (inventory *OwnershipInventory) RunningIdentifiableContainers() []string {
+	running := make([]string, 0)
 	for _, record := range inventory.Records {
-		if record.Class == OwnershipConflicting {
-			conflicting = append(
-				conflicting, string(record.Kind)+" "+record.ID,
-			)
-		}
-	}
-	if len(conflicting) > 0 {
-		return fmt.Errorf(
-			"%d resource(s) carry conflicting ownership labels (%s); %w",
-			len(conflicting), strings.Join(conflicting, ", "),
-			ErrConflictingLabels,
-		)
-	}
-	return nil
-}
-
-// RequireCurrentOwnershipEverywhere is the gate between the two stages. Retiring
-// the legacy pair while any managed resource still carries it alone would strip
-// that resource's only ownership marker.
-func (inventory *OwnershipInventory) RequireCurrentOwnershipEverywhere() error {
-	if len(inventory.Legacy) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(inventory.Legacy))
-	for _, record := range inventory.Legacy {
-		names = append(names, string(record.Kind)+" "+record.ID)
-	}
-	return fmt.Errorf(
-		"%d managed resource(s) still carry at least one ownership pair in the "+
-			"legacy namespace alone (%s); run the prepare stage before retiring",
-		len(names), strings.Join(names, ", "),
-	)
-}
-
-// MetadataTargetRef is one exact resource an operator named.
-type MetadataTargetRef struct {
-	Kind MetadataResourceKind `json:"kind"`
-	ID   string               `json:"id"`
-}
-
-func (ref MetadataTargetRef) String() string {
-	return string(ref.Kind) + "/" + ref.ID
-}
-
-// ParseMetadataTargetRef reads the `kind/identity` spelling an operator passes
-// to --only. The kind is required: a bare name would be ambiguous the moment a
-// volume and a network share one, and this migration never guesses which
-// resource an operator meant.
-func ParseMetadataTargetRef(raw string) (MetadataTargetRef, error) {
-	kind, identity, found := strings.Cut(strings.TrimSpace(raw), "/")
-	if !found {
-		return MetadataTargetRef{}, fmt.Errorf(
-			"%q is not a target; write it as container/<id>, volume/<name>, "+
-				"or network/<name>",
-			raw,
-		)
-	}
-	reference := MetadataTargetRef{
-		Kind: MetadataResourceKind(strings.TrimSpace(kind)),
-		ID:   strings.TrimSpace(identity),
-	}
-	if _, err := layoutFor(reference.Kind); err != nil {
-		return MetadataTargetRef{}, err
-	}
-	if reference.ID == "" {
-		return MetadataTargetRef{}, fmt.Errorf("%q names no resource", raw)
-	}
-	return reference, nil
-}
-
-// RequireDistinctTargets rejects a repeated target. A duplicate would make the
-// number of resources the run touched ambiguous, and an ambiguous count is not
-// something an audit can be written from.
-func RequireDistinctTargets(targets []MetadataTargetRef) error {
-	seen := make(map[string]struct{}, len(targets))
-	for _, target := range targets {
-		key := target.String()
-		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("target %s is named more than once", key)
-		}
-		seen[key] = struct{}{}
-	}
-	if len(targets) == 0 {
-		return fmt.Errorf(
-			"no targets were named; this migration never derives its own " +
-				"blast radius from the host's current contents",
-		)
-	}
-	return nil
-}
-
-// MetadataDocumentPlan describes one document a stage would rewrite. The path is
-// relative to the application root so durable evidence never records where the
-// operator's home directory is.
-type MetadataDocumentPlan struct {
-	RelativePath string `json:"relativePath"`
-	BeforeSHA256 string `json:"beforeSha256"`
-}
-
-// MetadataPlanEntry is one resource's planned change.
-type MetadataPlanEntry struct {
-	Kind        MetadataResourceKind   `json:"kind"`
-	ID          string                 `json:"id"`
-	State       string                 `json:"state,omitempty"`
-	ClassBefore OwnershipClass         `json:"classBefore"`
-	ClassAfter  OwnershipClass         `json:"classAfter"`
-	ChangedKeys []string               `json:"changedKeys"`
-	Documents   []MetadataDocumentPlan `json:"documents"`
-	Satisfied   bool                   `json:"alreadySatisfied"`
-}
-
-// MetadataSweepPlan is what an operator approves before anything is written.
-type MetadataSweepPlan struct {
-	Stage       MetadataStage       `json:"stage"`
-	Host        MetadataHost        `json:"host"`
-	Entries     []MetadataPlanEntry `json:"entries"`
-	ChangeCount int                 `json:"changeCount"`
-}
-
-// redactAppRoot renders a path relative to the application root. Evidence has to
-// be publishable in a pull request, and the default application root sits under
-// the operator's home directory.
-func redactAppRoot(appRoot, path string) string {
-	relative, err := filepath.Rel(appRoot, path)
-	if err != nil {
-		return filepath.Base(path)
-	}
-	return relative
-}
-
-// PlanMetadataSweep resolves and verifies every named target without changing
-// anything. It is the read-only rehearsal the decision gate is built from.
-func PlanMetadataSweep(
-	host *MetadataHost,
-	stage MetadataStage,
-	targets []MetadataTargetRef,
-	states map[string]string,
-) (*MetadataSweepPlan, error) {
-	if err := RequireDistinctTargets(targets); err != nil {
-		return nil, err
-	}
-	plan := &MetadataSweepPlan{Stage: stage, Host: *host}
-	for _, reference := range targets {
-		target, err := resolveMetadataTarget(
-			host.AppRoot, reference.Kind, reference.ID,
-		)
-		if err != nil {
-			return nil, err
-		}
-		state, err := readMetadataTarget(target)
-		if err != nil {
-			return nil, err
-		}
-		planned, err := planOwnershipLabels(state.Labels, stage)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", reference, err)
-		}
-		changed := changedLabelKeys(state.Labels, planned)
-		entry := MetadataPlanEntry{
-			Kind:        reference.Kind,
-			ID:          reference.ID,
-			State:       states[reference.String()],
-			ClassBefore: state.Class,
-			ClassAfter:  ClassifyOwnership(planned),
-			ChangedKeys: changed,
-			Satisfied:   len(changed) == 0,
-		}
-		for _, file := range state.Files {
-			entry.Documents = append(entry.Documents, MetadataDocumentPlan{
-				RelativePath: redactAppRoot(host.AppRoot, file.Ref.Path),
-				BeforeSHA256: file.SHA256,
-			})
-		}
-		if !entry.Satisfied {
-			plan.ChangeCount++
-		}
-		plan.Entries = append(plan.Entries, entry)
-	}
-	return plan, nil
-}
-
-// MetadataSweepReport is the durable account of one applied stage.
-type MetadataSweepReport struct {
-	Stage      MetadataStage          `json:"stage"`
-	Host       MetadataHost           `json:"host"`
-	Applied    []*MetadataApplication `json:"applied"`
-	Skipped    []MetadataTargetRef    `json:"skipped"`
-	Halted     string                 `json:"halted,omitempty"`
-	RolledBack bool                   `json:"rolledBack"`
-	// BackupRoot is absolute and private; the evidence records only its base
-	// name so a reader can find it without the file naming the operator's home.
-	BackupRoot     string `json:"-"`
-	BackupRootName string `json:"backupRootName"`
-	// PlanStaleAfter names the resource that was migrated when the rollback plan
-	// could not be rewritten. While it is set, the plan on disk covers strictly
-	// less than what the run changed.
-	PlanStaleAfter string `json:"planStaleAfter,omitempty"`
-	VerifiedByAPI  bool   `json:"verifiedByApi"`
-}
-
-// ApplyMetadataSweep rewrites every planned target while the runtime is down.
-// The caller is responsible for stopping and starting the services; this
-// function refuses to run unless they are already proven stopped, so the proof
-// and the mutation cannot drift apart.
-func ApplyMetadataSweep(
-	ctx context.Context,
-	runtime *AppleRuntime,
-	host *MetadataHost,
-	stage MetadataStage,
-	targets []MetadataTargetRef,
-	backupRoot string,
-) (*MetadataSweepReport, error) {
-	if err := RequireDistinctTargets(targets); err != nil {
-		return nil, err
-	}
-	if err := RequireServicesStopped(ctx, runtime.runner); err != nil {
-		return nil, err
-	}
-	report := &MetadataSweepReport{
-		Stage: stage, Host: *host, BackupRoot: backupRoot,
-		BackupRootName: filepath.Base(backupRoot),
-	}
-	for _, reference := range targets {
-		target, err := resolveMetadataTarget(
-			host.AppRoot, reference.Kind, reference.ID,
-		)
-		if err != nil {
-			report.Halted = redactRoots(err.Error(), host.AppRoot, backupRoot)
-			return report, err
-		}
-		state, err := readMetadataTarget(target)
-		if err != nil {
-			report.Halted = redactRoots(err.Error(), host.AppRoot, backupRoot)
-			return report, err
-		}
-		planned, err := planOwnershipLabels(state.Labels, stage)
-		if err != nil {
-			report.Halted = redactRoots(
-				fmt.Sprintf("%s: %v", reference, err), host.AppRoot, backupRoot,
-			)
-			return report, fmt.Errorf("%s: %w", reference, err)
-		}
-		if len(changedLabelKeys(state.Labels, planned)) == 0 {
-			// Re-running a stage over a resource it already migrated is how an
-			// interrupted sweep resumes, so it has to be a no-op rather than an
-			// error.
-			report.Skipped = append(report.Skipped, reference)
+		if record.Kind != MetadataKindContainer {
 			continue
 		}
-		application, err := applyMetadataStage(
-			target, stage, backupRoot, host.AppRoot,
-		)
-		if err != nil {
-			report.Halted = redactRoots(err.Error(), host.AppRoot, backupRoot)
-			return report, err
+		if !record.Class.Owned() && record.Class != OwnershipMalformed {
+			continue
 		}
-		report.Applied = append(report.Applied, application)
-		// The rollback plan is rewritten as each resource lands, not once at the
-		// end. A sweep that halts on its fourth target, or whose runtime fails to
-		// restart, has already rewritten three resources, and the plan is the
-		// only artifact that can undo them — the committed evidence cannot,
-		// because it deliberately omits the absolute paths.
-		if err := PersistRollbackPlan(backupRoot, report); err != nil {
-			// The resource is already rewritten and the plan on disk does not
-			// mention it. Saying so precisely is the whole value of the message:
-			// an operator told only "the plan failed" cannot tell which resource
-			// the plan no longer covers.
-			report.PlanStaleAfter = reference.String()
-			report.Halted = redactRoots(fmt.Sprintf(
-				"%s was migrated but the rollback plan could not be updated, so "+
-					"the plan on disk does not describe it: %v",
-				reference, err,
-			), host.AppRoot, backupRoot)
-			return report, fmt.Errorf("%s: %w", report.Halted, err)
+		if record.State != "stopped" {
+			running = append(running, record.ID)
 		}
 	}
-	return report, nil
+	return running
 }
 
-// RollbackPlanPath is where a run's private rollback plan lives.
+// RollbackPlanPath is where a Phase 3A run's private rollback plan lives.
 func RollbackPlanPath(backupRoot string) string {
 	return filepath.Join(backupRoot, "rollback-plan.json")
-}
-
-// PersistRollbackPlan writes the private rollback plan for everything applied so
-// far. It is safe to call repeatedly: the file is replaced atomically, at 0600,
-// inside the 0700 backup root.
-func PersistRollbackPlan(
-	backupRoot string,
-	report *MetadataSweepReport,
-) error {
-	encoded, err := json.MarshalIndent(BuildRollbackPlan(report), "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode rollback plan: %w", err)
-	}
-	if err := os.MkdirAll(backupRoot, 0o700); err != nil {
-		return fmt.Errorf("create backup root: %w", err)
-	}
-	return writeFileAtomically(
-		RollbackPlanPath(backupRoot), append(encoded, '\n'),
-		0o600, os.Getuid(), os.Getgid(),
-	)
-}
-
-// redactRoots removes machine-specific prefixes from a message destined for
-// committed evidence. Structured path fields are already omitted, but a raw
-// error string is a free-form channel that can carry the same information.
-func redactRoots(message string, roots ...string) string {
-	for _, root := range roots {
-		if strings.TrimSpace(root) == "" {
-			continue
-		}
-		message = strings.ReplaceAll(message, root, "<redacted>")
-	}
-	return message
-}
-
-// VerifyMetadataSweep re-reads the runtime's own view after a restart and
-// proves it matches what the sweep intended. Checking the files this run just
-// wrote would only prove the writer agreed with itself; the question that
-// matters is whether Apple Container now reports the labels the migration was
-// for.
-func VerifyMetadataSweep(
-	ctx context.Context,
-	runtime *AppleRuntime,
-	report *MetadataSweepReport,
-) error {
-	inventory, err := TakeOwnershipInventory(ctx, runtime)
-	if err != nil {
-		return err
-	}
-	observed := make(map[string]OwnershipInventoryRecord, len(inventory.Records))
-	for _, record := range inventory.Records {
-		observed[MetadataTargetRef{Kind: record.Kind, ID: record.ID}.String()] =
-			record
-	}
-	for _, application := range report.Applied {
-		key := MetadataTargetRef{
-			Kind: application.Kind, ID: application.ID,
-		}.String()
-		record, present := observed[key]
-		if !present {
-			return fmt.Errorf(
-				"%s is no longer reported by the runtime after the sweep", key,
-			)
-		}
-		if record.Class != application.ClassAfter {
-			return fmt.Errorf(
-				"%s reports ownership class %q after the sweep, expected %q",
-				key, record.Class, application.ClassAfter,
-			)
-		}
-		for key, want := range application.AfterLabels {
-			if _, owned := ownershipKeySet()[key]; !owned {
-				continue
-			}
-			if record.Labels[key] != want {
-				return fmt.Errorf(
-					"%s label %s reads %q, expected %q",
-					application.ID, key, record.Labels[key], want,
-				)
-			}
-		}
-		for key := range record.Labels {
-			if _, present := application.AfterLabels[key]; !present {
-				return fmt.Errorf(
-					"%s still reports retired label %s", application.ID, key,
-				)
-			}
-		}
-	}
-	report.VerifiedByAPI = true
-	return nil
 }
 
 // RollbackPlan is the private companion to the committed evidence. It carries
 // the absolute locations rollback needs, which the evidence deliberately omits,
 // and it lives inside the 0700 backup root beside the backups it names.
+//
+// Since Phase 3B this type is only ever read. Nothing writes a new plan, because
+// nothing performs a forward migration any more.
 type RollbackPlan struct {
-	Stage   MetadataStage          `json:"stage"`
+	// Stage is the Phase 3A stage name the plan was written under. It is carried
+	// verbatim and never matched against: see MetadataApplication.
+	Stage   string                 `json:"stage"`
 	Applied []*MetadataApplication `json:"applied"`
 	// Locations mirrors the absolute paths that MetadataApplication hides from
 	// the committed evidence, indexed the same way as Applied.
 	Locations [][]RollbackLocation `json:"locations"`
 	// Labels carries the COMPLETE label maps, foreign labels included. Rollback
-	// restores a resource's labels exactly, and a map truncated to the six
-	// ownership keys would silently drop somebody else's label. They live here
-	// rather than in the evidence because a foreign label's value is arbitrary
-	// third-party text.
+	// restores a resource's labels exactly, and a map truncated to the ownership
+	// keys would silently drop somebody else's label. They live here rather than
+	// in the evidence because a foreign label's value is arbitrary third-party
+	// text.
 	Labels []RollbackLabels `json:"labels"`
 }
 
@@ -560,28 +230,13 @@ type RollbackLocation struct {
 	BackupPath string `json:"backupPath"`
 }
 
-// BuildRollbackPlan lifts the absolute paths back out of the report so they can
-// be written to the private plan.
-func BuildRollbackPlan(report *MetadataSweepReport) *RollbackPlan {
-	plan := &RollbackPlan{Stage: report.Stage, Applied: report.Applied}
-	for _, application := range report.Applied {
-		locations := make([]RollbackLocation, 0, len(application.Files))
-		for _, file := range application.Files {
-			locations = append(locations, RollbackLocation{
-				Path: file.Path, BackupPath: file.BackupPath,
-			})
-		}
-		plan.Locations = append(plan.Locations, locations)
-		plan.Labels = append(plan.Labels, RollbackLabels{
-			Before: application.BeforeLabels,
-			After:  application.AfterLabels,
-		})
-	}
-	return plan
-}
-
 // ParseRollbackPlan restores a plan and reattaches the absolute locations to the
 // applications they belong to.
+//
+// Every consistency check here is on the plan's own internal shape — counts that
+// must line up, maps that must be present. None of it inspects a label key: the
+// plan may legitimately carry labels in a namespace this binary no longer reads,
+// and restoring it faithfully is the entire point of keeping this path.
 func ParseRollbackPlan(raw []byte) (*RollbackPlan, error) {
 	var plan RollbackPlan
 	if err := json.Unmarshal(raw, &plan); err != nil {
@@ -637,6 +292,291 @@ func ParseRollbackPlan(raw []byte) (*RollbackPlan, error) {
 		}
 	}
 	return &plan, nil
+}
+
+// BindToHost proves a decoded plan describes documents belonging to this host,
+// and nothing else, before any of it is acted on.
+//
+// This is the plan's trust boundary and it has to be drawn here. ParseRollbackPlan
+// checks only that the plan is internally consistent — counts that line up, label
+// maps that exist — and every path, digest, and label map it carries comes out of
+// a file. A plan that is merely self-consistent can name a legitimate document,
+// supply a backup it chose along with matching self-authored digests, and have
+// rollback rewrite a real resource's ownership metadata. Internal consistency is
+// exactly what a forged plan has.
+//
+// So the binding is a reconstruction and a verification, not a comparison:
+//
+//   - Every location is rebuilt from the resolved application root plus the
+//     plan's own kind and identity, and the plan must agree with what was built.
+//     A plan cannot name a place the layout does not put a document.
+//   - Every backup sits beneath ONE canonical private root, at the same
+//     kind/id/document shape, and that root must be a 0700 directory this user
+//     owns outside any git work tree. A plan cannot scatter verbatim copies of a
+//     container's environment across the filesystem.
+//   - Every backup's bytes are hashed and must match the digests the plan
+//     recorded AND decode to the BeforeLabels it claims. A plan cannot assert a
+//     restoration target its own backup does not contain.
+//   - The recorded before-to-after transform is re-derived: rewriting the backup
+//     with the plan's AfterLabels must reproduce the AfterSHA256 it recorded. A
+//     plan cannot claim a migration that never happened.
+//   - Duplicate resources and duplicate documents are refused, so the number of
+//     things a run touches cannot be ambiguous.
+//
+// All of it runs before StopSystem. A rollback that refuses must not first take
+// the operator's container runtime down.
+func (plan *RollbackPlan) BindToHost(host *MetadataHost) error {
+	if host == nil || strings.TrimSpace(host.AppRoot) == "" {
+		return fmt.Errorf("rollback requires a resolved Apple Container host")
+	}
+	backupRoot, err := plan.canonicalBackupRoot()
+	if err != nil {
+		return err
+	}
+	if err := requirePrivateBackupRoot(backupRoot); err != nil {
+		return err
+	}
+	seenResources := make(map[string]struct{}, len(plan.Applied))
+	for _, application := range plan.Applied {
+		layout, err := layoutFor(application.Kind)
+		if err != nil {
+			return err
+		}
+		identity := application.ID
+		if err := requireExactIdentity(identity, application.Kind); err != nil {
+			return err
+		}
+		resource := string(application.Kind) + "/" + identity
+		if _, duplicate := seenResources[resource]; duplicate {
+			return fmt.Errorf("rollback plan names %s more than once", resource)
+		}
+		seenResources[resource] = struct{}{}
+
+		directory := filepath.Join(host.AppRoot, layout.directory, identity)
+		if err := requireNoSymlinkInPath(directory, host.AppRoot); err != nil {
+			return err
+		}
+		seenDocuments := make(map[string]struct{}, len(application.Files))
+		for _, file := range application.Files {
+			name := filepath.Base(file.Path)
+			labelPath, known := layout.documents[name]
+			if !known {
+				return fmt.Errorf(
+					"%s: %q is not a document this migration knows about",
+					resource, name,
+				)
+			}
+			if _, duplicate := seenDocuments[name]; duplicate {
+				return fmt.Errorf("%s names %s more than once", resource, name)
+			}
+			seenDocuments[name] = struct{}{}
+			if file.Path != filepath.Join(directory, name) {
+				return fmt.Errorf(
+					"%s: the plan names %s, which is not where this host keeps "+
+						"that document", resource, name,
+				)
+			}
+			// The label path decides which field is overwritten. Taking it from
+			// the layout rather than trusting the plan is what stops a forged
+			// plan from rewriting a non-label field.
+			if !equalStringSlices(file.LabelPath, labelPath) {
+				return fmt.Errorf(
+					"%s: the plan puts %s's labels somewhere this host does not",
+					resource, name,
+				)
+			}
+			if err := requireNoSymlinkInPath(file.Path, host.AppRoot); err != nil {
+				return err
+			}
+			if file.BackupPath != filepath.Join(
+				backupRoot, string(application.Kind), identity, name,
+			) {
+				return fmt.Errorf(
+					"%s: %s's backup is not where this plan's backup root keeps it",
+					resource, name,
+				)
+			}
+			// The document path is walked component by component; the backup path
+			// has to be too. Checking only the root leaves <root>/<kind> or
+			// <root>/<kind>/<id> swappable for a symlink, and rollback both READS
+			// a backup through that path and WRITES a new one down it.
+			if err := requireNoSymlinkInPath(
+				file.BackupPath, backupRoot,
+			); err != nil {
+				return err
+			}
+			if err := verifyRecordedBackup(resource, name, file); err != nil {
+				return err
+			}
+			// The live document is verified here as well as inside the restore.
+			// Both are needed and neither is redundant: this one runs before the
+			// runtime is stopped, so a plan that cannot apply is refused without
+			// taking Apple Container down; the one inside the restore runs again
+			// afterwards, because the runtime re-serialises entity.json across a
+			// stop and the document it will actually rewrite is the later one.
+			if err := preflightRestore(file); err != nil {
+				return fmt.Errorf("%s: %w", resource, err)
+			}
+		}
+	}
+	return nil
+}
+
+// canonicalBackupRoot derives the single root every backup in the plan must sit
+// beneath, and refuses a plan whose backups are spread across more than one.
+func (plan *RollbackPlan) canonicalBackupRoot() (string, error) {
+	root := ""
+	for _, application := range plan.Applied {
+		for _, file := range application.Files {
+			if strings.TrimSpace(file.BackupPath) == "" {
+				return "", fmt.Errorf(
+					"%s %s: the plan records a document with no backup location",
+					application.Kind, application.ID,
+				)
+			}
+			// <root>/<kind>/<id>/<document>
+			candidate := filepath.Dir(filepath.Dir(filepath.Dir(file.BackupPath)))
+			if root == "" {
+				root = candidate
+				continue
+			}
+			if candidate != root {
+				return "", fmt.Errorf(
+					"rollback plan spreads its backups across more than one root",
+				)
+			}
+		}
+	}
+	if root == "" {
+		return "", fmt.Errorf("rollback plan records no backup location")
+	}
+	return root, nil
+}
+
+// requireExactIdentity refuses an identity that could index anything other than
+// one directory.
+func requireExactIdentity(identity string, kind MetadataResourceKind) error {
+	if identity == "" || identity == "." || identity == ".." ||
+		strings.ContainsRune(identity, os.PathSeparator) ||
+		strings.ContainsRune(identity, '/') ||
+		identity != filepath.Clean(identity) {
+		return fmt.Errorf("%q is not an exact %s identity", identity, kind)
+	}
+	return nil
+}
+
+// requirePrivateBackupRoot refuses a backup root that is not a private directory
+// this user owns.
+//
+// A backup is a verbatim copy of an Apple Container metadata document, and a
+// container's config.json carries initProcess.environment with values —
+// POSTGRES_PASSWORD among them on this project's own topology. Rollback writes
+// new backups into this root for documents that appeared after the migration, so
+// this is a check on where THIS run is about to copy a credential, not on
+// somebody else's past behaviour.
+func requirePrivateBackupRoot(root string) error {
+	resolved, err := resolveExistingAncestor(root)
+	if err != nil {
+		return err
+	}
+	if err := requireOutsideGitWorkTree(resolved); err != nil {
+		return err
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		return fmt.Errorf("inspect backup root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("the backup root is a symbolic link")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("the backup root is not a directory")
+	}
+	if info.Mode().Perm() != 0o700 {
+		return fmt.Errorf(
+			"the backup root is mode %v; a directory holding copies of "+
+				"container configuration must be 0700", info.Mode().Perm(),
+		)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("the backup root has no owner information")
+	}
+	if int(stat.Uid) != os.Getuid() {
+		return fmt.Errorf(
+			"the backup root is owned by uid %d, not the current user %d",
+			stat.Uid, os.Getuid(),
+		)
+	}
+	return nil
+}
+
+// verifyRecordedBackup proves one document's backup actually contains what the
+// plan says it contains, and that the plan's account of the migration is
+// reproducible from it.
+//
+// Without this the digests are self-referential: a plan supplies both the backup
+// and the hashes it should match, so they always agree. What makes them mean
+// something is deriving the migrated form from the backup and requiring it to
+// equal the digest the plan recorded for the live document.
+func verifyRecordedBackup(
+	resource, name string,
+	file *metadataFileApplication,
+) error {
+	info, _, _, err := statMetadataFile(file.BackupPath)
+	if err != nil {
+		return fmt.Errorf("%s: %s's backup: %w", resource, name, err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf(
+			"%s: %s's backup is readable by other accounts (%v)",
+			resource, name, info.Mode().Perm(),
+		)
+	}
+	backup, err := os.ReadFile(file.BackupPath)
+	if err != nil {
+		return fmt.Errorf("%s: read %s's backup: %w", resource, name, err)
+	}
+	digest := digestOf(backup)
+	if digest != file.BackupSHA256 || digest != file.BeforeSHA256 {
+		return fmt.Errorf(
+			"%s: %s's backup does not match the digests the plan recorded",
+			resource, name,
+		)
+	}
+	recorded, err := readLabelsAtPath(backup, file.LabelPath)
+	if err != nil {
+		return fmt.Errorf("%s: %s's backup: %w", resource, name, err)
+	}
+	if !sameLabels(recorded, file.BeforeLabels) {
+		return fmt.Errorf(
+			"%s: %s's backup does not carry the labels the plan restores",
+			resource, name,
+		)
+	}
+	migrated, err := rewriteLabels(backup, file.LabelPath, file.AfterLabels)
+	if err != nil {
+		return fmt.Errorf("%s: %s: %w", resource, name, err)
+	}
+	if digestOf(migrated) != file.AfterSHA256 {
+		return fmt.Errorf(
+			"%s: %s's recorded migration cannot be reproduced from its backup",
+			resource, name,
+		)
+	}
+	return nil
+}
+
+func equalStringSlices(first, second []string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // RollbackMetadataSweep restores every document a recorded run rewrote.

@@ -8,29 +8,35 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 )
 
-// Phase 3A moves managed resources onto the current ownership namespace in two
-// stages, and the order is the safety property. `prepare` adds the current pair
-// beside the legacy one so every resource is dual and therefore readable by
-// both namespaces at once; `retire` then removes the legacy pair. Doing it in
-// one step would mean that between writing and verifying, a resource carried
-// neither a proven-good legacy marker nor a proven-good current one.
+// Phase 3A moved managed resources onto the current ownership namespace by
+// rewriting Apple Container's own metadata documents in two stages: `prepare`
+// added the current label pair beside the legacy one, and `retire` removed the
+// legacy pair once the current one was proven. Phase 3B removes both stages.
 //
-// Nothing here deletes or recreates a resource. Apple Container attaches a
-// named volume exclusively to a single virtual machine, and recreating a volume
-// to change its labels is the same act as destroying its data.
-
-// MetadataStage names one half of the migration.
-type MetadataStage string
-
-const (
-	// MetadataStagePrepare adds the current pair beside an existing legacy pair.
-	MetadataStagePrepare MetadataStage = "prepare"
-	// MetadataStageRetire removes the legacy pair once the current one is proven.
-	MetadataStageRetire MetadataStage = "retire"
-)
+// They are removed rather than left behind a flag. Every line of the forward
+// path existed to read, compare, or write the legacy namespace, and Phase 3B's
+// whole claim is that this binary does none of those things. A forward stage
+// that could still run would also be able to write a legacy key back onto a
+// resource that no reader can see — the one state the migration cannot recover
+// from on its own.
+//
+// What remains is recovery. A Phase 3A run recorded, in a private 0700 backup
+// root, the exact bytes of every document it rewrote and the complete label maps
+// on either side of the change. This file can still return those documents to
+// those bytes. It does so without interpreting a single label key: the recorded
+// maps are restored verbatim, which is what makes the retained path safe even
+// though it restores labels this binary can no longer read.
+//
+// That asymmetry is the point. Phase 3B can undo Phase 3A but cannot redo it,
+// and a host returned to its pre-Phase-3A labels must then be operated by a
+// pre-Phase-3B binary. The runbook states that boundary; it is a deliberate
+// operational choice, not a fallback this code makes for anyone.
+//
+// Nothing here deletes or recreates a resource. Apple Container attaches a named
+// volume exclusively to a single virtual machine, and recreating a volume to
+// change its labels is the same act as destroying its data.
 
 // MetadataResourceKind names the three resource families that carry ownership
 // labels.
@@ -42,133 +48,16 @@ const (
 	MetadataKindNetwork   MetadataResourceKind = "network"
 )
 
-// ownershipLabelPairs is the complete set of label pairs this migration may
-// change. Anything outside it is somebody else's label and is copied through
-// untouched.
-func ownershipLabelPairs() [][2]string {
-	return [][2]string{
-		{LegacyManagedLabelKey, CurrentManagedLabelKey},
-		{LegacyRoleLabelKey, CurrentRoleLabelKey},
-		{LegacySpecLabelKey, CurrentSpecLabelKey},
-	}
-}
-
-// ownershipKeySet is the six keys the sweep is allowed to write.
-func ownershipKeySet() map[string]struct{} {
-	keys := make(map[string]struct{}, len(ownershipLabelKeys))
-	for _, key := range ownershipLabelKeys {
-		keys[key] = struct{}{}
-	}
-	return keys
-}
-
-// changedLabelKeys reports every key whose presence or value differs.
-func changedLabelKeys(before, after map[string]string) []string {
-	changed := make([]string, 0)
-	seen := make(map[string]struct{}, len(before)+len(after))
-	for key := range before {
-		seen[key] = struct{}{}
-	}
-	for key := range after {
-		seen[key] = struct{}{}
-	}
-	for key := range seen {
-		beforeValue, beforePresent := before[key]
-		afterValue, afterPresent := after[key]
-		if beforePresent != afterPresent || beforeValue != afterValue {
-			changed = append(changed, key)
-		}
-	}
-	sort.Strings(changed)
-	return changed
-}
-
-// planOwnershipLabels returns the labels a resource should carry after one
-// stage. It refuses every state it cannot reason about rather than guessing,
-// because the states it would have to guess about — a conflict, a half written
-// pair, a resource that is not managed at all — are exactly the ones where a
-// wrong guess orphans a live resource.
-func planOwnershipLabels(
-	current map[string]string,
-	stage MetadataStage,
-) (map[string]string, error) {
-	class := ClassifyOwnership(current)
-	if class == OwnershipConflicting {
-		return nil, conflictingLabelError(
-			"resource", "ownership",
-			LegacyManagedLabelKey, CurrentManagedLabelKey,
-		)
-	}
-	if !class.Owned() {
-		return nil, fmt.Errorf(
-			"resource is %s and is not managed by agentopsctl; "+
-				"this migration only touches resources it owns",
-			class,
-		)
-	}
-	planned := make(map[string]string, len(current))
-	for key, value := range current {
-		planned[key] = value
-	}
-	for _, pair := range ownershipLabelPairs() {
-		legacyKey, currentKey := pair[0], pair[1]
-		value, agreement := ReadDualLabel(current, legacyKey, currentKey)
-		switch agreement {
-		case LabelConflicting:
-			return nil, conflictingLabelError(
-				"resource", "ownership pair", legacyKey, currentKey,
-			)
-		case LabelAbsent:
-			continue
-		}
-		switch stage {
-		case MetadataStagePrepare:
-			// Only a legacy-only pair is raised, and it is raised by adding the
-			// current key — never by writing the legacy one. A pair that is
-			// already dual or already current-only has met or passed this
-			// stage's goal, and "topping it up" would re-create the legacy
-			// labels the phase exists to remove.
-			if agreement == LabelLegacyOnly {
-				planned[currentKey] = value
-			}
-		case MetadataStageRetire:
-			if agreement == LabelLegacyOnly {
-				return nil, fmt.Errorf(
-					"%s is present in the legacy namespace only; run the "+
-						"prepare stage before retiring it",
-					legacyKey,
-				)
-			}
-			delete(planned, legacyKey)
-			planned[currentKey] = value
-		default:
-			return nil, fmt.Errorf("unknown migration stage %q", stage)
-		}
-	}
-	// The stage may only ever have touched the six ownership keys. Asserting it
-	// here means a future edit to the loop above cannot quietly widen the blast
-	// radius past what the runbook promises.
-	owned := ownershipKeySet()
-	for _, key := range changedLabelKeys(current, planned) {
-		if _, allowed := owned[key]; !allowed {
-			return nil, fmt.Errorf(
-				"migration would change non-ownership label %q", key,
-			)
-		}
-	}
-	return planned, nil
-}
-
 // metadataLayout describes where one resource family keeps its documents.
 type metadataLayout struct {
 	directory string
 	// documents maps a file name to the path its labels live at. A document
-	// that is absent is fine; one that is present must be migrated.
+	// that is absent is fine; one that is present must be restored.
 	documents map[string][]string
 	// companions are the non-metadata files a resource directory may contain.
 	// Anything outside both sets stops the run: an unrecognised file means this
 	// code's model of the on-disk layout is out of date, and acting on a stale
-	// model is how a migration misses a copy of the labels.
+	// model is how a recovery misses a copy of the labels.
 	companions map[string]struct{}
 }
 
@@ -189,8 +78,8 @@ func layoutFor(kind MetadataResourceKind) (metadataLayout, error) {
 	case MetadataKindContainer:
 		// A container that has never been started carries only its runtime
 		// configuration; starting it writes config.json beside it, and the
-		// listing reads config.json in preference. Both are migrated whenever
-		// both are present, because leaving either behind is a divergence.
+		// listing reads config.json in preference. Both are handled whenever both
+		// are present, because leaving either behind is a divergence.
 		return metadataLayout{
 			directory: "containers",
 			documents: map[string][]string{
@@ -228,127 +117,6 @@ func names(values ...string) map[string]struct{} {
 	return set
 }
 
-// MetadataTarget is one resolved resource and the documents that carry its
-// labels.
-type MetadataTarget struct {
-	Kind      MetadataResourceKind
-	ID        string
-	Directory string
-	Files     []metadataFileRef
-}
-
-// resolveMetadataTarget locates one resource's documents by exact identity. The
-// identity is never used to build a glob and never allowed to contain a path
-// separator: a selector that can resolve to more than one resource is the thing
-// Issue #123 forbids.
-func resolveMetadataTarget(
-	appRoot string,
-	kind MetadataResourceKind,
-	identity string,
-) (MetadataTarget, error) {
-	layout, err := layoutFor(kind)
-	if err != nil {
-		return MetadataTarget{}, err
-	}
-	if identity == "" ||
-		identity == "." || identity == ".." ||
-		strings.ContainsRune(identity, os.PathSeparator) ||
-		strings.ContainsRune(identity, '/') ||
-		identity != filepath.Clean(identity) {
-		return MetadataTarget{}, fmt.Errorf(
-			"%q is not an exact %s identity", identity, kind,
-		)
-	}
-	directory := filepath.Join(appRoot, layout.directory, identity)
-	if err := requireNoSymlinkInPath(directory, appRoot); err != nil {
-		return MetadataTarget{}, err
-	}
-	info, err := os.Lstat(directory)
-	if err != nil {
-		return MetadataTarget{}, fmt.Errorf(
-			"%s %s is not present on this host: %w", kind, identity, err,
-		)
-	}
-	if !info.IsDir() {
-		return MetadataTarget{}, fmt.Errorf(
-			"%s is not a directory", directory,
-		)
-	}
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return MetadataTarget{}, fmt.Errorf("read %s: %w", directory, err)
-	}
-	target := MetadataTarget{Kind: kind, ID: identity, Directory: directory}
-	present := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		if _, known := layout.companions[name]; known {
-			continue
-		}
-		labelPath, isDocument := layout.documents[name]
-		if !isDocument {
-			return MetadataTarget{}, fmt.Errorf(
-				"%s holds an unrecognised file %q; this migration will not "+
-					"run against a layout it does not know",
-				directory, name,
-			)
-		}
-		present = append(present, name)
-		target.Files = append(target.Files, metadataFileRef{
-			Path:      filepath.Join(directory, name),
-			LabelPath: labelPath,
-		})
-	}
-	if len(target.Files) == 0 {
-		return MetadataTarget{}, fmt.Errorf(
-			"%s %s carries no metadata document", kind, identity,
-		)
-	}
-	// A stable order keeps the plan, the evidence, and the backup manifest
-	// listing the same documents in the same sequence on every run.
-	sort.Slice(target.Files, func(first, second int) bool {
-		return target.Files[first].Path < target.Files[second].Path
-	})
-	return target, nil
-}
-
-// MetadataTargetState is one resource's verified documents and the label set
-// they agree on.
-type MetadataTargetState struct {
-	Target MetadataTarget
-	Files  []*metadataFileState
-	Labels map[string]string
-	Class  OwnershipClass
-}
-
-// readMetadataTarget verifies every document and requires them to agree. A
-// container whose two documents carry different labels is a half-completed
-// migration, and continuing from it would migrate one copy and silently leave
-// the other.
-func readMetadataTarget(target MetadataTarget) (*MetadataTargetState, error) {
-	state := &MetadataTargetState{Target: target}
-	for _, ref := range target.Files {
-		file, err := inspectMetadataFile(ref)
-		if err != nil {
-			return nil, err
-		}
-		if state.Labels == nil {
-			state.Labels = file.Labels
-		} else if !sameLabels(state.Labels, file.Labels) {
-			return nil, fmt.Errorf(
-				"%s %s: %s disagrees with %s about the ownership labels; "+
-					"resolve the divergence before migrating",
-				target.Kind, target.ID,
-				filepath.Base(ref.Path),
-				filepath.Base(target.Files[0].Path),
-			)
-		}
-		state.Files = append(state.Files, file)
-	}
-	state.Class = ClassifyOwnership(state.Labels)
-	return state, nil
-}
-
 func sameLabels(first, second map[string]string) bool {
 	if len(first) != len(second) {
 		return false
@@ -361,101 +129,46 @@ func sameLabels(first, second map[string]string) bool {
 	return true
 }
 
-// MetadataApplication is the durable record of one resource's migration.
+// MetadataApplication is the durable record of one resource's Phase 3A
+// migration, as recovery reads it back out of a retained rollback plan.
+//
+// Since Phase 3B nothing produces one of these; they are only ever decoded. The
+// fields that describe what Phase 3A did are therefore treated as an opaque
+// restoration record: they are carried verbatim, reported verbatim, and never
+// re-interpreted against the current ownership contract. That matters most for
+// the two class fields and the stage name, which spell values — `dual`,
+// `legacy-only`, `prepare`, `retire` — that no longer exist in this binary's
+// vocabulary. Re-typing them would either lose the record or invent a meaning
+// for it.
 type MetadataApplication struct {
-	Kind        MetadataResourceKind `json:"kind"`
-	ID          string               `json:"id"`
-	Stage       MetadataStage        `json:"stage"`
-	Directory   string               `json:"-"`
-	BackupRoot  string               `json:"-"`
-	ClassBefore OwnershipClass       `json:"classBefore"`
-	ClassAfter  OwnershipClass       `json:"classAfter"`
-	ChangedKeys []string             `json:"changedKeys"`
+	Kind MetadataResourceKind `json:"kind"`
+	ID   string               `json:"id"`
+	// Stage is the Phase 3A stage name recorded by the binary that wrote this
+	// plan. Nothing reads it: it is carried so the record stays complete and so a
+	// human reading the plan file can see which stage it undoes. It is never
+	// matched against, and it is never printed — it is plan-controlled text.
+	Stage      string `json:"stage"`
+	Directory  string `json:"-"`
+	BackupRoot string `json:"-"`
+	// ClassBefore and ClassAfter are the ownership classes the Phase 3A binary
+	// recorded. They are strings rather than OwnershipClass precisely because
+	// they may hold classes this binary no longer defines. Like Stage they are
+	// carried, not read, and not printed.
+	ClassBefore string   `json:"classBefore"`
+	ClassAfter  string   `json:"classAfter"`
+	ChangedKeys []string `json:"changedKeys"`
 	// The complete label maps are what rollback restores, so they must include
 	// foreign labels; they are therefore private to the rollback plan and never
 	// reach the committed evidence.
 	BeforeLabels map[string]string `json:"-"`
 	AfterLabels  map[string]string `json:"-"`
-	// Only the six ownership keys are published.
+	// Only the ownership keys are published.
 	BeforeOwnership map[string]string          `json:"beforeOwnershipLabels"`
 	AfterOwnership  map[string]string          `json:"afterOwnershipLabels"`
 	Files           []*metadataFileApplication `json:"files"`
 	// Reconciled names documents that did not exist when the migration ran and
 	// were brought back in line by a later rollback.
 	Reconciled []string `json:"reconciled,omitempty"`
-}
-
-// applyMetadataStage migrates every document of one resource, or none of them.
-// The unwind on failure matters more than the happy path: a resource whose two
-// documents disagree is worse than one that was never touched.
-func applyMetadataStage(
-	target MetadataTarget,
-	stage MetadataStage,
-	backupDirectory string,
-	appRoot string,
-) (*MetadataApplication, error) {
-	state, err := readMetadataTarget(target)
-	if err != nil {
-		return nil, err
-	}
-	planned, err := planOwnershipLabels(state.Labels, stage)
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", target.Kind, target.ID, err)
-	}
-	application := &MetadataApplication{
-		Kind:            target.Kind,
-		ID:              target.ID,
-		Stage:           stage,
-		Directory:       target.Directory,
-		BackupRoot:      backupDirectory,
-		ClassBefore:     state.Class,
-		ClassAfter:      ClassifyOwnership(planned),
-		ChangedKeys:     changedLabelKeys(state.Labels, planned),
-		BeforeLabels:    state.Labels,
-		AfterLabels:     planned,
-		BeforeOwnership: ownershipLabelSubset(state.Labels),
-		AfterOwnership:  ownershipLabelSubset(planned),
-	}
-	for _, file := range state.Files {
-		backupPath := filepath.Join(
-			backupDirectory,
-			string(target.Kind), target.ID, filepath.Base(file.Ref.Path),
-		)
-		applied, err := applyMetadataFile(file, planned, backupPath)
-		if applied != nil {
-			applied.Document = relativeTo(appRoot, applied.Path)
-			applied.Backup = relativeTo(backupDirectory, applied.BackupPath)
-			// A write whose rename succeeded but whose directory entry could not
-			// be flushed HAS changed the document. Recording it before handling
-			// the error is what lets the unwind below put it back.
-			application.Files = append(application.Files, applied)
-		}
-		if err != nil {
-			// Unwind in reverse so the resource is left exactly as it was
-			// found. A rollback failure here is reported alongside the original
-			// error rather than replacing it: the operator needs both.
-			if unwindErr := unwind(application.Files); unwindErr != nil {
-				return nil, fmt.Errorf(
-					"%s %s: %w (and the partial migration could not be "+
-						"unwound: %v)",
-					target.Kind, target.ID, err, unwindErr,
-				)
-			}
-			return nil, fmt.Errorf("%s %s: %w", target.Kind, target.ID, err)
-		}
-	}
-	return application, nil
-}
-
-func unwind(applied []*metadataFileApplication) error {
-	for index := len(applied) - 1; index >= 0; index-- {
-		outcome, err := restoreMetadataFile(applied[index])
-		if err != nil {
-			return err
-		}
-		applied[index].RestoredAs = outcome
-	}
-	return nil
 }
 
 // rollbackMetadataApplication returns one resource's ownership labels to what
@@ -487,21 +200,43 @@ func rollbackMetadataApplication(application *MetadataApplication) error {
 	for index := len(application.Files) - 1; index >= 0; index-- {
 		file := application.Files[index]
 		outcome, err := restoreMetadataFile(file)
+		if outcome != "" {
+			// Recorded before the error is handled: restoreMetadataFile returns
+			// an outcome alongside a durability-uncertain error precisely because
+			// the document was changed, and a document that changed has to be in
+			// the unwind set.
+			file.RestoredAs = outcome
+			restored = append(restored, file)
+		}
 		if err != nil {
 			// Put back what this rollback already undid, so a failure leaves the
 			// resource in the state it was found in rather than between two.
 			return errors.Join(err, reapply(restored))
 		}
-		file.RestoredAs = outcome
-		restored = append(restored, file)
 	}
 	for _, pending := range created {
-		if _, err := applyMetadataFile(
+		applied, err := applyMetadataFile(
 			pending.state, application.BeforeLabels, pending.backupPath,
-		); err != nil {
+		)
+		if applied != nil {
+			// This record's label maps run the opposite way to every other record
+			// in `restored`, and the difference is easy to miss because both are
+			// called Before/After. applyMetadataFile records them from ITS point
+			// of view — "what I found" and "what I wrote" — so its AfterLabels is
+			// the pre-migration map, the rollback destination. Every plan record's
+			// AfterLabels is the migrated map. `reapply` writes AfterLabels, so
+			// handing it this record unswapped would rewrite the rollback
+			// destination that is already on disk while the recorded documents
+			// were pushed forward — the half-reverted container this function
+			// exists to prevent, on the document the listing prefers.
+			applied.BeforeLabels, applied.AfterLabels =
+				applied.AfterLabels, applied.BeforeLabels
+			restored = append(restored, applied)
+			application.Reconciled = append(application.Reconciled, pending.name)
+		}
+		if err != nil {
 			return errors.Join(err, reapply(restored))
 		}
-		application.Reconciled = append(application.Reconciled, pending.name)
 	}
 	return nil
 }
@@ -613,6 +348,29 @@ func planDocumentsCreatedSince(
 	recorded := make(map[string]struct{}, len(application.Files))
 	for _, file := range application.Files {
 		recorded[filepath.Base(file.Path)] = struct{}{}
+	}
+	// An unrecognised file means this code's model of the on-disk layout is out
+	// of date, and acting on a stale model is how a recovery misses a copy of the
+	// labels. Phase 3A enforced this while resolving an operator-named target;
+	// that resolution went with the forward stages, so the refusal lives here now
+	// — on the one path that still decides which documents a resource has.
+	entries, err := os.ReadDir(application.Directory)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", application.Directory, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if _, known := layout.companions[name]; known {
+			continue
+		}
+		if _, known := layout.documents[name]; known {
+			continue
+		}
+		return nil, fmt.Errorf(
+			"%s %s: %q is a file this migration does not recognise; recovery "+
+				"will not run against a layout it does not know",
+			application.Kind, application.ID, name,
+		)
 	}
 	names := make([]string, 0, len(layout.documents))
 	for name := range layout.documents {
