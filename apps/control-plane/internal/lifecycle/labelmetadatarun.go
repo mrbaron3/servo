@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -81,13 +82,26 @@ func TakeOwnershipInventory(
 			})
 		}
 	}
-	sort.Slice(inventory.Records, func(first, second int) bool {
-		if inventory.Records[first].Kind != inventory.Records[second].Kind {
-			return inventory.Records[first].Kind < inventory.Records[second].Kind
-		}
-		return inventory.Records[first].ID < inventory.Records[second].ID
-	})
+	sortOwnershipInventory(inventory)
 	return inventory, nil
+}
+
+// sortOwnershipInventory puts both lists into a stable order. Legacy is sorted
+// as well as Records: it is emitted into committed evidence and into the retire
+// gate's refusal message, and it is populated while ranging over a map whose
+// iteration order Go randomises per run — so without this the same unchanged
+// host produces a different diff every time it is inventoried.
+func sortOwnershipInventory(inventory *OwnershipInventory) {
+	byKindThenID := func(records []OwnershipInventoryRecord) func(int, int) bool {
+		return func(first, second int) bool {
+			if records[first].Kind != records[second].Kind {
+				return records[first].Kind < records[second].Kind
+			}
+			return records[first].ID < records[second].ID
+		}
+	}
+	sort.Slice(inventory.Records, byKindThenID(inventory.Records))
+	sort.Slice(inventory.Legacy, byKindThenID(inventory.Legacy))
 }
 
 func (inventory *OwnershipInventory) add(record OwnershipInventoryRecord) {
@@ -97,7 +111,13 @@ func (inventory *OwnershipInventory) add(record OwnershipInventoryRecord) {
 	if record.Class.Owned() {
 		inventory.Managed[record.Kind]++
 	}
-	if record.Class == OwnershipLegacyOnly {
+	// The gate has to see a resource whose ownership marker is already dual but
+	// whose role or specification pair is still legacy-only. ClassifyOwnership
+	// resolves the managed key alone, so such a resource reports "dual" and
+	// would slip through a gate keyed on the class — leaving the legacy
+	// namespace behind after the phase claimed it was gone.
+	if record.Class == OwnershipLegacyOnly ||
+		(record.Class.Owned() && carriesLegacyOnlyPair(record.Labels)) {
 		inventory.Legacy = append(inventory.Legacy, record)
 	}
 }
@@ -164,8 +184,8 @@ func (inventory *OwnershipInventory) RequireCurrentOwnershipEverywhere() error {
 		names = append(names, string(record.Kind)+" "+record.ID)
 	}
 	return fmt.Errorf(
-		"%d managed resource(s) still carry the legacy namespace alone (%s); "+
-			"run the prepare stage before retiring",
+		"%d managed resource(s) still carry at least one ownership pair in the "+
+			"legacy namespace alone (%s); run the prepare stage before retiring",
 		len(names), strings.Join(names, ", "),
 	)
 }
@@ -359,17 +379,19 @@ func ApplyMetadataSweep(
 			host.AppRoot, reference.Kind, reference.ID,
 		)
 		if err != nil {
-			report.Halted = err.Error()
+			report.Halted = redactRoots(err.Error(), host.AppRoot, backupRoot)
 			return report, err
 		}
 		state, err := readMetadataTarget(target)
 		if err != nil {
-			report.Halted = err.Error()
+			report.Halted = redactRoots(err.Error(), host.AppRoot, backupRoot)
 			return report, err
 		}
 		planned, err := planOwnershipLabels(state.Labels, stage)
 		if err != nil {
-			report.Halted = fmt.Sprintf("%s: %v", reference, err)
+			report.Halted = redactRoots(
+				fmt.Sprintf("%s: %v", reference, err), host.AppRoot, backupRoot,
+			)
 			return report, fmt.Errorf("%s: %w", reference, err)
 		}
 		if len(changedLabelKeys(state.Labels, planned)) == 0 {
@@ -383,12 +405,59 @@ func ApplyMetadataSweep(
 			target, stage, backupRoot, host.AppRoot,
 		)
 		if err != nil {
-			report.Halted = err.Error()
+			report.Halted = redactRoots(err.Error(), host.AppRoot, backupRoot)
 			return report, err
 		}
 		report.Applied = append(report.Applied, application)
+		// The rollback plan is rewritten as each resource lands, not once at the
+		// end. A sweep that halts on its fourth target, or whose runtime fails to
+		// restart, has already rewritten three resources, and the plan is the
+		// only artifact that can undo them — the committed evidence cannot,
+		// because it deliberately omits the absolute paths.
+		if err := PersistRollbackPlan(backupRoot, report); err != nil {
+			report.Halted = redactRoots(err.Error(), host.AppRoot, backupRoot)
+			return report, err
+		}
 	}
 	return report, nil
+}
+
+// RollbackPlanPath is where a run's private rollback plan lives.
+func RollbackPlanPath(backupRoot string) string {
+	return filepath.Join(backupRoot, "rollback-plan.json")
+}
+
+// PersistRollbackPlan writes the private rollback plan for everything applied so
+// far. It is safe to call repeatedly: the file is replaced atomically, at 0600,
+// inside the 0700 backup root.
+func PersistRollbackPlan(
+	backupRoot string,
+	report *MetadataSweepReport,
+) error {
+	encoded, err := json.MarshalIndent(BuildRollbackPlan(report), "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode rollback plan: %w", err)
+	}
+	if err := os.MkdirAll(backupRoot, 0o700); err != nil {
+		return fmt.Errorf("create backup root: %w", err)
+	}
+	return writeFileAtomically(
+		RollbackPlanPath(backupRoot), append(encoded, '\n'),
+		0o600, os.Getuid(), os.Getgid(),
+	)
+}
+
+// redactRoots removes machine-specific prefixes from a message destined for
+// committed evidence. Structured path fields are already omitted, but a raw
+// error string is a free-form channel that can carry the same information.
+func redactRoots(message string, roots ...string) string {
+	for _, root := range roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		message = strings.ReplaceAll(message, root, "<redacted>")
+	}
+	return message
 }
 
 // VerifyMetadataSweep re-reads the runtime's own view after a restart and
@@ -458,6 +527,18 @@ type RollbackPlan struct {
 	// Locations mirrors the absolute paths that MetadataApplication hides from
 	// the committed evidence, indexed the same way as Applied.
 	Locations [][]RollbackLocation `json:"locations"`
+	// Labels carries the COMPLETE label maps, foreign labels included. Rollback
+	// restores a resource's labels exactly, and a map truncated to the six
+	// ownership keys would silently drop somebody else's label. They live here
+	// rather than in the evidence because a foreign label's value is arbitrary
+	// third-party text.
+	Labels []RollbackLabels `json:"labels"`
+}
+
+// RollbackLabels is one resource's complete before and after label maps.
+type RollbackLabels struct {
+	Before map[string]string `json:"before"`
+	After  map[string]string `json:"after"`
 }
 
 // RollbackLocation is one document's absolute pair of locations.
@@ -478,6 +559,10 @@ func BuildRollbackPlan(report *MetadataSweepReport) *RollbackPlan {
 			})
 		}
 		plan.Locations = append(plan.Locations, locations)
+		plan.Labels = append(plan.Labels, RollbackLabels{
+			Before: application.BeforeLabels,
+			After:  application.AfterLabels,
+		})
 	}
 	return plan
 }
@@ -492,13 +577,31 @@ func ParseRollbackPlan(raw []byte) (*RollbackPlan, error) {
 	if len(plan.Applied) == 0 {
 		return nil, fmt.Errorf("rollback plan records no applied change")
 	}
-	if len(plan.Locations) != len(plan.Applied) {
+	if len(plan.Locations) != len(plan.Applied) ||
+		len(plan.Labels) != len(plan.Applied) {
 		return nil, fmt.Errorf(
-			"rollback plan records %d resources but %d location sets",
-			len(plan.Applied), len(plan.Locations),
+			"rollback plan records %d resources but %d location sets and %d "+
+				"label sets",
+			len(plan.Applied), len(plan.Locations), len(plan.Labels),
 		)
 	}
 	for index, application := range plan.Applied {
+		// The complete label maps are only in the plan, so they are reattached
+		// before anything tries to restore from them. Without this a rollback
+		// would write the ownership subset and drop every foreign label.
+		application.BeforeLabels = plan.Labels[index].Before
+		application.AfterLabels = plan.Labels[index].After
+		if len(application.BeforeLabels) == 0 ||
+			len(application.AfterLabels) == 0 {
+			return nil, fmt.Errorf(
+				"%s %s: rollback plan carries no label maps",
+				application.Kind, application.ID,
+			)
+		}
+		for _, file := range application.Files {
+			file.BeforeLabels = application.BeforeLabels
+			file.AfterLabels = application.AfterLabels
+		}
 		locations := plan.Locations[index]
 		if len(locations) != len(application.Files) {
 			return nil, fmt.Errorf(

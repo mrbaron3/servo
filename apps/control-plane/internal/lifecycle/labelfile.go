@@ -2,11 +2,13 @@ package lifecycle
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -40,7 +42,11 @@ type metadataFileState struct {
 	Mode   os.FileMode
 	UID    int
 	GID    int
-	Labels map[string]string
+	// Identity is the inode the bytes, mode, and owner above were all read
+	// from. Re-checking it at apply time is what makes "this is still the same
+	// file" a statement about an inode rather than about a name.
+	Identity fileIdentity
+	Labels   map[string]string
 }
 
 // metadataFileApplication is the durable record of one rewritten document. It
@@ -55,16 +61,34 @@ type metadataFileApplication struct {
 	BackupPath string   `json:"-"`
 	// Document and Backup are the same two locations rendered relative to the
 	// application root and the backup root, which is what the evidence records.
-	Document     string            `json:"document"`
-	Backup       string            `json:"backup"`
-	BeforeSHA256 string            `json:"beforeSha256"`
-	AfterSHA256  string            `json:"afterSha256"`
-	BackupSHA256 string            `json:"backupSha256"`
-	Mode         os.FileMode       `json:"mode"`
-	BeforeLabels map[string]string `json:"beforeLabels"`
-	AfterLabels  map[string]string `json:"afterLabels"`
+	Document     string      `json:"document"`
+	Backup       string      `json:"backup"`
+	BeforeSHA256 string      `json:"beforeSha256"`
+	AfterSHA256  string      `json:"afterSha256"`
+	BackupSHA256 string      `json:"backupSha256"`
+	Mode         os.FileMode `json:"mode"`
+	// BeforeLabels and AfterLabels are the COMPLETE label maps, foreign labels
+	// included, because a rollback has to restore a resource's labels exactly
+	// and a truncated map would silently drop somebody else's label. They are
+	// never serialised into the committed evidence: a foreign label's value is
+	// arbitrary third-party text that may hold anything at all. They travel in
+	// the private rollback plan instead.
+	BeforeLabels map[string]string `json:"-"`
+	AfterLabels  map[string]string `json:"-"`
+	// BeforeOwnership and AfterOwnership are the six ownership keys alone, which
+	// is what the evidence is allowed to publish.
+	BeforeOwnership map[string]string `json:"beforeOwnershipLabels"`
+	AfterOwnership  map[string]string `json:"afterOwnershipLabels"`
 	// RestoredAs records how a rollback returned this document, when one ran.
 	RestoredAs RestoreOutcome `json:"restoredAs,omitempty"`
+}
+
+// Ref rebuilds the reference this application was made from, so recovery paths
+// can re-inspect the document without restating where its labels live.
+func (application *metadataFileApplication) Ref() metadataFileRef {
+	return metadataFileRef{
+		Path: application.Path, LabelPath: application.LabelPath,
+	}
 }
 
 func digestOf(data []byte) string {
@@ -177,12 +201,31 @@ func statMetadataFile(path string) (os.FileInfo, int, int, error) {
 }
 
 // inspectMetadataFile reads and verifies one document without changing it.
+// Bytes, mode, owner, and inode identity all come from a single open
+// descriptor, so they cannot describe different files.
 func inspectMetadataFile(ref metadataFileRef) (*metadataFileState, error) {
-	info, uid, gid, err := statMetadataFile(ref.Path)
+	directory, err := openDirectory(filepath.Dir(ref.Path))
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(ref.Path)
+	defer directory.Close()
+	return inspectMetadataFileIn(directory, ref)
+}
+
+func inspectMetadataFileIn(
+	directory *directoryHandle,
+	ref metadataFileRef,
+) (*metadataFileState, error) {
+	file, err := directory.openFile(filepath.Base(ref.Path))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	mode, uid, gid, identity, err := statDescriptor(file, ref.Path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", ref.Path, err)
 	}
@@ -197,42 +240,56 @@ func inspectMetadataFile(ref metadataFileRef) (*metadataFileState, error) {
 		return nil, fmt.Errorf("%s: %w", ref.Path, err)
 	}
 	return &metadataFileState{
-		Ref:    ref,
-		Bytes:  data,
-		SHA256: digestOf(data),
-		Mode:   info.Mode(),
-		UID:    uid,
-		GID:    gid,
-		Labels: labels,
+		Ref:      ref,
+		Bytes:    data,
+		SHA256:   digestOf(data),
+		Mode:     mode,
+		UID:      uid,
+		GID:      gid,
+		Identity: identity,
+		Labels:   labels,
 	}, nil
 }
 
 // applyMetadataFile rewrites one document's labels. The order is deliberate:
-// the document is re-verified against the digest recorded at inspection, the
-// backup is taken and durably flushed, and only then is the replacement written
-// through a same-directory temporary file and an atomic rename.
+// the document is re-opened through the validated directory and proven to be
+// the same inode with the same bytes it was inspected as, the backup is taken
+// and durably flushed, and only then is the replacement written through a
+// same-directory temporary file and a descriptor-relative rename.
 func applyMetadataFile(
 	state *metadataFileState,
 	labels map[string]string,
 	backupPath string,
 ) (*metadataFileApplication, error) {
-	// Between planning and applying, anything could have touched the file.
-	// Re-reading and comparing digests is what makes the plan an accurate
-	// description of what is about to happen.
-	current, err := os.ReadFile(state.Ref.Path)
+	directory, err := openDirectory(filepath.Dir(state.Ref.Path))
 	if err != nil {
-		return nil, fmt.Errorf("re-read %s: %w", state.Ref.Path, err)
+		return nil, err
 	}
-	if digestOf(current) != state.SHA256 {
+	defer directory.Close()
+
+	// Between planning and applying, anything could have touched the file.
+	// Re-reading through the validated directory and comparing both the inode
+	// and the digest is what makes the plan an accurate description of what is
+	// about to happen; comparing the digest alone would accept a different file
+	// that happened to hold the same bytes, and comparing the path alone would
+	// accept a replacement.
+	current, err := inspectMetadataFileIn(directory, state.Ref)
+	if err != nil {
+		return nil, err
+	}
+	if current.Identity != state.Identity {
+		return nil, fmt.Errorf(
+			"%s is a different file than the one inspected; re-run the plan",
+			state.Ref.Path,
+		)
+	}
+	if current.SHA256 != state.SHA256 {
 		return nil, fmt.Errorf(
 			"%s changed since it was inspected; re-run the plan",
 			state.Ref.Path,
 		)
 	}
-	if _, _, _, err := statMetadataFile(state.Ref.Path); err != nil {
-		return nil, err
-	}
-	updated, err := rewriteLabels(current, state.Ref.LabelPath, labels)
+	updated, err := rewriteLabels(current.Bytes, state.Ref.LabelPath, labels)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", state.Ref.Path, err)
 	}
@@ -240,98 +297,141 @@ func applyMetadataFile(
 	// The backup is written first and with O_EXCL. Evidence of an irreversible
 	// act must never silently replace an earlier run's account of it, and a
 	// migration that cannot record what it is about to overwrite does not start.
+	if err := writeBackup(backupPath, current.Bytes); err != nil {
+		return nil, err
+	}
+
+	if err := writeThroughDirectory(
+		directory, filepath.Base(state.Ref.Path), updated,
+		current.Mode.Perm(), current.UID, current.GID,
+	); err != nil {
+		return nil, err
+	}
+	return &metadataFileApplication{
+		Path:            state.Ref.Path,
+		LabelPath:       state.Ref.LabelPath,
+		BackupPath:      backupPath,
+		BeforeSHA256:    state.SHA256,
+		AfterSHA256:     digestOf(updated),
+		BackupSHA256:    digestOf(current.Bytes),
+		Mode:            current.Mode.Perm(),
+		BeforeLabels:    state.Labels,
+		AfterLabels:     labels,
+		BeforeOwnership: ownershipLabelSubset(state.Labels),
+		AfterOwnership:  ownershipLabelSubset(labels),
+	}, nil
+}
+
+// writeBackup records the pre-migration bytes. O_EXCL rather than a truncating
+// write: a second run that chose the same name must fail loudly rather than
+// replace the first run's account of what it overwrote.
+func writeBackup(backupPath string, contents []byte) error {
 	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
-		return nil, fmt.Errorf("create backup directory: %w", err)
+		return fmt.Errorf("create backup directory: %w", err)
 	}
 	backup, err := os.OpenFile(
 		backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("open backup %s: %w", backupPath, err)
+		return fmt.Errorf("open backup %s: %w", backupPath, err)
 	}
-	if _, err := backup.Write(current); err != nil {
+	if _, err := backup.Write(contents); err != nil {
 		backup.Close()
-		return nil, fmt.Errorf("write backup %s: %w", backupPath, err)
+		return fmt.Errorf("write backup %s: %w", backupPath, err)
 	}
 	if err := backup.Sync(); err != nil {
 		backup.Close()
-		return nil, fmt.Errorf("flush backup %s: %w", backupPath, err)
+		return fmt.Errorf("flush backup %s: %w", backupPath, err)
 	}
 	if err := backup.Close(); err != nil {
-		return nil, fmt.Errorf("close backup %s: %w", backupPath, err)
+		return fmt.Errorf("close backup %s: %w", backupPath, err)
 	}
-	if err := syncDirectory(filepath.Dir(backupPath)); err != nil {
-		return nil, err
-	}
-
-	if err := writeFileAtomically(
-		state.Ref.Path, updated, state.Mode.Perm(), state.UID, state.GID,
-	); err != nil {
-		return nil, err
-	}
-	return &metadataFileApplication{
-		Path:         state.Ref.Path,
-		LabelPath:    state.Ref.LabelPath,
-		BackupPath:   backupPath,
-		BeforeSHA256: state.SHA256,
-		AfterSHA256:  digestOf(updated),
-		BackupSHA256: digestOf(current),
-		Mode:         state.Mode.Perm(),
-		BeforeLabels: state.Labels,
-		AfterLabels:  labels,
-	}, nil
+	return syncDirectory(filepath.Dir(backupPath))
 }
 
-// writeFileAtomically replaces a file's contents without ever exposing a
-// partially written document. The temporary file is created in the destination
-// directory so the rename cannot cross a filesystem boundary, its mode is set
-// explicitly rather than left to the umask, and both the file and the directory
-// entry are flushed before the operation is considered done.
+// writeFileAtomically replaces a file's contents through its own directory.
 func writeFileAtomically(
 	path string,
 	data []byte,
 	mode os.FileMode,
 	uid, gid int,
 ) error {
-	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".agentopsctl-label-*.tmp")
+	directory, err := openDirectory(filepath.Dir(path))
 	if err != nil {
-		return fmt.Errorf("create temporary file in %s: %w", directory, err)
+		return err
 	}
-	temporaryPath := temporary.Name()
+	defer directory.Close()
+	return writeThroughDirectory(
+		directory, filepath.Base(path), data, mode, uid, gid,
+	)
+}
+
+// writeThroughDirectory writes a replacement without ever exposing a partially
+// written document. The temporary file is created in the destination directory
+// so the rename cannot cross a filesystem boundary, its mode is set at creation
+// rather than left to the umask, and both the file and the directory entry are
+// flushed before the operation is considered done. Every step is relative to an
+// already-validated directory descriptor, so no step can be redirected by
+// swapping a directory on the path.
+func writeThroughDirectory(
+	directory *directoryHandle,
+	name string,
+	data []byte,
+	mode os.FileMode,
+	uid, gid int,
+) error {
+	temporaryName, err := temporaryFileName()
+	if err != nil {
+		return err
+	}
+	temporary, err := directory.createTemporary(temporaryName, mode)
+	if err != nil {
+		return err
+	}
 	cleanup := func() {
 		temporary.Close()
-		os.Remove(temporaryPath)
+		directory.remove(temporaryName)
 	}
 	if _, err := temporary.Write(data); err != nil {
 		cleanup()
-		return fmt.Errorf("write %s: %w", temporaryPath, err)
+		return fmt.Errorf("write %s: %w", temporaryName, err)
 	}
-	// Chmod rather than relying on CreateTemp's 0600 or on the umask: the
+	// Chmod explicitly: the creation mode is filtered by the umask, and the
 	// replacement has to carry the mode the original carried.
-	if err := temporary.Chmod(mode); err != nil {
+	if err := temporary.Chmod(mode.Perm()); err != nil {
 		cleanup()
-		return fmt.Errorf("set mode on %s: %w", temporaryPath, err)
+		return fmt.Errorf("set mode on %s: %w", temporaryName, err)
 	}
-	if err := matchOwnership(temporary, temporaryPath, uid, gid); err != nil {
+	if err := matchOwnership(temporary, temporaryName, uid, gid); err != nil {
 		cleanup()
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
 		cleanup()
-		return fmt.Errorf("flush %s: %w", temporaryPath, err)
+		return fmt.Errorf("flush %s: %w", temporaryName, err)
 	}
 	if err := temporary.Close(); err != nil {
-		os.Remove(temporaryPath)
-		return fmt.Errorf("close %s: %w", temporaryPath, err)
+		directory.remove(temporaryName)
+		return fmt.Errorf("close %s: %w", temporaryName, err)
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		os.Remove(temporaryPath)
-		return fmt.Errorf("replace %s: %w", path, err)
+	if err := directory.rename(temporaryName, name); err != nil {
+		directory.remove(temporaryName)
+		return err
 	}
 	// Without this the rename can still be lost to a crash even though the file
 	// contents were flushed.
-	return syncDirectory(directory)
+	return directory.sync()
+}
+
+// temporaryFileName returns a name no concurrent run can collide with. The
+// randomness matters because the create is O_EXCL: a predictable name that
+// another run left behind would fail this run rather than be overwritten.
+func temporaryFileName() (string, error) {
+	raw := make([]byte, 8)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate temporary file name: %w", err)
+	}
+	return ".agentopsctl-label-" + hex.EncodeToString(raw) + ".tmp", nil
 }
 
 // matchOwnership makes the replacement carry the original's owner and group. A
@@ -500,6 +600,16 @@ func restoreMetadataFile(
 	if !sameLabels(currentLabels, application.AfterLabels) {
 		return "", fmt.Errorf("%s: %w", application.Path, ErrRollbackUnknownState)
 	}
+	// The forward path never writes a document it cannot reproduce byte for
+	// byte, and the recovery path must not be the weaker one. equalExceptLabels
+	// above is deliberately insensitive to key order and whitespace, so without
+	// this guard a document that was not compact would come back reformatted
+	// outside its labels field — exactly what the guard exists to prevent.
+	if err := requireByteStableRoundTrip(
+		current, application.LabelPath,
+	); err != nil {
+		return "", fmt.Errorf("%s: %w", application.Path, err)
+	}
 	relabelled, err := rewriteLabels(
 		current, application.LabelPath, application.BeforeLabels,
 	)
@@ -511,7 +621,14 @@ func restoreMetadataFile(
 	); err != nil {
 		return "", err
 	}
-	verified, err := readLabelsAtPath(relabelled, application.LabelPath)
+	// Read the file back rather than the buffer that was just written to it.
+	// readLabelsAtPath(rewriteLabels(x, path, L), path) returns L by
+	// construction, so verifying the buffer verifies nothing.
+	written, err := os.ReadFile(application.Path)
+	if err != nil {
+		return "", fmt.Errorf("verify %s: %w", application.Path, err)
+	}
+	verified, err := readLabelsAtPath(written, application.LabelPath)
 	if err != nil {
 		return "", fmt.Errorf("verify %s: %w", application.Path, err)
 	}

@@ -192,8 +192,16 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 		return fmt.Errorf("stop Apple Container: %w", err)
 	}
 	// Whatever happens next, the runtime is brought back up. A host left with
-	// its services down is a worse outcome than a failed migration.
+	// its services down is a worse outcome than a failed migration. The flag
+	// keeps the success path from starting it a second time: the redundant call
+	// can fail merely because the services are already up, and printing
+	// "Apple Container did not start again" after a run that succeeded and
+	// verified would make the most alarming line of the output the least true.
+	started := false
 	defer func() {
+		if started {
+			return
+		}
 		if err := runtime.StartSystem(ctx); err != nil {
 			fmt.Fprintf(
 				os.Stderr,
@@ -218,6 +226,13 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 			); err == nil {
 				fmt.Printf("halted report: %s\n", path)
 			}
+			if len(report.Applied) > 0 {
+				fmt.Printf(
+					"%d resource(s) were already rewritten. Undo them with:\n"+
+						"  agentopsctl migrate-label-metadata --rollback %s\n",
+					len(report.Applied), lifecycle.RollbackPlanPath(backupRoot),
+				)
+			}
 		}
 		return applyErr
 	}
@@ -226,6 +241,7 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 	if err := runtime.StartSystem(ctx); err != nil {
 		return fmt.Errorf("start Apple Container: %w", err)
 	}
+	started = true
 	if err := lifecycle.VerifyMetadataSweep(ctx, runtime, report); err != nil {
 		return fmt.Errorf(
 			"the sweep wrote its documents but the runtime does not report "+
@@ -247,44 +263,14 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	// The committed evidence cannot drive a rollback, because rollback needs the
-	// absolute locations the evidence deliberately omits. Those live in a
-	// private plan written inside the backup root, beside the backups it names.
-	rollbackPath, err := writeRollbackPlan(backupRoot, report)
-	if err != nil {
-		return err
-	}
+	// The rollback plan was written inside the sweep as each resource landed, so
+	// it already exists here and also exists on every failure path above.
+	rollbackPath := lifecycle.RollbackPlanPath(backupRoot)
 	printMetadataReport(report)
 	fmt.Printf("\nevidence: %s\n", path)
 	fmt.Printf("backups:  %s\n", backupRoot)
 	fmt.Printf("rollback: agentopsctl migrate-label-metadata --rollback %s\n", rollbackPath)
 	return nil
-}
-
-// writeRollbackPlan records the absolute locations rollback needs. It is written
-// at 0600 inside the 0700 backup root and is never committed: it names paths on
-// the operator's machine, and it points at files that contain container
-// environment values.
-func writeRollbackPlan(
-	backupRoot string,
-	report *lifecycle.MetadataSweepReport,
-) (string, error) {
-	encoded, err := json.MarshalIndent(
-		lifecycle.BuildRollbackPlan(report), "", "  ",
-	)
-	if err != nil {
-		return "", fmt.Errorf("encode rollback plan: %w", err)
-	}
-	path := filepath.Join(backupRoot, "rollback-plan.json")
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("write rollback plan: %w", err)
-	}
-	defer file.Close()
-	if _, err := file.Write(append(encoded, '\n')); err != nil {
-		return "", fmt.Errorf("write rollback plan: %w", err)
-	}
-	return path, nil
 }
 
 // runMetadataRollback restores every document a recorded run rewrote.

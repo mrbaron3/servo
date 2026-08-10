@@ -380,36 +380,88 @@ func TestApplyMetadataStageWritesEveryDocumentAndRollsBackExactly(t *testing.T) 
 
 func TestApplyMetadataStageIsAtomicAcrossDocuments(t *testing.T) {
 	root := seedAppRoot(t)
-	backups := filepath.Join(t.TempDir(), "backup")
 	target, err := resolveMetadataTarget(root, MetadataKindContainer, "ctr-started")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Make the second document unwritable so the stage fails partway.
-	second := target.Files[1].Path
-	original, err := os.ReadFile(target.Files[0].Path)
+	if len(target.Files) != 2 {
+		t.Fatalf("expected two documents, got %d", len(target.Files))
+	}
+	originals := make(map[string][]byte, len(target.Files))
+	for _, file := range target.Files {
+		data, err := os.ReadFile(file.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		originals[file.Path] = data
+	}
+	// The second document's backup destination is pre-occupied. Both container
+	// documents live in the same directory, so making that directory unwritable
+	// — the obvious way to fail the second write — fails the FIRST one too, and
+	// the test would then pass without the unwind path ever running. Blocking
+	// only the second document's O_EXCL backup fails exactly one write, after
+	// the other has already succeeded.
+	backups := filepath.Join(t.TempDir(), "backups")
+	second := filepath.Base(target.Files[1].Path)
+	occupied := filepath.Join(backups, "container", "ctr-started", second)
+	if err := os.MkdirAll(filepath.Dir(occupied), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(occupied, []byte("earlier run"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyMetadataStage(
+		target, MetadataStagePrepare, backups, root,
+	); err == nil {
+		t.Fatal("expected the stage to fail on the second document")
+	}
+	// A resource whose documents disagree is worse than one that was never
+	// touched, so the failure has to unwind what it already wrote.
+	for path, want := range originals {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf(
+				"a failed stage left %s migrated:\n want %s\n got  %s",
+				filepath.Base(path), want, got,
+			)
+		}
+	}
+}
+
+// TestApplyMetadataStageUnwindActuallyRuns proves the previous test exercises
+// the unwind rather than trivially observing an untouched first document.
+func TestApplyMetadataStageUnwindActuallyRuns(t *testing.T) {
+	root := seedAppRoot(t)
+	target, err := resolveMetadataTarget(root, MetadataKindContainer, "ctr-started")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Dir(second), 0o500); err != nil {
+	backups := filepath.Join(t.TempDir(), "backups")
+	second := filepath.Base(target.Files[1].Path)
+	occupied := filepath.Join(backups, "container", "ctr-started", second)
+	if err := os.MkdirAll(filepath.Dir(occupied), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(filepath.Dir(second), 0o755)
-	_, err = applyMetadataStage(target, MetadataStagePrepare, backups, root)
-	os.Chmod(filepath.Dir(second), 0o755)
-	if err == nil {
-		t.Fatal("expected the stage to fail")
+	if err := os.WriteFile(occupied, []byte("earlier run"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// A resource whose documents disagree is worse than one that was never
-	// touched, so a failure has to unwind what it already wrote.
-	restored, readErr := os.ReadFile(target.Files[0].Path)
-	if readErr != nil {
-		t.Fatal(readErr)
+	if _, err := applyMetadataStage(
+		target, MetadataStagePrepare, backups, root,
+	); err == nil {
+		t.Fatal("expected failure")
 	}
-	if string(restored) != string(original) {
+	// The first document's backup exists, which is only true if that document
+	// was actually written before the second one failed.
+	first := filepath.Base(target.Files[0].Path)
+	if _, err := os.Stat(
+		filepath.Join(backups, "container", "ctr-started", first),
+	); err != nil {
 		t.Fatalf(
-			"first document was left migrated after a failed stage:\n%s",
-			restored,
+			"the first document was never written, so the unwind path was "+
+				"never exercised: %v", err,
 		)
 	}
 }
@@ -432,5 +484,67 @@ func TestApplyMetadataStageRefusesToReuseABackupDirectory(t *testing.T) {
 		target, MetadataStageRetire, backups, root,
 	); err == nil {
 		t.Fatal("expected the second run to refuse the used backup directory")
+	}
+}
+
+// The retire gate is keyed on ClassifyOwnership, which resolves the managed key
+// alone. A resource whose ownership marker is dual but whose role pair is still
+// legacy-only classifies as "dual" and would otherwise pass a host-wide gate,
+// leaving the legacy namespace behind after the phase claimed it was gone.
+func TestRetireGateSeesALegacyOnlyRolePairOnADualResource(t *testing.T) {
+	inventory := &OwnershipInventory{
+		Totals:  map[OwnershipClass]int{},
+		ByKind:  map[MetadataResourceKind]int{},
+		Managed: map[MetadataResourceKind]int{},
+	}
+	inventory.add(OwnershipInventoryRecord{
+		Kind:  MetadataKindContainer,
+		ID:    "agentops-runner",
+		Class: OwnershipDual,
+		Labels: map[string]string{
+			LegacyManagedLabelKey:  ManagedLabelValue,
+			CurrentManagedLabelKey: ManagedLabelValue,
+			// The role pair never made it across.
+			LegacyRoleLabelKey: "runner",
+		},
+	})
+	if inventory.Records[0].Class != OwnershipDual {
+		t.Fatalf("fixture is not dual: %q", inventory.Records[0].Class)
+	}
+	if err := inventory.RequireCurrentOwnershipEverywhere(); err == nil {
+		t.Fatal("retire gate passed a resource with a legacy-only role pair")
+	}
+}
+
+func TestOwnershipInventoryLegacyListIsDeterministic(t *testing.T) {
+	build := func() []string {
+		inventory := &OwnershipInventory{
+			Totals:  map[OwnershipClass]int{},
+			ByKind:  map[MetadataResourceKind]int{},
+			Managed: map[MetadataResourceKind]int{},
+		}
+		for _, record := range []OwnershipInventoryRecord{
+			{Kind: MetadataKindVolume, ID: "vol-b", Class: OwnershipLegacyOnly},
+			{Kind: MetadataKindNetwork, ID: "net-a", Class: OwnershipLegacyOnly},
+			{Kind: MetadataKindVolume, ID: "vol-a", Class: OwnershipLegacyOnly},
+		} {
+			inventory.add(record)
+		}
+		sortOwnershipInventory(inventory)
+		rendered := make([]string, 0, len(inventory.Legacy))
+		for _, record := range inventory.Legacy {
+			rendered = append(rendered, string(record.Kind)+"/"+record.ID)
+		}
+		return rendered
+	}
+	first := build()
+	for attempt := 0; attempt < 5; attempt++ {
+		if got := build(); !reflect.DeepEqual(got, first) {
+			t.Fatalf("legacy list reordered between runs: %v vs %v", first, got)
+		}
+	}
+	want := []string{"network/net-a", "volume/vol-a", "volume/vol-b"}
+	if !reflect.DeepEqual(first, want) {
+		t.Fatalf("legacy list = %v, want %v", first, want)
 	}
 }

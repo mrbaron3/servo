@@ -456,3 +456,82 @@ func TestRestoreMetadataFileRefusesWhenANonLabelFieldChanged(t *testing.T) {
 		t.Fatal("expected a changed non-label field to stop the rollback")
 	}
 }
+
+func TestApplyMetadataFileRefusesWhenTheFileWasReplacedByAnotherInode(t *testing.T) {
+	// A digest comparison alone would accept a different file that happens to
+	// hold the same bytes. Binding the check to the inode is what makes
+	// "this is still the same document" true rather than merely plausible.
+	directory := t.TempDir()
+	path := writeProbeDocument(t, directory)
+	state, err := inspectMetadataFile(metadataFileRef{
+		Path: path, LabelPath: []string{"labels"},
+	})
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	// Replace the file with a fresh inode carrying byte-identical content.
+	replacement := filepath.Join(directory, "replacement.json")
+	if err := os.WriteFile(
+		replacement, []byte(foundationVolumeDocument), 0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyMetadataFile(
+		state, map[string]string{"com.mrbaron3.servo.agentopsctl": "v1"},
+		filepath.Join(directory, "backup", "entity.json"),
+	); err == nil {
+		t.Fatal("expected a replaced inode to stop the write")
+	} else if !strings.Contains(err.Error(), "different file") {
+		t.Fatalf("expected an inode refusal, got %v", err)
+	}
+}
+
+func TestOpenDirectoryRefusesAGroupWritableDirectory(t *testing.T) {
+	// A directory other users can write is one where the destination name can be
+	// swapped between the final check and the rename.
+	root := t.TempDir()
+	wide := filepath.Join(root, "wide")
+	if err := os.Mkdir(wide, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Chmod rather than a wide Mkdir: the creation mode is filtered by the
+	// umask, so Mkdir(0o775) would silently produce an ordinary 0755 directory
+	// and the test would pass without testing anything.
+	if err := os.Chmod(wide, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openDirectory(wide); err == nil {
+		t.Fatal("expected a group writable directory to be refused")
+	}
+}
+
+func TestWriteThroughDirectoryLeavesNoTemporaryBehindOnFailure(t *testing.T) {
+	directory := t.TempDir()
+	handle, err := openDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handle.Close()
+	// Renaming onto a name that is a directory fails, which exercises the
+	// cleanup path after the temporary file has already been written.
+	if err := os.Mkdir(filepath.Join(directory, "occupied"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeThroughDirectory(
+		handle, "occupied", []byte("{}"), 0o644, os.Getuid(), os.Getgid(),
+	); err == nil {
+		t.Fatal("expected the rename to fail")
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp") {
+			t.Fatalf("temporary file left behind: %s", entry.Name())
+		}
+	}
+}

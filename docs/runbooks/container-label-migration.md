@@ -151,7 +151,21 @@ container network delete <name>
 
 いずれの場合も、解消の前後で inventory を取り直して `conflicting` が 0 件になったことを確認する。
 
-## Phase 2: old-only container の掃討
+## Phase 2: old-only container の掃討（**P3A で撤去済み**）
+
+> **`agentopsctl migrate-labels --apply` は Phase 3A で撤去された。** 実装ごと削除されており、
+> 呼んでも runtime に一切触れずに拒否される（CLI・library の両方で拒否し、拒否は listing より前に起きる）。
+> 引数なしの `migrate-labels` は read-only inventory として**そのまま残る**。
+>
+> 理由: この sweep は container を削除して観測どおり作り直すことで label を移した。writer が
+> 新旧両 namespace を書いていた間は「legacy-only → dual」になり正しかったが、P3A で writer が
+> 新 namespace だけを書くようになると、同じ経路が **legacy-only → current-only を 1 手で**やることになる。
+> これは Issue #123 が禁じている飛び越しであり、しかも sweep 自身の verify は dual を要求するので、
+> **container を削除した後に**失敗して replacement を隔離する。
+>
+> 代替は `migrate-label-metadata`（下記「Phase 3A」節）。同じ label を 2 段階で動かし、**何も削除しない**。
+>
+> 以下は撤去された sweep の設計記録である。**手順として実行しないこと。**
 
 ### なぜ作り直すのか
 
@@ -232,6 +246,12 @@ container の構成としては別物になる。sweep は**どれか 1 つで�
 
 **環境変数は key だけが記録され、値は記録されない**（durable な evidence に credential を残さないため）。
 手で作り直すときは値を運用側の設定から補う。値を補えない状態で `container run` を組み立てないこと。
+
+### P2 の evidence（撤去後も読める）
+
+`SweepReport` / `SweepStep` / `VolumePreservation` / `PlannedReplacement` の schema は
+**merge 済みの `evidence/label-p2/*.json` を読むために残してある**（`TestMergedPhase2EvidenceStillDecodes`
+が実際の記録を decode して回帰を止める）。schema を消して diff を小さくすることはしない。
 
 ### P2 の evidence 保全
 

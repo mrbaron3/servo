@@ -1,6 +1,9 @@
 package lifecycle
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -207,6 +210,16 @@ func layoutFor(kind MetadataResourceKind) (metadataLayout, error) {
 	}
 }
 
+// backupAttemptSuffix distinguishes one rollback attempt's backup of a
+// created-since document from an earlier attempt's.
+func backupAttemptSuffix() (string, error) {
+	raw := make([]byte, 4)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate backup attempt identity: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
 func names(values ...string) map[string]struct{} {
 	set := make(map[string]struct{}, len(values))
 	for _, value := range values {
@@ -350,17 +363,23 @@ func sameLabels(first, second map[string]string) bool {
 
 // MetadataApplication is the durable record of one resource's migration.
 type MetadataApplication struct {
-	Kind         MetadataResourceKind       `json:"kind"`
-	ID           string                     `json:"id"`
-	Stage        MetadataStage              `json:"stage"`
-	Directory    string                     `json:"-"`
-	BackupRoot   string                     `json:"-"`
-	ClassBefore  OwnershipClass             `json:"classBefore"`
-	ClassAfter   OwnershipClass             `json:"classAfter"`
-	ChangedKeys  []string                   `json:"changedKeys"`
-	BeforeLabels map[string]string          `json:"beforeLabels"`
-	AfterLabels  map[string]string          `json:"afterLabels"`
-	Files        []*metadataFileApplication `json:"files"`
+	Kind        MetadataResourceKind `json:"kind"`
+	ID          string               `json:"id"`
+	Stage       MetadataStage        `json:"stage"`
+	Directory   string               `json:"-"`
+	BackupRoot  string               `json:"-"`
+	ClassBefore OwnershipClass       `json:"classBefore"`
+	ClassAfter  OwnershipClass       `json:"classAfter"`
+	ChangedKeys []string             `json:"changedKeys"`
+	// The complete label maps are what rollback restores, so they must include
+	// foreign labels; they are therefore private to the rollback plan and never
+	// reach the committed evidence.
+	BeforeLabels map[string]string `json:"-"`
+	AfterLabels  map[string]string `json:"-"`
+	// Only the six ownership keys are published.
+	BeforeOwnership map[string]string          `json:"beforeOwnershipLabels"`
+	AfterOwnership  map[string]string          `json:"afterOwnershipLabels"`
+	Files           []*metadataFileApplication `json:"files"`
 	// Reconciled names documents that did not exist when the migration ran and
 	// were brought back in line by a later rollback.
 	Reconciled []string `json:"reconciled,omitempty"`
@@ -384,16 +403,18 @@ func applyMetadataStage(
 		return nil, fmt.Errorf("%s %s: %w", target.Kind, target.ID, err)
 	}
 	application := &MetadataApplication{
-		Kind:         target.Kind,
-		ID:           target.ID,
-		Stage:        stage,
-		Directory:    target.Directory,
-		BackupRoot:   backupDirectory,
-		ClassBefore:  state.Class,
-		ClassAfter:   ClassifyOwnership(planned),
-		ChangedKeys:  changedLabelKeys(state.Labels, planned),
-		BeforeLabels: state.Labels,
-		AfterLabels:  planned,
+		Kind:            target.Kind,
+		ID:              target.ID,
+		Stage:           stage,
+		Directory:       target.Directory,
+		BackupRoot:      backupDirectory,
+		ClassBefore:     state.Class,
+		ClassAfter:      ClassifyOwnership(planned),
+		ChangedKeys:     changedLabelKeys(state.Labels, planned),
+		BeforeLabels:    state.Labels,
+		AfterLabels:     planned,
+		BeforeOwnership: ownershipLabelSubset(state.Labels),
+		AfterOwnership:  ownershipLabelSubset(planned),
 	}
 	for _, file := range state.Files {
 		backupPath := filepath.Join(
@@ -445,24 +466,139 @@ func unwind(applied []*metadataFileApplication) error {
 // reporting its migrated labels while its other document said otherwise — a
 // half-reverted resource, which is worse than either end state.
 func rollbackMetadataApplication(application *MetadataApplication) error {
-	if err := unwind(application.Files); err != nil {
+	// Every document is checked before any document is written. A rollback that
+	// restored one document and then discovered the second was unacceptable
+	// would produce exactly the half-reverted resource this function exists to
+	// prevent — and on a container, where the listing prefers config.json, that
+	// half state is indistinguishable from a successful migration.
+	created, err := planDocumentsCreatedSince(application)
+	if err != nil {
 		return err
 	}
-	return reconcileDocumentsCreatedSince(application)
+	for _, file := range application.Files {
+		if err := preflightRestore(file); err != nil {
+			return err
+		}
+	}
+	restored := make([]*metadataFileApplication, 0, len(application.Files))
+	for index := len(application.Files) - 1; index >= 0; index-- {
+		file := application.Files[index]
+		outcome, err := restoreMetadataFile(file)
+		if err != nil {
+			// Put back what this rollback already undid, so a failure leaves the
+			// resource in the state it was found in rather than between two.
+			return errors.Join(err, reapply(restored))
+		}
+		file.RestoredAs = outcome
+		restored = append(restored, file)
+	}
+	for _, pending := range created {
+		if _, err := applyMetadataFile(
+			pending.state, application.BeforeLabels, pending.backupPath,
+		); err != nil {
+			return errors.Join(err, reapply(restored))
+		}
+		application.Reconciled = append(application.Reconciled, pending.name)
+	}
+	return nil
 }
 
-// reconcileDocumentsCreatedSince writes the recorded pre-migration labels into
-// any known document that appeared after the migration ran. It refuses unless
-// that document's labels are exactly what the migration left behind, which is
-// the only way to tell "the runtime derived this from the migrated state" from
-// "somebody else wrote this".
-func reconcileDocumentsCreatedSince(application *MetadataApplication) error {
-	if application.Directory == "" {
+// reapply returns documents a failed rollback had already restored to their
+// post-migration content, so the resource ends up wholly migrated rather than
+// partly reverted.
+func reapply(restored []*metadataFileApplication) error {
+	var failures []error
+	for _, file := range restored {
+		state, err := inspectMetadataFile(file.Ref())
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		rewritten, err := rewriteLabels(
+			state.Bytes, file.LabelPath, file.AfterLabels,
+		)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if err := writeFileAtomically(
+			file.Path, rewritten, state.Mode.Perm(), state.UID, state.GID,
+		); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf(
+			"the partial rollback could not be undone either: %w",
+			errors.Join(failures...),
+		)
+	}
+	return nil
+}
+
+// preflightRestore proves one document can be restored before any document is.
+func preflightRestore(file *metadataFileApplication) error {
+	backup, err := os.ReadFile(file.BackupPath)
+	if err != nil {
+		return fmt.Errorf("read backup for %s: %w", file.Document, err)
+	}
+	if digestOf(backup) != file.BackupSHA256 ||
+		digestOf(backup) != file.BeforeSHA256 {
+		return fmt.Errorf(
+			"backup for %s no longer matches the digest recorded when it was "+
+				"taken", file.Document,
+		)
+	}
+	current, err := os.ReadFile(file.Path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", file.Document, err)
+	}
+	if _, _, _, err := statMetadataFile(file.Path); err != nil {
+		return err
+	}
+	switch digestOf(current) {
+	case file.BeforeSHA256, file.AfterSHA256:
 		return nil
+	}
+	// Not either recorded shape: only an Apple Container re-serialisation is
+	// acceptable, and proving that is the same work restore does.
+	rewritten, err := rewriteLabels(backup, file.LabelPath, file.AfterLabels)
+	if err != nil {
+		return fmt.Errorf("%s: %w", file.Document, err)
+	}
+	same, err := equalExceptLabels(current, rewritten, file.LabelPath)
+	if err != nil {
+		return fmt.Errorf("%s: %w", file.Document, err)
+	}
+	currentLabels, err := readLabelsAtPath(current, file.LabelPath)
+	if err != nil {
+		return fmt.Errorf("%s: %w", file.Document, err)
+	}
+	if !same || !sameLabels(currentLabels, file.AfterLabels) {
+		return fmt.Errorf("%s: %w", file.Document, ErrRollbackUnknownState)
+	}
+	return nil
+}
+
+// pendingCreatedDocument is one document that appeared after the migration and
+// has been proven safe to bring back in line.
+type pendingCreatedDocument struct {
+	name       string
+	state      *metadataFileState
+	backupPath string
+}
+
+// planDocumentsCreatedSince verifies, without writing anything, every known
+// document that did not exist when the migration ran.
+func planDocumentsCreatedSince(
+	application *MetadataApplication,
+) ([]pendingCreatedDocument, error) {
+	if application.Directory == "" {
+		return nil, nil
 	}
 	layout, err := layoutFor(application.Kind)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	recorded := make(map[string]struct{}, len(application.Files))
 	for _, file := range application.Files {
@@ -473,6 +609,7 @@ func reconcileDocumentsCreatedSince(application *MetadataApplication) error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	pending := make([]pendingCreatedDocument, 0)
 	for _, name := range names {
 		if _, known := recorded[name]; known {
 			continue
@@ -482,17 +619,25 @@ func reconcileDocumentsCreatedSince(application *MetadataApplication) error {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return fmt.Errorf("inspect %s: %w", path, err)
+			return nil, fmt.Errorf("inspect %s: %w", path, err)
 		}
-		ref := metadataFileRef{Path: path, LabelPath: layout.documents[name]}
-		state, err := inspectMetadataFile(ref)
+		state, err := inspectMetadataFile(metadataFileRef{
+			Path: path, LabelPath: layout.documents[name],
+		})
 		if err != nil {
-			return err
+			return nil, err
+		}
+		// A rollback that already brought this document back is a no-op, not an
+		// error. Rollback is the recovery path: it has to survive being run
+		// twice, and being resumed after an interruption partway through.
+		if sameLabels(state.Labels, application.BeforeLabels) {
+			continue
 		}
 		if !sameLabels(state.Labels, application.AfterLabels) {
-			return fmt.Errorf(
-				"%s %s: %s appeared after the migration and does not carry the "+
-					"labels the migration wrote; resolve it by hand",
+			return nil, fmt.Errorf(
+				"%s %s: %s appeared after the migration and carries neither the "+
+					"labels the migration wrote nor the ones it replaced; "+
+					"resolve it by hand",
 				application.Kind, application.ID, name,
 			)
 		}
@@ -500,12 +645,20 @@ func reconcileDocumentsCreatedSince(application *MetadataApplication) error {
 			application.BackupRoot, string(application.Kind), application.ID,
 			name+".created-since",
 		)
-		if _, err := applyMetadataFile(
-			state, application.BeforeLabels, backupPath,
-		); err != nil {
-			return err
+		// The backup name is made unique per attempt rather than reused: O_EXCL
+		// is what keeps one run from overwriting another run's record of an
+		// irreversible act, and a fixed name would turn a second rollback
+		// attempt into a failure for the wrong reason.
+		if _, err := os.Lstat(backupPath); err == nil {
+			suffix, suffixErr := backupAttemptSuffix()
+			if suffixErr != nil {
+				return nil, suffixErr
+			}
+			backupPath += "." + suffix
 		}
-		application.Reconciled = append(application.Reconciled, name)
+		pending = append(pending, pendingCreatedDocument{
+			name: name, state: state, backupPath: backupPath,
+		})
 	}
-	return nil
+	return pending, nil
 }

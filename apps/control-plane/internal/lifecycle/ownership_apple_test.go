@@ -119,17 +119,27 @@ func appleContainerLabels(
 	return actual.Configuration.Labels, true
 }
 
-// assertLegacyReaderStillFinds is the rollback contract: the pre-migration
-// binary compared this exact key to this exact value and knew nothing about
-// the current namespace.
-func assertLegacyReaderStillFinds(t *testing.T, subject string, labels map[string]string) {
+// assertRollbackReaderStillFinds proves the binary this phase can be rolled
+// back to still discovers the resource.
+//
+// Through Phase 2 that binary was the pre-migration one, which reads the legacy
+// keys alone, so the assertion was "the legacy label is present". Phase 3A stops
+// writing that namespace, and the rollback target becomes the Phase 1 or Phase 2
+// binary — both of which read either namespace. The property that has to hold is
+// therefore the one those readers actually evaluate: the dual reader must
+// classify the resource as owned. Keeping the old assertion would pin a promise
+// this phase deliberately gave up, and would fail on every resource the current
+// writer creates.
+func assertRollbackReaderStillFinds(t *testing.T, subject string, labels map[string]string) {
 	t.Helper()
-	if labels["com.mrbaron3.workflow.agentopsctl"] != "v1" {
+	if class := ClassifyOwnership(labels); !class.Owned() {
 		t.Fatalf(
-			"%s is invisible to the pre-migration reader: %v",
-			subject,
-			labels,
+			"%s is invisible to the Phase 1/Phase 2 reader (%s): %v",
+			subject, class, labels,
 		)
+	}
+	if err := RequireOwned(subject, labels); err != nil {
+		t.Fatalf("%s is not owned by the rollback reader: %v", subject, err)
 	}
 }
 
@@ -150,10 +160,11 @@ func TestAppleContainerDualWritesAndClassifiesOwnershipLabels(t *testing.T) {
 	if !present {
 		t.Fatal("the created network is absent from the real runtime")
 	}
-	if class := ClassifyOwnership(labels); class != OwnershipDual {
+	// Phase 3A writes the current namespace alone.
+	if class := ClassifyOwnership(labels); class != OwnershipCurrentOnly {
 		t.Fatalf("real network classifies as %q: %v", class, labels)
 	}
-	assertLegacyReaderStillFinds(t, "network "+network, labels)
+	assertRollbackReaderStillFinds(t, "network "+network, labels)
 
 	// Re-running the writer must accept the resource it already owns instead of
 	// recreating it; recreation is what destroys an attached named volume.
@@ -171,10 +182,10 @@ func TestAppleContainerDualWritesAndClassifiesOwnershipLabels(t *testing.T) {
 	if !present {
 		t.Fatal("the created volume is absent from the real runtime")
 	}
-	if class := ClassifyOwnership(labels); class != OwnershipDual {
+	if class := ClassifyOwnership(labels); class != OwnershipCurrentOnly {
 		t.Fatalf("real volume classifies as %q: %v", class, labels)
 	}
-	assertLegacyReaderStillFinds(t, "volume "+volume, labels)
+	assertRollbackReaderStillFinds(t, "volume "+volume, labels)
 	if err := runtime.EnsureVolume(ctx, volume); err != nil {
 		t.Fatalf("re-running the writer rejected its own volume: %v", err)
 	}
@@ -255,7 +266,7 @@ func TestAppleContainerReadsEveryOwnershipMigrationStateFromRealVolumes(t *testi
 	}
 }
 
-func TestAppleContainerDualLabelsSurviveOnALiveContainerAndRollbackReader(t *testing.T) {
+func TestAppleContainerCurrentLabelsSurviveOnALiveContainerAndRollbackReader(t *testing.T) {
 	runtime, prefix := appleContainerRuntime(t)
 	image := strings.TrimSpace(os.Getenv(appleContainerImageEnv))
 	ctx := context.Background()
@@ -288,26 +299,47 @@ func TestAppleContainerDualLabelsSurviveOnALiveContainerAndRollbackReader(t *tes
 	if !present {
 		t.Fatal("the created container is absent from the real runtime")
 	}
-	if class := ClassifyOwnership(labels); class != OwnershipDual {
+	if class := ClassifyOwnership(labels); class != OwnershipCurrentOnly {
 		t.Fatalf("real container classifies as %q: %v", class, labels)
 	}
-	assertLegacyReaderStillFinds(t, "container "+name, labels)
+	assertRollbackReaderStillFinds(t, "container "+name, labels)
 	role, agreement := ReadRoleLabel(labels)
-	if agreement != LabelDual || role != "runner" {
+	if agreement != LabelCurrentOnly || role != "runner" {
 		t.Fatalf("real container role = %q, %q: %v", role, agreement, labels)
 	}
 	sealed, agreement := ReadSpecLabel(labels)
-	if agreement != LabelDual || sealed != digest {
+	if agreement != LabelCurrentOnly || sealed != digest {
 		t.Fatalf("real container digest = %q, %q: %v", sealed, agreement, labels)
 	}
-	// The pre-migration binary compared these three keys and nothing else.
-	for key, expected := range map[string]string{
-		"com.mrbaron3.workflow.agentopsctl": "v1",
-		"com.mrbaron3.workflow.role":        "runner",
-		"com.mrbaron3.workflow.spec-sha256": digest,
+	// Phase 3A's rollback target is the Phase 1 or Phase 2 binary, and what
+	// those read is the dual reader in this package. Every pair it resolves on a
+	// resource created by the current writer has to come back agreed and with
+	// the right value, which is the whole reason the writer was allowed to move
+	// before the reader.
+	for _, pair := range []struct {
+		kind     string
+		read     func(map[string]string) (string, LabelAgreement)
+		expected string
+	}{
+		{"role", ReadRoleLabel, "runner"},
+		{"specification digest", ReadSpecLabel, digest},
 	} {
-		if labels[key] != expected {
-			t.Fatalf("rollback reader loses %s: %v", key, labels)
+		value, agreement := pair.read(labels)
+		if !agreement.Agreed() || value != pair.expected {
+			t.Fatalf(
+				"the rollback reader cannot resolve the %s pair: %q, %q in %v",
+				pair.kind, value, agreement, labels,
+			)
+		}
+	}
+	if err := RequireManaged("container "+name, labels); err != nil {
+		t.Fatalf("the rollback reader does not manage this container: %v", err)
+	}
+	// The legacy namespace must be absent, not merely unused: a stray legacy key
+	// here would mean the writer had not actually stopped emitting it.
+	for key := range labels {
+		if strings.HasPrefix(key, LegacyLabelNamespace) {
+			t.Fatalf("the writer still emitted %s: %v", key, labels)
 		}
 	}
 
