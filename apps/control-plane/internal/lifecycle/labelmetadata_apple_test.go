@@ -223,6 +223,22 @@ func TestAppleContainerMetadataRollbackRestoresExactlyAndEndsTheReadPath(t *test
 	if err != nil {
 		t.Fatalf("parse the reconstructed plan: %v", err)
 	}
+	// The plan carries absolute paths read out of a file, so it is bound to the
+	// host it will be applied to before anything is written — the same order the
+	// command uses, where the binding precedes StopSystem.
+	if err := parsed.BindToHost(host); err != nil {
+		t.Fatalf("bind the reconstructed plan to this host: %v", err)
+	}
+	// A plan naming a document this host does not keep must be refused even
+	// though every digest in it is correct.
+	forged, err := ParseRollbackPlan(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.Applied[0].ID = "vol-that-does-not-exist"
+	if err := forged.BindToHost(host); err == nil {
+		t.Fatal("a plan naming another resource was bound to this host")
+	}
 	if err := RollbackMetadataSweep(parsed); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}

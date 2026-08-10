@@ -601,6 +601,9 @@ AGENTOPS_TEST_APPLE_IMAGE=<手元にある image reference> \
 go test ./apps/control-plane/internal/lifecycle/ -run AppleContainer -v -count=1
 ```
 
+実行結果は `evidence/label-p3b/grounded-<stamp>.json` に残す（identity・分類・state・
+volume attachment だけを記録し、host path も環境変数値も raw な label 値も入れない）。
+
 P3B が実機で証明すること:
 
 - 新 namespace だけを書いた resource を runtime が返し、reader が `owned` と読む。
@@ -636,6 +639,7 @@ P2 の grounded suite は probe container の volume に sentinel を書き、co
 | 移行前 host の read-only inventory（分類ごとの件数と container 一覧） | 同上 `readOnlyHostInventory` | P1 merge 前と、P2 の掃討前後 |
 | local validation（Go test / vet / typecheck） | PR 本文の Validation 節 | 各 phase の PR |
 | grounded Apple Container run（drain/recreate、排他 volume の detach/attach、volume data 保全、restart 整合、rollback predicate） | `evidence/label-p2/apple-container-sweep-smoke.json` | P2 merge 前 |
+| grounded Apple Container run（新 namespace 単独 read、legacy-only の refuse かつ非削除、plan の host 束縛、rollback の逐語復元と一方向境界、volume sentinel 保全、前後の host 不変） | `evidence/label-p3b/grounded-<stamp>.json` | P3B merge 前 |
 | P2 の bounded audit（pending / migrated / skipped / conflicting / blocked） | `evidence/label-p2/pre-mutation-<stamp>.json` と `sweep-<stamp>.json`（subcommand が自動生成） | 掃討の直前と直後 |
 | dual label 観測窓のサンプル（最低 3 点・20 分以上） | `evidence/label-p2/inventory-<stamp>.json` | 移行直後・restart 後・窓の終了時 |
 

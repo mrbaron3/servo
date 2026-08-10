@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -116,9 +117,9 @@ func InventoryContainer(actual ContainerActual) ContainerInventoryRecord {
 		Image:           actual.Configuration.Image.Reference,
 		ImageDigest:     actual.Configuration.Image.Descriptor.Digest,
 		Ownership:       ClassifyOwnership(labels),
-		Role:            role,
+		Role:            publishedValue(CurrentRoleLabelKey, role, rolePresence),
 		RolePresence:    rolePresence,
-		SpecDigest:      specDigest,
+		SpecDigest:      publishedValue(CurrentSpecLabelKey, specDigest, specPresence),
 		SpecPresence:    specPresence,
 		OwnershipLabels: ownershipLabelSubset(labels),
 		NamedVolumes:    NamedVolumeAttachments(actual),
@@ -317,11 +318,86 @@ func numericField(value any) (int, bool) {
 	}
 }
 
+// UnrecognizedLabelValue replaces an ownership label value that does not have
+// the shape this binary writes.
+//
+// It exists because an ownership label is not trusted input. Anyone who can
+// create a container can put `com.mrbaron3.servo.role` on it with any text they
+// like, and that text reaches operator terminals and durable evidence — which
+// redacts only the credentials it already knows about. Publishing it verbatim
+// would be an unbounded, attacker-chosen channel into an audit trail that is
+// read weeks later by someone who was not there.
+const UnrecognizedLabelValue = "unrecognized-value"
+
+// BlankLabelValue replaces a present-but-empty ownership label value, which is
+// how a half-written label appears.
+const BlankLabelValue = "blank"
+
+// managedLabelStatus is what the ownership marker renders as when it names this
+// binary. The literal value is not echoed even though it is a constant, so that
+// every published ownership value comes from this file rather than from a
+// resource.
+const managedLabelStatus = "managed"
+
+// roleLabelShape is the conservative shape a role has to match to be published
+// verbatim: lowercase alphanumeric and hyphens, at most 32 characters. Every
+// role this binary writes — control, triage, runner, postgres, github-broker,
+// volume-init — matches it, so the useful semantics survive; a host path, a
+// credential, or a sentence does not.
+var roleLabelShape = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
+
+// specDigestShape is the exact shape of a SHA-256 digest, which is the only
+// thing this binary ever writes into the specification label.
+var specDigestShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// boundedOwnershipValue renders one ownership label value for publication. The
+// value is returned unchanged only when it has the shape this binary writes;
+// anything else is reduced to a fixed token.
+//
+// The bound is on the shape rather than on an enumerated list because roles are
+// chosen by the caller, not by this package. What it buys is that a published
+// value is always short, lowercase, and drawn from an alphabet that cannot
+// carry a path, a URL, or a token — not that it is one of a known set.
+func boundedOwnershipValue(key, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return BlankLabelValue
+	}
+	switch key {
+	case CurrentManagedLabelKey:
+		if value == ManagedLabelValue {
+			return managedLabelStatus
+		}
+	case CurrentRoleLabelKey:
+		if roleLabelShape.MatchString(value) {
+			return value
+		}
+	case CurrentSpecLabelKey:
+		if specDigestShape.MatchString(value) {
+			return value
+		}
+	}
+	return UnrecognizedLabelValue
+}
+
+// publishedValue renders a read label for publication. An absent label has no
+// value to render, and rendering one would make "absent" and "blank"
+// indistinguishable in the audit trail — which is exactly the distinction the
+// fail-closed rules turn on.
+func publishedValue(key, value string, presence LabelPresence) string {
+	if presence == LabelAbsent {
+		return ""
+	}
+	return boundedOwnershipValue(key, value)
+}
+
+// ownershipLabelSubset renders the ownership labels a record publishes. Keys are
+// this binary's own and are safe to name; values pass through
+// boundedOwnershipValue, so no resource can choose what an audit trail says.
 func ownershipLabelSubset(labels map[string]string) map[string]string {
 	subset := make(map[string]string, len(ownershipLabelKeys))
 	for _, key := range ownershipLabelKeys {
 		if value, present := labels[key]; present {
-			subset[key] = value
+			subset[key] = boundedOwnershipValue(key, value)
 		}
 	}
 	return subset

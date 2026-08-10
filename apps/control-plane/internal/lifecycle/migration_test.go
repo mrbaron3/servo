@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -270,8 +271,101 @@ func TestInventoryPublishesNoLegacyOwnershipLabels(t *testing.T) {
 			t.Fatalf("the inventory published %s: %v", key, record.OwnershipLabels)
 		}
 	}
-	if record.OwnershipLabels[CurrentManagedLabelKey] != "v1" {
+	// The marker is published as a bounded status rather than as its literal
+	// value: see boundedOwnershipValue.
+	if record.OwnershipLabels[CurrentManagedLabelKey] != "managed" {
 		t.Fatalf("the inventory lost the current labels: %v", record.OwnershipLabels)
+	}
+}
+
+// An ownership label is not trusted input: anyone who can create a container can
+// put this namespace's keys on it with any text they like, and that text reaches
+// operator terminals and durable evidence. These cases pin that no resource can
+// choose what an audit trail says.
+func TestInventoryNeverPublishesUntrustedLabelText(t *testing.T) {
+	const secret = "/Users/operator/.config/agentops/auth.json?token=SUPERSECRET"
+	for name, labels := range map[string]string{
+		"foreign marker": `{"com.mrbaron3.servo.agentopsctl": "` + secret + `"}`,
+		"foreign role": `{"com.mrbaron3.servo.agentopsctl": "v1",
+			"com.mrbaron3.servo.role": "` + secret + `"}`,
+		"foreign digest": `{"com.mrbaron3.servo.agentopsctl": "v1",
+			"com.mrbaron3.servo.spec-sha256": "` + secret + `"}`,
+		"role that is prose": `{"com.mrbaron3.servo.agentopsctl": "v1",
+			"com.mrbaron3.servo.role": "runner OR 1=1; DROP TABLE"}`,
+		"digest of the wrong shape": `{"com.mrbaron3.servo.agentopsctl": "v1",
+			"com.mrbaron3.servo.spec-sha256": "NOT-A-DIGEST"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			record := InventoryContainer(containerFixture(
+				t, "agentops-runner", "stopped", labels, "",
+			))
+			// The JSON form is what reaches durable evidence.
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The %v form is what reaches an operator's terminal.
+			for channel, rendered := range map[string]string{
+				"evidence": string(encoded),
+				"console":  fmt.Sprintf("%v", record),
+			} {
+				if strings.Contains(rendered, secret) ||
+					strings.Contains(rendered, "DROP TABLE") ||
+					strings.Contains(rendered, "NOT-A-DIGEST") {
+					t.Fatalf(
+						"%s reproduced an untrusted label value:\n%s",
+						channel, rendered,
+					)
+				}
+			}
+			if !strings.Contains(string(encoded), UnrecognizedLabelValue) {
+				t.Fatalf(
+					"the untrusted value was dropped without a marker:\n%s",
+					encoded,
+				)
+			}
+		})
+	}
+}
+
+// The bound must not cost the diagnostics their meaning: a well-formed role and
+// digest still read exactly as written.
+func TestInventoryPublishesWellFormedValuesVerbatim(t *testing.T) {
+	record := InventoryContainer(containerFixture(
+		t, "agentops-runner", "stopped",
+		currentLabels("github-broker", fixtureSpecDigest), "",
+	))
+	if record.Role != "github-broker" {
+		t.Fatalf("a well-formed role was mangled: %q", record.Role)
+	}
+	if record.SpecDigest != fixtureSpecDigest {
+		t.Fatalf("a well-formed digest was mangled: %q", record.SpecDigest)
+	}
+	if record.OwnershipLabels[CurrentRoleLabelKey] != "github-broker" {
+		t.Fatalf("published labels lost the role: %v", record.OwnershipLabels)
+	}
+}
+
+// Absent and blank must stay distinguishable: the fail-closed rules turn on
+// exactly that difference, so an absent label may not render as "blank".
+func TestInventoryDistinguishesAbsentFromBlankInPublishedValues(t *testing.T) {
+	absent := InventoryContainer(containerFixture(
+		t, "agentops-runner", "stopped",
+		`{"com.mrbaron3.servo.agentopsctl": "v1"}`, "",
+	))
+	if absent.Role != "" || absent.RolePresence != LabelAbsent {
+		t.Fatalf("an absent role published as %q/%q", absent.Role, absent.RolePresence)
+	}
+	if _, published := absent.OwnershipLabels[CurrentRoleLabelKey]; published {
+		t.Fatalf("an absent role reached the published labels: %v", absent.OwnershipLabels)
+	}
+
+	blank := InventoryContainer(containerFixture(
+		t, "agentops-runner", "stopped",
+		`{"com.mrbaron3.servo.agentopsctl": "v1", "com.mrbaron3.servo.role": ""}`, "",
+	))
+	if blank.Role != BlankLabelValue || blank.RolePresence != LabelBlank {
+		t.Fatalf("a blank role published as %q/%q", blank.Role, blank.RolePresence)
 	}
 }
 
