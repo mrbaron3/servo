@@ -622,6 +622,10 @@ document path と同じ扱いにする。
 - **stop より前に fallback を defer 登録する。** 途中で失敗した stop も service を落として
   いる可能性があり、その error path で復旧が登録されていなければ、operator の machine は
   container runtime を失ったまま残る。
+- **起動と証明は同じ closure の中にある。** 検証を closure の外に置くと、fallback 経路
+  （stop の部分失敗・cancel・復元失敗）は runtime を起動するだけで**確認しない**。
+  `system start` が 0 を返しつつ apiserver が落ちたままなら、operator は「rollback が
+  失敗した」としか知らされず、runtime が落ちていることは 1 文字も出ない。
 - **成功路では明示的に restart してから検証する。** defer だけでは足りない——関数本体の
   末尾に書いた検証は**どの defer よりも先に**走るので、成功した rollback のたびに
   「止まっている runtime」を読んで、起きていない失敗を報告することになる。

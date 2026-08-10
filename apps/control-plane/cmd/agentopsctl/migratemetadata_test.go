@@ -287,6 +287,37 @@ func stoppedProofResults() []lifecycle.CommandResult {
 	}
 }
 
+// recoveryResults are the calls one recovery makes: StartSystem, then the
+// capability probe that proves the runtime actually came back.
+func recoveryResults(appRoot string, up bool) []lifecycle.CommandResult {
+	status := lifecycle.CommandResult{Status: 0, Stdout: runningStatus(appRoot)}
+	if !up {
+		status = lifecycle.CommandResult{Status: 1, Stderr: stoppedStatus}
+	}
+	return []lifecycle.CommandResult{
+		{Status: 0},
+		{Status: 0, Stdout: "container CLI version 1.1.0"},
+		status,
+	}
+}
+
+// proofsAfterFirstStart counts the capability probes that follow the first
+// `system start`, which is how "no double proof" is asserted.
+func proofsAfterFirstStart(args [][]string) int {
+	started, proofs := false, 0
+	for _, argv := range args {
+		command := strings.Join(argv, " ")
+		if command == "system start" {
+			started = true
+			continue
+		}
+		if started && command == "system status" {
+			proofs++
+		}
+	}
+	return proofs
+}
+
 func startCommands(args [][]string) int {
 	count := 0
 	for _, argv := range args {
@@ -315,11 +346,7 @@ func TestRollbackSucceedsAndRestartsExactlyOnce(t *testing.T) {
 	results := preStopResults(appRoot)
 	results = append(results, lifecycle.CommandResult{Status: 0})
 	results = append(results, stoppedProofResults()...)
-	results = append(results,
-		lifecycle.CommandResult{Status: 0},
-		lifecycle.CommandResult{Status: 0, Stdout: "container CLI version 1.1.0"},
-		lifecycle.CommandResult{Status: 0, Stdout: runningStatus(appRoot)},
-	)
+	results = append(results, recoveryResults(appRoot, true)...)
 	runner := &recordingRuntimeRunner{results: results}
 	if err := migrateLabelMetadata(
 		context.Background(),
@@ -347,6 +374,9 @@ func TestRollbackSucceedsAndRestartsExactlyOnce(t *testing.T) {
 	}
 	if stopIndex < 0 || startIndex < stopIndex || verifyIndex < startIndex {
 		t.Fatalf("stop, start and verify are out of order: %v", order)
+	}
+	if proofs := proofsAfterFirstStart(runner.args); proofs != 1 {
+		t.Fatalf("the runtime was proved %d times, want exactly 1: %v", proofs, order)
 	}
 }
 
@@ -380,10 +410,8 @@ func TestRollbackReportsAFailedRestartOnTheSuccessPath(t *testing.T) {
 func TestRollbackRestartsTheRuntimeEvenWhenTheStopFails(t *testing.T) {
 	planPath, appRoot := rollbackFixture(t)
 	results := preStopResults(appRoot)
-	results = append(results,
-		lifecycle.CommandResult{Status: 1, Stderr: "stop failed halfway"},
-		lifecycle.CommandResult{Status: 0},
-	)
+	results = append(results, lifecycle.CommandResult{Status: 1, Stderr: "stop failed halfway"})
+	results = append(results, recoveryResults(appRoot, true)...)
 	runner := &recordingRuntimeRunner{results: results}
 	err := migrateLabelMetadata(
 		context.Background(),
@@ -407,10 +435,17 @@ func TestRollbackRestartsUnderACancelledContext(t *testing.T) {
 	planPath, appRoot := rollbackFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	results := preStopResults(appRoot)
+	results = append(results, lifecycle.CommandResult{Status: 0}) // system stop
+	// The caller's context is cancelled on the stop. The run then fails for an
+	// ordinary reason — the stopped-state proof sees a live apiserver — which is
+	// what sends it down the deferred recovery path with a cancelled context in
+	// hand. A fake runner ignores context, so cancellation has to be observed
+	// where it matters: on the calls the recovery itself makes.
 	results = append(results,
-		lifecycle.CommandResult{Status: 0},
-		lifecycle.CommandResult{Status: 0},
+		lifecycle.CommandResult{Status: 0, Stdout: "container CLI version 1.1.0"},
+		lifecycle.CommandResult{Status: 0, Stdout: runningStatus(appRoot)},
 	)
+	results = append(results, recoveryResults(appRoot, true)...)
 	runner := &cancellingRuntimeRunner{
 		recordingRuntimeRunner: recordingRuntimeRunner{results: results},
 		cancelOn:               "system stop",
@@ -432,6 +467,16 @@ func TestRollbackRestartsUnderACancelledContext(t *testing.T) {
 		t.Fatalf("the restart did not survive cancellation: %v",
 			commandOrder(runner.args))
 	}
+	// The proof runs on the same uncancelled context as the start, so a
+	// cancelled caller cannot leave the recovery unverified.
+	if proofs := proofsAfterFirstStart(runner.args); proofs != 1 {
+		t.Fatalf("the runtime was proved %d times, want exactly 1: %v",
+			proofs, commandOrder(runner.args))
+	}
+	if !runner.sawProofAfterCancel {
+		t.Fatalf("the recovery proof did not survive cancellation: %v",
+			commandOrder(runner.args))
+	}
 }
 
 // cancellingRuntimeRunner cancels the caller's context partway through, so the
@@ -441,7 +486,9 @@ type cancellingRuntimeRunner struct {
 	cancelOn            string
 	cancel              context.CancelFunc
 	cancelled           bool
+	started             bool
 	sawStartAfterCancel bool
+	sawProofAfterCancel bool
 }
 
 func (runner *cancellingRuntimeRunner) Run(
@@ -452,6 +499,10 @@ func (runner *cancellingRuntimeRunner) Run(
 	if runner.cancelled && command == "system start" && ctx.Err() == nil {
 		// The restart context must be alive even though the caller's is not.
 		runner.sawStartAfterCancel = true
+		runner.started = true
+	}
+	if runner.started && command == "system status" && ctx.Err() == nil {
+		runner.sawProofAfterCancel = true
 	}
 	result := runner.recordingRuntimeRunner.Run(ctx, args)
 	if command == runner.cancelOn && !runner.cancelled {
@@ -459,4 +510,51 @@ func (runner *cancellingRuntimeRunner) Run(
 		runner.cancel()
 	}
 	return result
+}
+
+// TestRollbackJoinsAPrimaryFailureWithAFailedRecovery is the case the proof
+// being outside the closure hid entirely. A fallback path started the runtime
+// and never checked it, so StartSystem returning nil while the services stayed
+// down produced only the primary error — the operator was told the rollback
+// failed and nothing at all about the runtime being down.
+func TestRollbackJoinsAPrimaryFailureWithAFailedRecovery(t *testing.T) {
+	planPath, appRoot := rollbackFixture(t)
+	results := preStopResults(appRoot)
+	results = append(results, lifecycle.CommandResult{Status: 0}) // system stop
+	// The stopped-state proof fails: `system status` still reports running, so
+	// the rollback refuses to edit metadata underneath a live apiserver. That is
+	// the PRIMARY failure, and it returns before the explicit recovery.
+	results = append(results,
+		lifecycle.CommandResult{Status: 0, Stdout: "container CLI version 1.1.0"},
+		lifecycle.CommandResult{Status: 0, Stdout: runningStatus(appRoot)},
+	)
+	// The deferred recovery then starts the runtime successfully but cannot
+	// prove it came back.
+	results = append(results, recoveryResults(appRoot, false)...)
+	runner := &recordingRuntimeRunner{results: results}
+	err := migrateLabelMetadata(
+		context.Background(),
+		[]string{"--rollback", planPath},
+		lifecycle.NewAppleRuntimeForTest(runner),
+	)
+	if err == nil {
+		t.Fatalf("a failed rollback exited 0: %v", commandOrder(runner.args))
+	}
+	message := err.Error()
+	// Both incidents, because they are not the same incident.
+	if !strings.Contains(message, "underneath a live apiserver") {
+		t.Fatalf("the primary failure was lost: %v", err)
+	}
+	if !strings.Contains(message, "did not start again") ||
+		!strings.Contains(message, "still not running") {
+		t.Fatalf("the recovery failure was lost: %v", err)
+	}
+	if starts := startCommands(runner.args); starts != 1 {
+		t.Fatalf("system start ran %d times, want exactly 1: %v",
+			starts, commandOrder(runner.args))
+	}
+	if proofs := proofsAfterFirstStart(runner.args); proofs != 1 {
+		t.Fatalf("the runtime was proved %d times, want exactly 1: %v",
+			proofs, commandOrder(runner.args))
+	}
 }

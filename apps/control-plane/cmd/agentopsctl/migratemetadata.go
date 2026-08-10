@@ -193,16 +193,21 @@ func runMetadataRollback(
 	}
 	// The restart is one closure with two callers, and it runs at most once.
 	//
-	// A deferred restart alone is not enough: the success path has to PROVE the
-	// runtime came back, and a check written after the function body still runs
-	// before any defer fires — which would read a stopped runtime on every
-	// successful rollback and report a failure that did not happen. An explicit
-	// restart alone is not enough either: a stop that fails partway has still
-	// taken services down, and that error path never reaches the explicit call.
+	// Recovery is ONE closure that both starts the runtime and proves it came
+	// back, and it runs at most once.
 	//
-	// So the normal path restarts explicitly and then verifies, and the defer is
-	// the fallback for every path that returned before getting there. `restarted`
-	// is what keeps those two from starting the runtime twice.
+	// Starting and proving belong together because every path that leaves this
+	// function has the same obligation. A deferred start alone is not enough:
+	// the success path has to prove the runtime is up, and a check written after
+	// the function body runs before any defer fires, so it would read a stopped
+	// runtime on every successful rollback. An explicit start alone is not
+	// enough either: a stop that fails partway, a cancelled run, and a failed
+	// restore never reach it. And a proof that lives outside the closure is
+	// worst of both — the fallback paths start the runtime and never check it,
+	// so `StartSystem` returning nil while the services stay down is reported as
+	// nothing at all.
+	//
+	// `restarted` is what keeps the two callers from starting the runtime twice.
 	restarted := false
 	restart := func() error {
 		if restarted {
@@ -213,12 +218,25 @@ func runMetadataRollback(
 		// main wires ctx to signal.NotifyContext, so a SIGINT arriving inside the
 		// stopped window would otherwise disable exactly the one operation that
 		// must always run. Cancellation aborts the rollback; it must not abort
-		// the recovery.
+		// the recovery — including its proof, which is why the capability probe
+		// below runs on this context too rather than on the caller's.
 		restartCtx, cancelRestart := context.WithTimeout(
 			context.WithoutCancel(ctx), serviceRestartTimeout,
 		)
 		defer cancelRestart()
-		return runtime.StartSystem(restartCtx)
+		if startErr := runtime.StartSystem(restartCtx); startErr != nil {
+			return fmt.Errorf("start Apple Container: %w", startErr)
+		}
+		// The runtime's own answer, not this process's belief about it. A start
+		// that exits zero while the apiserver stays down is the case this exists
+		// for, and it is invisible to StartSystem's return value.
+		if capability := runtime.Capability(restartCtx); !capability.ServiceRunning {
+			return fmt.Errorf(
+				"Apple Container reports its services are still not running; " +
+					"start them with `container system start`",
+			)
+		}
+		return nil
 	}
 
 	fmt.Printf("stopping Apple Container services\n")
@@ -261,20 +279,10 @@ func runMetadataRollback(
 		"restored %d resource(s) to their pre-migration labels\n",
 		len(plan.Applied),
 	)
-	// Restarted here rather than left to the defer, so the proof below has
-	// something to observe. Checking capability before this call would read a
-	// runtime this function has not started yet.
+	// Restarted and proved here rather than left to the defer, so a rollback
+	// that could not bring the runtime back does not print a success summary.
 	if restartErr := restart(); restartErr != nil {
-		return fmt.Errorf("start Apple Container: %w", restartErr)
-	}
-	// And the runtime's own answer, not this process's belief about it: a start
-	// that returns success but leaves the apiserver down would otherwise be
-	// reported as a completed rollback by a process exiting 0.
-	if capability := runtime.Capability(ctx); !capability.ServiceRunning {
-		return fmt.Errorf(
-			"the rollback completed but Apple Container is not running again; " +
-				"start it with `container system start`",
-		)
+		return restartErr
 	}
 	// The restored labels may be in the namespace this binary no longer reads,
 	// in which case it can no longer see the resources it just restored. Saying
