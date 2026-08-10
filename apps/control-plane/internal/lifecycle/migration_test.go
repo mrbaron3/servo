@@ -94,23 +94,20 @@ func dualLabels(role, spec string) string {
 	}`
 }
 
-const fixtureSpecDigest = "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
-
-// fixtureImage is what the fixture's image declares for itself. The fixture's
-// process, working directory, and PATH are all image defaults, which is what
-// lets the rebuild inherit them rather than restate them.
-func fixtureImage() ImageConfiguration {
-	return ImageConfiguration{
-		Environment: []string{"PATH=/usr/bin"},
-		Entrypoint:  []string{"node", "dist/src/runner/cli.js"},
-		WorkingDir:  "/app",
-		User:        "agentops",
-	}
+func currentLabels(role, spec string) string {
+	return `{
+		"com.mrbaron3.servo.agentopsctl": "v1",
+		"com.mrbaron3.servo.role": "` + role + `",
+		"com.mrbaron3.servo.spec-sha256": "` + spec + `"
+	}`
 }
 
-// The sweep must reach exactly one verdict per ownership class. Phase 3 keys its
-// entry gate off these counts, so a class that silently collapses into another
-// would let the epic advance on an unproven inventory.
+const fixtureSpecDigest = "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
+
+// The inventory must reach exactly one verdict per ownership class. Its counts
+// are what an operator reads to decide whether a host is in the shape the epic
+// expects, so a class that silently collapsed into another would let that
+// judgement be made on a lie.
 func TestInventoryReachesOneVerdictPerOwnershipClass(t *testing.T) {
 	for _, testCase := range []struct {
 		name        string
@@ -119,35 +116,51 @@ func TestInventoryReachesOneVerdictPerOwnershipClass(t *testing.T) {
 		disposition MigrationDisposition
 	}{
 		{
-			name:        "legacy-only is the migration target",
-			labels:      legacyOnlyLabels("runner", fixtureSpecDigest),
-			ownership:   OwnershipLegacyOnly,
-			disposition: MigrationPending,
-		},
-		{
-			name:        "dual is already migrated",
-			labels:      dualLabels("runner", fixtureSpecDigest),
-			ownership:   OwnershipDual,
-			disposition: MigrationSkipped,
-		},
-		{
 			name:        "current-only is the post-Phase-3 shape",
-			labels:      `{"com.mrbaron3.servo.agentopsctl": "v1"}`,
-			ownership:   OwnershipCurrentOnly,
+			labels:      currentLabels("runner", fixtureSpecDigest),
+			ownership:   OwnershipOwned,
 			disposition: MigrationSkipped,
 		},
 		{
-			name: "conflicting stops the sweep",
+			name:        "dual is owned through its current labels",
+			labels:      dualLabels("runner", fixtureSpecDigest),
+			ownership:   OwnershipOwned,
+			disposition: MigrationSkipped,
+		},
+		{
+			// The inversion Phase 3B performs. A legacy-only container is no
+			// longer a migration target, because it is no longer ours to migrate.
+			name:        "legacy-only is not ours",
+			labels:      legacyOnlyLabels("runner", fixtureSpecDigest),
+			ownership:   OwnershipMissingLabel,
+			disposition: MigrationSkipped,
+		},
+		{
+			// Evaluated from the current label alone: the obsolete legacy v1 does
+			// not make this container ours.
+			name: "legacy disagrees and current is unmanaged",
 			labels: `{
 				"com.mrbaron3.workflow.agentopsctl": "v1",
 				"com.mrbaron3.servo.agentopsctl": "v2"
 			}`,
-			ownership:   OwnershipConflicting,
-			disposition: MigrationConflicting,
+			ownership:   OwnershipUnmanaged,
+			disposition: MigrationSkipped,
+		},
+		{
+			name:        "a blank current marker fails closed",
+			labels:      `{"com.mrbaron3.servo.agentopsctl": ""}`,
+			ownership:   OwnershipMalformed,
+			disposition: MigrationMalformed,
+		},
+		{
+			name:        "a current role without a marker fails closed",
+			labels:      `{"com.mrbaron3.servo.role": "runner"}`,
+			ownership:   OwnershipMalformed,
+			disposition: MigrationMalformed,
 		},
 		{
 			name:        "unmanaged belongs to another deployment",
-			labels:      `{"com.mrbaron3.workflow.agentopsctl": "someone-else"}`,
+			labels:      `{"com.mrbaron3.servo.agentopsctl": "someone-else"}`,
 			ownership:   OwnershipUnmanaged,
 			disposition: MigrationSkipped,
 		},
@@ -183,9 +196,9 @@ func TestInventoryReachesOneVerdictPerOwnershipClass(t *testing.T) {
 	}
 }
 
-// A conflicting container must never be reported as unowned, because "unowned"
-// is what the sweep uses to decide a name belongs to somebody else.
-func TestInventoryNeverDemotesConflictToUnowned(t *testing.T) {
+// A malformed container must never be reported as unowned, because "unowned" is
+// what tells an operator a name belongs to somebody else.
+func TestInventoryNeverDemotesMalformedToUnowned(t *testing.T) {
 	record := InventoryContainer(containerFixture(
 		t,
 		"agentops-postgres",
@@ -196,23 +209,27 @@ func TestInventoryNeverDemotesConflictToUnowned(t *testing.T) {
 		}`,
 		"",
 	))
-	if record.Disposition != MigrationConflicting {
-		t.Fatalf("half-written ownership pair became %q", record.Disposition)
+	if record.Disposition != MigrationMalformed {
+		t.Fatalf("a half-written ownership marker became %q", record.Disposition)
 	}
 	if record.Ownership.Owned() {
-		t.Fatal("a conflicting container must not report as owned")
+		t.Fatal("a malformed container must not report as owned")
+	}
+	if record.Ownership == OwnershipUnmanaged ||
+		record.Ownership == OwnershipMissingLabel {
+		t.Fatalf("a malformed container was demoted to %q", record.Ownership)
 	}
 }
 
-// Evidence is durable and reviewed by people who are not the operator that ran
-// the sweep. It records what the volume is called, never where the host keeps
-// it, and never an environment value.
+// Evidence is durable and reviewed by people who are not the operator that took
+// it. It records what the volume is called, never where the host keeps it, and
+// never an environment value.
 func TestInventoryRecordsVolumeIdentityWithoutHostPathsOrSecrets(t *testing.T) {
 	record := InventoryContainer(containerFixture(
 		t,
 		"agentops-runner",
 		"stopped",
-		legacyOnlyLabels("runner", fixtureSpecDigest),
+		currentLabels("runner", fixtureSpecDigest),
 		"",
 	))
 	if len(record.NamedVolumes) != 1 {
@@ -240,30 +257,50 @@ func TestInventoryRecordsVolumeIdentityWithoutHostPathsOrSecrets(t *testing.T) {
 	}
 }
 
-// The audit has to separate the four outcomes Issue #123 names, and its totals
-// have to agree with its records or the Phase 3 gate is read off a lie.
+// The ownership label subset published in evidence must not carry the retired
+// namespace. It is derived from the keys this binary reads, so a legacy key
+// reaching it would mean the reader had not actually been narrowed.
+func TestInventoryPublishesNoLegacyOwnershipLabels(t *testing.T) {
+	record := InventoryContainer(containerFixture(
+		t, "agentops-runner", "stopped",
+		dualLabels("runner", fixtureSpecDigest), "",
+	))
+	for key := range record.OwnershipLabels {
+		if strings.HasPrefix(key, legacyLabelNamespace) {
+			t.Fatalf("the inventory published %s: %v", key, record.OwnershipLabels)
+		}
+	}
+	if record.OwnershipLabels[CurrentManagedLabelKey] != "v1" {
+		t.Fatalf("the inventory lost the current labels: %v", record.OwnershipLabels)
+	}
+}
+
+// The audit has to separate its outcomes, and its totals have to agree with its
+// records or the counts are read off a lie.
 func TestMigrationAuditTotalsAgreeWithRecords(t *testing.T) {
-	audit := BuildMigrationAudit("pre-migration", []ContainerActual{
+	audit := BuildMigrationAudit("post-migration", []ContainerActual{
 		containerFixture(t, "agentops-runner", "stopped",
-			legacyOnlyLabels("runner", fixtureSpecDigest), ""),
+			currentLabels("runner", fixtureSpecDigest), ""),
 		containerFixture(t, "agentops-control", "running",
 			dualLabels("control", fixtureSpecDigest), ""),
 		containerFixture(t, "foreign", "stopped", `{}`, ""),
+		// Legacy-only is now indistinguishable from unlabelled: both are skipped
+		// because neither is ours.
+		containerFixture(t, "predates-the-migration", "stopped",
+			legacyOnlyLabels("runner", fixtureSpecDigest), ""),
 		containerFixture(t, "half", "stopped", `{
-			"com.mrbaron3.workflow.agentopsctl": "v1",
-			"com.mrbaron3.servo.agentopsctl": "v2"
+			"com.mrbaron3.servo.agentopsctl": ""
 		}`, ""),
 	})
-	if audit.Phase != "pre-migration" {
+	if audit.Phase != "post-migration" {
 		t.Fatalf("phase = %q", audit.Phase)
 	}
-	if len(audit.Records) != 4 {
-		t.Fatalf("records = %d, want 4", len(audit.Records))
+	if len(audit.Records) != 5 {
+		t.Fatalf("records = %d, want 5", len(audit.Records))
 	}
 	want := map[MigrationDisposition]int{
-		MigrationPending:     1,
-		MigrationSkipped:     2,
-		MigrationConflicting: 1,
+		MigrationSkipped:   4,
+		MigrationMalformed: 1,
 	}
 	for disposition, count := range want {
 		if audit.Totals[disposition] != count {
@@ -276,18 +313,22 @@ func TestMigrationAuditTotalsAgreeWithRecords(t *testing.T) {
 			)
 		}
 	}
-	if audit.Totals[MigrationBlocked] != 0 {
-		t.Fatalf("unexpected blocked total: %#v", audit.Totals)
+	for _, unreachable := range []MigrationDisposition{
+		MigrationBlocked, MigrationPending, MigrationMigrated,
+	} {
+		if audit.Totals[unreachable] != 0 {
+			t.Fatalf("unexpected %s total: %#v", unreachable, audit.Totals)
+		}
 	}
-	if !audit.HasConflicts() {
-		t.Fatal("an audit containing a conflict must report it")
+	if !audit.HasMalformed() {
+		t.Fatal("an audit containing a malformed container must report it")
 	}
 }
 
-// A role or specification pair that disagrees is just as partially migrated as
-// a disagreeing ownership marker. Reporting it as skipped would let the Phase 3
-// gate read zero conflicts with one still on the host.
-func TestInventoryTreatsRoleAndSpecDisagreementAsConflicting(t *testing.T) {
+// A blank role or specification digest on an otherwise owned container is as
+// incomplete as a blank marker, and reporting it as skipped would hide a
+// resource no destructive path may touch.
+func TestInventoryTreatsABlankRoleOrSpecAsMalformed(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string
 		labels string
@@ -295,19 +336,15 @@ func TestInventoryTreatsRoleAndSpecDisagreementAsConflicting(t *testing.T) {
 		{
 			name: "role",
 			labels: `{
-				"com.mrbaron3.workflow.agentopsctl": "v1",
 				"com.mrbaron3.servo.agentopsctl": "v1",
-				"com.mrbaron3.workflow.role": "runner",
-				"com.mrbaron3.servo.role": "triage"
+				"com.mrbaron3.servo.role": ""
 			}`,
 		},
 		{
 			name: "specification digest",
 			labels: `{
-				"com.mrbaron3.workflow.agentopsctl": "v1",
 				"com.mrbaron3.servo.agentopsctl": "v1",
-				"com.mrbaron3.workflow.spec-sha256": "` + fixtureSpecDigest + `",
-				"com.mrbaron3.servo.spec-sha256": "deadbeef"
+				"com.mrbaron3.servo.spec-sha256": "   "
 			}`,
 		},
 	} {
@@ -315,9 +352,9 @@ func TestInventoryTreatsRoleAndSpecDisagreementAsConflicting(t *testing.T) {
 			record := InventoryContainer(containerFixture(
 				t, "agentops-runner", "stopped", testCase.labels, "",
 			))
-			if record.Disposition != MigrationConflicting {
+			if record.Disposition != MigrationMalformed {
 				t.Fatalf(
-					"%s disagreement reported as %q, want conflicting",
+					"a blank %s reported as %q, want malformed",
 					testCase.name, record.Disposition,
 				)
 			}
@@ -326,37 +363,44 @@ func TestInventoryTreatsRoleAndSpecDisagreementAsConflicting(t *testing.T) {
 					t, "agentops-runner", "stopped", testCase.labels, "",
 				),
 			})
-			if !audit.HasConflicts() {
-				t.Fatal("the audit did not surface the partial migration")
+			if !audit.HasMalformed() {
+				t.Fatal("the audit did not surface the incomplete labels")
 			}
 		})
 	}
 }
 
-// Ownership can be dual while the role or specification digest is still written
-// in the legacy namespace only. Phase 3 deletes that namespace, so such a
-// container is not finished and must not be reported as skipped.
-func TestInventoryTreatsAOneSidedRoleOrSpecPairAsStillPending(t *testing.T) {
+// An obsolete legacy role that disagrees with the current one is not a conflict
+// any more: only the current value is read, so the container is finished.
+func TestInventorySkipsAContainerWhoseObsoleteLegacyLabelsDisagree(t *testing.T) {
 	record := InventoryContainer(containerFixture(t, "agentops-runner",
 		"stopped", `{
 			"com.mrbaron3.workflow.agentopsctl": "v1",
 			"com.mrbaron3.servo.agentopsctl": "v1",
-			"com.mrbaron3.workflow.role": "runner",
-			"com.mrbaron3.workflow.spec-sha256": "`+fixtureSpecDigest+`"
+			"com.mrbaron3.workflow.role": "triage",
+			"com.mrbaron3.servo.role": "runner",
+			"com.mrbaron3.workflow.spec-sha256": "deadbeef",
+			"com.mrbaron3.servo.spec-sha256": "`+fixtureSpecDigest+`"
 		}`, ""))
-	if record.Disposition != MigrationPending {
+	if record.Disposition != MigrationSkipped {
 		t.Fatalf(
-			"a container whose role is still legacy-only reported %q",
+			"a container with obsolete legacy labels reported %q",
 			record.Disposition,
 		)
 	}
+	if record.Role != "runner" || record.SpecDigest != fixtureSpecDigest {
+		t.Fatalf("the inventory read the obsolete legacy values: %#v", record)
+	}
+	if record.RolePresence != LabelPresent || record.SpecPresence != LabelPresent {
+		t.Fatalf("presence = %q, %q", record.RolePresence, record.SpecPresence)
+	}
 }
 
-// A container with no legacy-only pair left is finished.
-func TestInventorySkipsAFullyDualLabelledContainer(t *testing.T) {
+// A container labelled entirely in the current namespace is finished.
+func TestInventorySkipsAFullyLabelledContainer(t *testing.T) {
 	record := InventoryContainer(containerFixture(
 		t, "agentops-runner", "stopped",
-		dualLabels("runner", fixtureSpecDigest), "",
+		currentLabels("runner", fixtureSpecDigest), "",
 	))
 	if record.Disposition != MigrationSkipped {
 		t.Fatalf("a finished container reported %q", record.Disposition)

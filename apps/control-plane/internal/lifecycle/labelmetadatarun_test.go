@@ -1,35 +1,18 @@
 package lifecycle
 
 import (
-	"strings"
 	"testing"
 )
 
-// Claude round 2 noted that the gates below had no headless coverage. redactRoots
-// in particular is the only thing keeping the operator's home directory out of
-// report.Halted, which is the one free-form string that reaches committed
-// evidence.
-
-func TestRedactRootsRemovesMachineSpecificPrefixes(t *testing.T) {
-	appRoot := "/Users/operator/Library/Application Support/com.apple.container"
-	backupRoot := "/Users/operator/.local/state/agentops/label-metadata-backups"
-	message := "open " + appRoot + "/volumes/x/entity.json: permission denied; " +
-		"backup " + backupRoot + "/prepare-1/volume/x/entity.json exists"
-	redacted := redactRoots(message, appRoot, backupRoot)
-	for _, forbidden := range []string{appRoot, backupRoot, "/Users/operator"} {
-		if strings.Contains(redacted, forbidden) {
-			t.Fatalf("redaction left %q in %q", forbidden, redacted)
-		}
-	}
-	// The message still has to be usable: redaction is not deletion.
-	if !strings.Contains(redacted, "permission denied") ||
-		!strings.Contains(redacted, "volumes/x/entity.json") {
-		t.Fatalf("redaction destroyed the diagnosis: %q", redacted)
-	}
-	if redactRoots("nothing to redact", "", "") != "nothing to redact" {
-		t.Fatal("empty roots must not alter the message")
-	}
-}
+// The inventory is what the rollback command reads before it stops anything, so
+// its one remaining gate — "is a managed container still running?" — has to be
+// exact about which records it counts.
+//
+// Phase 3B removed the other gates here along with the forward stages:
+// RequireConflictFree and RequireCurrentOwnershipEverywhere both existed to
+// compare the two namespaces, and redactRoots scrubbed a halted forward run's
+// free-form error before it reached committed evidence. No forward run remains
+// to halt.
 
 func TestRunningManagedContainersIgnoresUnownedAndStopped(t *testing.T) {
 	inventory := &OwnershipInventory{
@@ -39,14 +22,24 @@ func TestRunningManagedContainersIgnoresUnownedAndStopped(t *testing.T) {
 	}
 	for _, record := range []OwnershipInventoryRecord{
 		{Kind: MetadataKindContainer, ID: "managed-running",
-			Class: OwnershipDual, State: "running"},
+			Class: OwnershipOwned, State: "running"},
 		{Kind: MetadataKindContainer, ID: "managed-stopped",
-			Class: OwnershipDual, State: "stopped"},
+			Class: OwnershipOwned, State: "stopped"},
 		// Not ours: another deployment's running container must not block us.
 		{Kind: MetadataKindContainer, ID: "foreign-running",
 			Class: OwnershipUnmanaged, State: "running"},
+		// Since Phase 3B a legacy-only container reads as missing-label. It is
+		// not ours, so it must not block a rollback either — which is the same
+		// answer the unmanaged case gets, reached for a different reason.
+		{Kind: MetadataKindContainer, ID: "legacy-running",
+			Class: OwnershipMissingLabel, State: "running"},
+		// A malformed container is neither ours nor foreign. It must not be
+		// counted as a running managed container, because the rollback gate is
+		// about documents the runtime is actively holding open.
+		{Kind: MetadataKindContainer, ID: "malformed-running",
+			Class: OwnershipMalformed, State: "running"},
 		// A volume has no state and must never be counted as a running container.
-		{Kind: MetadataKindVolume, ID: "vol", Class: OwnershipLegacyOnly},
+		{Kind: MetadataKindVolume, ID: "vol", Class: OwnershipOwned},
 	} {
 		inventory.add(record)
 	}
@@ -56,35 +49,35 @@ func TestRunningManagedContainersIgnoresUnownedAndStopped(t *testing.T) {
 	}
 }
 
-func TestRequireConflictFreeNamesEveryConflictingResource(t *testing.T) {
+func TestOwnershipInventoryCountsEveryClassAndKind(t *testing.T) {
 	inventory := &OwnershipInventory{
 		Totals:  map[OwnershipClass]int{},
 		ByKind:  map[MetadataResourceKind]int{},
 		Managed: map[MetadataResourceKind]int{},
 	}
-	inventory.add(OwnershipInventoryRecord{
-		Kind: MetadataKindVolume, ID: "vol-a", Class: OwnershipConflicting,
-	})
-	inventory.add(OwnershipInventoryRecord{
-		Kind: MetadataKindContainer, ID: "ctr-a", Class: OwnershipDual,
-	})
-	err := inventory.RequireConflictFree()
-	if err == nil {
-		t.Fatal("a conflicting resource passed the gate")
+	for _, record := range []OwnershipInventoryRecord{
+		{Kind: MetadataKindContainer, ID: "b", Class: OwnershipOwned},
+		{Kind: MetadataKindContainer, ID: "a", Class: OwnershipMissingLabel},
+		{Kind: MetadataKindVolume, ID: "v", Class: OwnershipOwned},
+		{Kind: MetadataKindNetwork, ID: "n", Class: OwnershipMalformed},
+	} {
+		inventory.add(record)
 	}
-	if !strings.Contains(err.Error(), "vol-a") {
-		t.Fatalf("the refusal does not name the resource: %v", err)
+	sortOwnershipInventory(inventory)
+	if inventory.Totals[OwnershipOwned] != 2 ||
+		inventory.Totals[OwnershipMissingLabel] != 1 ||
+		inventory.Totals[OwnershipMalformed] != 1 {
+		t.Fatalf("totals = %v", inventory.Totals)
 	}
-	// A clean host must pass.
-	clean := &OwnershipInventory{
-		Totals:  map[OwnershipClass]int{},
-		ByKind:  map[MetadataResourceKind]int{},
-		Managed: map[MetadataResourceKind]int{},
+	if inventory.Managed[MetadataKindContainer] != 1 ||
+		inventory.Managed[MetadataKindVolume] != 1 ||
+		inventory.Managed[MetadataKindNetwork] != 0 {
+		t.Fatalf("managed = %v", inventory.Managed)
 	}
-	clean.add(OwnershipInventoryRecord{
-		Kind: MetadataKindContainer, ID: "ctr-a", Class: OwnershipDual,
-	})
-	if err := clean.RequireConflictFree(); err != nil {
-		t.Fatalf("a conflict-free host was refused: %v", err)
+	// A stable order: the listing reaches committed evidence, and Go randomises
+	// map iteration, so an unsorted inventory would produce a different diff on
+	// every run against an unchanged host.
+	if inventory.Records[0].ID != "a" || inventory.Records[1].ID != "b" {
+		t.Fatalf("records are not sorted by kind then id: %#v", inventory.Records)
 	}
 }

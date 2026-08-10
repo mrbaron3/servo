@@ -57,7 +57,7 @@ func TestRetainedWorktreePathAcceptsOnlyRunnerOwnedCheckouts(t *testing.T) {
 
 func TestWorktreeRejectsAmbiguousEpicAggregate(t *testing.T) {
 	postgres := `[{"id":"agentops-postgres","configuration":{"labels":` +
-		`{"com.mrbaron3.workflow.agentopsctl":"v1"}},"status":{"state":"running",` +
+		`{"com.mrbaron3.servo.agentopsctl":"v1"}},"status":{"state":"running",` +
 		`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}}]`
 	progress := `{"items":[{"subjectNumber":8,"parentIssueNumber":1,` +
 		`"worktreePath":"/workspace/registrations/11111111-1111-4111-8111-111111111111/` +
@@ -133,7 +133,7 @@ func TestWorktreeShellFindsPreservedSupersededCheckout(t *testing.T) {
 	stale := "/workspace/registrations/" + registration + "/jobs/" + job + "/attempt-1/worktree"
 	live := "/workspace/registrations/" + registration + "/jobs/" + job + "/attempt-2/worktree"
 	postgres := `[{"id":"agentops-postgres","configuration":{"labels":` +
-		`{"com.mrbaron3.workflow.agentopsctl":"v1"}},"status":{"state":"running",` +
+		`{"com.mrbaron3.servo.agentopsctl":"v1"}},"status":{"state":"running",` +
 		`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}}]`
 	progress := `{"items":[` +
 		`{"phase":"completed","step":"released","state":"succeeded"},` +
@@ -176,7 +176,7 @@ func TestWorktreeSkipsPathsOutsideTheRunnerVolumeInsteadOfFailing(t *testing.T) 
 	job := "22222222-2222-4222-8222-222222222222"
 	live := "/workspace/registrations/" + registration + "/jobs/" + job + "/attempt-2/worktree"
 	postgres := `[{"id":"agentops-postgres","configuration":{"labels":` +
-		`{"com.mrbaron3.workflow.agentopsctl":"v1"}},"status":{"state":"running",` +
+		`{"com.mrbaron3.servo.agentopsctl":"v1"}},"status":{"state":"running",` +
 		`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}}]`
 	progress := `{"items":[` +
 		`{"worktreePath":"/home/operator/local-checkout"},` +
@@ -211,7 +211,7 @@ func TestWorktreeSkipsPathsOutsideTheRunnerVolumeInsteadOfFailing(t *testing.T) 
 
 func TestWorktreeReportsSkippedPathsWhenNoneRemain(t *testing.T) {
 	postgres := `[{"id":"agentops-postgres","configuration":{"labels":` +
-		`{"com.mrbaron3.workflow.agentopsctl":"v1"}},"status":{"state":"running",` +
+		`{"com.mrbaron3.servo.agentopsctl":"v1"}},"status":{"state":"running",` +
 		`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}}]`
 	progress := `{"items":[{"worktreePath":"/home/operator/local-checkout"}]}`
 	fake := &managerRuntimeRunner{results: []lifecycle.CommandResult{

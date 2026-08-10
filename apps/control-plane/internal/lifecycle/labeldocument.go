@@ -25,7 +25,7 @@ import (
 // understand is to refuse it — not to re-render it in Go's dialect of JSON.
 //
 // The practical consequence is that a completed run differs from its backup in
-// the labels field and nowhere else, which is what makes "only the six ownership
+// the labels field and nowhere else, which is what makes "only the ownership
 // keys changed" a fact an operator can check rather than a claim they must
 // trust.
 

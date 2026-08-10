@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,16 +10,23 @@ import (
 	"time"
 )
 
-// This file grounds Phase 3A on a real Apple Container host. The headless tests
-// prove the document rewriter and the staging rules; only the real runtime can
-// prove the three things this phase actually rests on:
+// This file grounds what Phase 3B keeps of Phase 3A on a real Apple Container
+// host. Phase 3A's forward stages are gone; the recovery path that restores a
+// document to the exact bytes a Phase 3A run recorded is not, and only the real
+// runtime can prove the two things it rests on:
 //
-//   - Apple Container has no route that changes an existing resource's labels,
-//     so the migration has to edit its metadata while it is stopped;
 //   - an offline edit is what the runtime reports after it starts again, which
-//     is the only definition of "the label changed" that matters;
-//   - the data inside a named volume is untouched by that edit, which is why
-//     this phase can migrate a volume at all where Phase 2 could not.
+//     is the only definition of "the label changed" that matters. Reading back
+//     the file this process just wrote would prove the writer agreed with
+//     itself;
+//   - the data inside a named volume is untouched by that edit, which is why a
+//     volume can be relabelled at all where Phase 2 could only recreate it.
+//
+// It also grounds the one-way boundary itself. After a rollback restores
+// pre-Phase-3A labels, the resource is genuinely invisible to this binary on a
+// real host — not merely classified differently by a fake. That is the fact the
+// runbook asks an operator to accept before rolling back, so it is worth
+// proving on metal rather than asserting in prose.
 //
 // Run with:
 //
@@ -29,7 +37,7 @@ import (
 // Every resource carries a prefix unique to this process, every target is named
 // by exact identity, and the suite never selects by label. A live managed
 // topology on the same host is therefore never a target even though it is
-// exactly the kind of resource this migration is for.
+// exactly the kind of resource this recovery path is for.
 
 // stopSystemForTest stops the runtime and proves it, restoring it on cleanup.
 // Bringing the host back up is registered before the stop so a failure inside
@@ -78,53 +86,9 @@ func waitForRuntime(t *testing.T, runtime *AppleRuntime) {
 	t.Fatal("Apple Container did not come back up")
 }
 
-// appleMetadataProbes creates one stopped container, one named volume carrying
-// a sentinel, and one network, all seeded legacy-only with the raw CLI so they
-// look exactly like a pre-migration host.
-func appleMetadataProbes(
-	t *testing.T,
-	runtime *AppleRuntime,
-	prefix, image string,
-) (container, volume, network string) {
-	t.Helper()
-	ctx := context.Background()
-	raw := func(args ...string) CommandResult {
-		return runtime.runner.Run(ctx, args)
-	}
-	volume = prefix + "-data"
-	if result := raw(
-		"volume", "create", "--label", LegacyManagedLabelKey+"=v1", volume,
-	); result.Status != 0 {
-		t.Fatalf("seed probe volume: %s", result.Stderr)
-	}
-	t.Cleanup(func() { raw("volume", "delete", volume) })
-
-	network = prefix + "-internal"
-	if result := raw(
-		"network", "create", "--label", LegacyManagedLabelKey+"=v1", network,
-	); result.Status != 0 {
-		t.Fatalf("seed probe network: %s", result.Stderr)
-	}
-	t.Cleanup(func() { raw("network", "delete", network) })
-
-	container = prefix + "-ctr"
-	if result := raw(
-		"create", "--name", container,
-		"--label", LegacyManagedLabelKey+"=v1",
-		"--label", LegacyRoleLabelKey+"=runner",
-		"--volume", volume+":/data",
-		"--entrypoint", "/bin/sh",
-		image, "-c", "sleep 3600",
-	); result.Status != 0 {
-		t.Fatalf("seed probe container: %s", result.Stderr)
-	}
-	t.Cleanup(func() { raw("delete", container) })
-	return container, volume, network
-}
-
-// writeVolumeSentinel puts a known string inside the named volume. The whole
-// reason Phase 3A can migrate a volume where Phase 2 could not is that it never
-// recreates one, and this is what proves the data was left alone.
+// writeVolumeSentinel puts a known string inside the named volume. The reason a
+// volume can be relabelled at all is that nothing recreates one, and this is
+// what proves the data was left alone across the edit.
 func writeVolumeSentinel(
 	t *testing.T, runtime *AppleRuntime, volume, image, value string,
 ) {
@@ -154,247 +118,167 @@ func readVolumeSentinel(
 	return strings.TrimSpace(result.Stdout)
 }
 
-func TestAppleContainerMetadataStagesMigrateAndRollBack(t *testing.T) {
-	runtime, prefix := appleContainerRuntimeForPhase(t, "labelp3a")
+// TestAppleContainerMetadataRollbackRestoresExactlyAndEndsTheReadPath drives the
+// retained recovery path end to end against a real host.
+//
+// The fixture is a Phase 3A `retire` run reconstructed rather than performed:
+// this binary can no longer produce one, so the test builds the record such a
+// run would have left — a backup holding the pre-migration bytes, and a plan
+// naming the document, its digests, and the complete label maps on either side.
+// That is exactly the input an operator's retained backup root contains, and
+// driving the recovery path from a hand-built record is the only way left to
+// exercise it.
+func TestAppleContainerMetadataRollbackRestoresExactlyAndEndsTheReadPath(t *testing.T) {
+	runtime, prefix := appleContainerRuntimeForPhase(t, "labelp3b")
 	image := strings.TrimSpace(os.Getenv(appleContainerImageEnv))
 	ctx := context.Background()
-	container, volume, network := appleMetadataProbes(t, runtime, prefix, image)
+	raw := func(args ...string) CommandResult {
+		return runtime.runner.Run(ctx, args)
+	}
+
+	// A current-only volume, which is what every managed resource looks like
+	// after Phase 3A's sweep.
+	volume := prefix + "-data"
+	if result := raw(
+		"volume", "create", "--label", CurrentManagedLabelKey+"=v1", volume,
+	); result.Status != 0 {
+		t.Fatalf("seed probe volume: %s", result.Stderr)
+	}
+	t.Cleanup(func() { raw("volume", "delete", volume) })
+	writeVolumeSentinel(t, runtime, volume, image, "p3b-rollback")
 
 	host, err := runtime.ResolveMetadataHost(ctx)
 	if err != nil {
-		t.Fatalf("resolve host: %v", err)
+		t.Fatalf("resolve metadata host: %v", err)
 	}
-	// The sentinel proves the volume's data is untouched by a metadata edit,
-	// which is the claim that lets this phase migrate a volume where Phase 2
-	// could not.
-	const sentinel = "servo-p3a-sentinel"
-	writeVolumeSentinel(t, runtime, volume, image, sentinel)
+	document := filepath.Join(host.AppRoot, "volumes", volume, "entity.json")
+	backupRoot := filepath.Join(t.TempDir(), "private-backups")
 
-	// The image file is measured across the sweep window only. Running a
-	// container against the volume writes to it legitimately, so a comparison
-	// that spanned one would be measuring the container, not the migration.
-	imagePath := filepath.Join(host.AppRoot, "volumes", volume, "volume.img")
-	beforeImage, err := os.Stat(imagePath)
-	if err != nil {
-		t.Fatalf("probe volume image: %v", err)
+	// The labels a pre-Phase-3A host carried. Restoring these is the whole point
+	// of the retained path, and they are deliberately in the namespace this
+	// binary no longer reads.
+	beforeLabels := map[string]string{
+		legacyManagedLabelKey: "v1",
+		"com.example.foreign": "keep-me",
 	}
 
-	targets := []MetadataTargetRef{
-		{Kind: MetadataKindContainer, ID: container},
-		{Kind: MetadataKindVolume, ID: volume},
-		{Kind: MetadataKindNetwork, ID: network},
-	}
-	backupRoot := filepath.Join(t.TempDir(), "backups")
-
-	// --- prepare -------------------------------------------------------
 	stopSystemForTest(t, runtime)
-	prepared, err := ApplyMetadataSweep(
-		ctx, runtime, host, MetadataStagePrepare, targets, backupRoot,
-	)
+	if err := runtime.RequireServicesStopped(ctx); err != nil {
+		t.Fatalf("services are not stopped: %v", err)
+	}
+
+	state, err := inspectMetadataFile(metadataFileRef{
+		Path: document, LabelPath: []string{"labels"},
+	})
 	if err != nil {
-		t.Fatalf("prepare: %v", err)
+		t.Fatalf("inspect the runtime's own volume document: %v", err)
 	}
-	if len(prepared.Applied) != 3 {
-		t.Fatalf("expected three resources prepared, got %d", len(prepared.Applied))
+	afterLabels := state.Labels
+	if afterLabels[CurrentManagedLabelKey] != "v1" {
+		t.Fatalf("the seeded volume document is not current-only: %v", afterLabels)
 	}
-	startSystemForTest(t, runtime)
-	if err := VerifyMetadataSweep(ctx, runtime, prepared); err != nil {
-		t.Fatalf("runtime does not report the prepared labels: %v", err)
+	// The backup a Phase 3A run would have taken: the same document carrying the
+	// pre-migration labels.
+	backupBytes, err := rewriteLabels(state.Bytes, []string{"labels"}, beforeLabels)
+	if err != nil {
+		t.Fatalf("build the pre-migration document: %v", err)
 	}
-	inventory, err := TakeOwnershipInventory(ctx, runtime)
+	backupPath := filepath.Join(backupRoot, "volume", volume, "entity.json")
+	if err := writeBackup(backupPath, backupBytes); err != nil {
+		t.Fatalf("write the reconstructed backup: %v", err)
+	}
+
+	plan := &RollbackPlan{
+		// A stage name this binary no longer defines, carried verbatim.
+		Stage: "retire",
+		Applied: []*MetadataApplication{{
+			Kind:        MetadataKindVolume,
+			ID:          volume,
+			Stage:       "retire",
+			ClassBefore: "legacy-only",
+			ClassAfter:  "current-only",
+			ChangedKeys: []string{legacyManagedLabelKey, CurrentManagedLabelKey},
+			Files: []*metadataFileApplication{{
+				LabelPath:    []string{"labels"},
+				Document:     filepath.Join("volumes", volume, "entity.json"),
+				Backup:       filepath.Join("volume", volume, "entity.json"),
+				BeforeSHA256: digestOf(backupBytes),
+				AfterSHA256:  state.SHA256,
+				BackupSHA256: digestOf(backupBytes),
+				Mode:         state.Mode.Perm(),
+			}},
+		}},
+		Locations: [][]RollbackLocation{{
+			{Path: document, BackupPath: backupPath},
+		}},
+		Labels: []RollbackLabels{{Before: beforeLabels, After: afterLabels}},
+	}
+	encoded, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range targets {
-		if class := classOf(t, inventory, target); class != OwnershipDual {
-			t.Fatalf("%s is %q after prepare, want dual", target, class)
-		}
-	}
-
-	// --- retire --------------------------------------------------------
-	stopSystemForTest(t, runtime)
-	retireBackups := filepath.Join(t.TempDir(), "retire-backups")
-	retired, err := ApplyMetadataSweep(
-		ctx, runtime, host, MetadataStageRetire, targets, retireBackups,
-	)
+	// Going through the parser rather than using the struct directly grounds the
+	// round trip an operator's on-disk plan actually takes.
+	parsed, err := ParseRollbackPlan(encoded)
 	if err != nil {
-		t.Fatalf("retire: %v", err)
+		t.Fatalf("parse the reconstructed plan: %v", err)
 	}
-	startSystemForTest(t, runtime)
-	if err := VerifyMetadataSweep(ctx, runtime, retired); err != nil {
-		t.Fatalf("runtime does not report the retired labels: %v", err)
-	}
-	inventory, err = TakeOwnershipInventory(ctx, runtime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, target := range targets {
-		if class := classOf(t, inventory, target); class != OwnershipCurrentOnly {
-			t.Fatalf("%s is %q after retire, want current-only", target, class)
-		}
-	}
-	// Zero residue: no document may still mention the legacy namespace.
-	for _, target := range targets {
-		requireNoLegacyResidue(t, host.AppRoot, target)
-	}
-
-	// --- the volume image was not written by the migration ---------------
-	// Nothing has run a container since beforeImage was taken, so any change
-	// here would have been made by the sweep itself.
-	sweptImage, err := os.Stat(imagePath)
-	if err != nil {
-		t.Fatalf("probe volume image vanished: %v", err)
-	}
-	if sweptImage.Size() != beforeImage.Size() ||
-		!sweptImage.ModTime().Equal(beforeImage.ModTime()) {
-		t.Fatalf(
-			"the migration wrote to the volume image (%d@%v -> %d@%v)",
-			beforeImage.Size(), beforeImage.ModTime(),
-			sweptImage.Size(), sweptImage.ModTime(),
-		)
-	}
-	if got := readVolumeSentinel(t, runtime, volume, image); got != sentinel {
-		t.Fatalf("volume sentinel reads %q after the sweep, want %q", got, sentinel)
-	}
-
-	// --- the probe container still starts and stops ---------------------
-	if result := runtime.runner.Run(
-		ctx, []string{"start", container},
-	); result.Status != 0 {
-		t.Fatalf("probe container will not start after the sweep: %s", result.Stderr)
-	}
-	if result := runtime.runner.Run(
-		ctx, []string{"stop", container},
-	); result.Status != 0 {
-		t.Logf("probe container stop reported: %s", result.Stderr)
-	}
-
-	// --- rollback to dual, then reapply --------------------------------
-	stopSystemForTest(t, runtime)
-	if err := RollbackMetadataSweep(
-		BuildRollbackPlan(retired),
-	); err != nil {
+	if err := RollbackMetadataSweep(parsed); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	startSystemForTest(t, runtime)
-	inventory, err = TakeOwnershipInventory(ctx, runtime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, target := range targets {
-		if class := classOf(t, inventory, target); class != OwnershipDual {
-			t.Fatalf("%s is %q after rollback, want dual again", target, class)
-		}
-	}
-	stopSystemForTest(t, runtime)
-	reapplyBackups := filepath.Join(t.TempDir(), "reapply-backups")
-	reapplied, err := ApplyMetadataSweep(
-		ctx, runtime, host, MetadataStageRetire, targets, reapplyBackups,
-	)
-	if err != nil {
-		t.Fatalf("reapply retire: %v", err)
-	}
-	startSystemForTest(t, runtime)
-	if err := VerifyMetadataSweep(ctx, runtime, reapplied); err != nil {
-		t.Fatalf("reapplied sweep is not reported by the runtime: %v", err)
+	if outcome := parsed.Applied[0].Files[0].RestoredAs; outcome != RestoreExactBytes {
+		t.Fatalf("restore outcome = %q, want %q", outcome, RestoreExactBytes)
 	}
 
-	// The sentinel is still readable after everything above, which is the
-	// end-to-end statement this phase makes about named volumes.
-	if got := readVolumeSentinel(t, runtime, volume, image); got != sentinel {
-		t.Fatalf("volume sentinel reads %q, want %q", got, sentinel)
+	startSystemForTest(t, runtime)
+
+	// What the runtime reports is the only definition of "the label changed"
+	// that counts.
+	restored, present := appleLabels(t, runtime, "volume", volume)
+	if !present {
+		t.Fatal("the volume disappeared across the rollback")
 	}
-	if afterImage, err := os.Stat(imagePath); err != nil {
-		t.Fatalf("probe volume image vanished: %v", err)
-	} else if afterImage.Size() != beforeImage.Size() {
+	if restored[legacyManagedLabelKey] != "v1" {
+		t.Fatalf("the runtime does not report the restored labels: %v", restored)
+	}
+	if _, stillCurrent := restored[CurrentManagedLabelKey]; stillCurrent {
+		t.Fatalf("the current namespace survived the rollback: %v", restored)
+	}
+	// A foreign label must survive a rollback untouched. The plan carries the
+	// complete label maps precisely so recovery cannot drop somebody else's key.
+	if restored["com.example.foreign"] != "keep-me" {
+		t.Fatalf("the rollback dropped a foreign label: %v", restored)
+	}
+
+	// The one-way boundary, on metal: this binary can no longer see what it just
+	// restored, and refuses it rather than reusing the name.
+	if class := ClassifyOwnership(restored); class != OwnershipMissingLabel {
 		t.Fatalf(
-			"volume image size changed from %d to %d",
-			beforeImage.Size(), afterImage.Size(),
+			"a rolled-back volume still classifies as %q on a real host: %v",
+			class, restored,
 		)
 	}
-}
-
-// TestAppleContainerMetadataRefusesWhileTheRuntimeIsUp proves the stopped-state
-// gate is real rather than advisory.
-func TestAppleContainerMetadataRefusesWhileTheRuntimeIsUp(t *testing.T) {
-	runtime, prefix := appleContainerRuntimeForPhase(t, "labelp3aguard")
-	image := strings.TrimSpace(os.Getenv(appleContainerImageEnv))
-	ctx := context.Background()
-	_, volume, _ := appleMetadataProbes(t, runtime, prefix, image)
-	host, err := runtime.ResolveMetadataHost(ctx)
-	if err != nil {
-		t.Fatalf("resolve host: %v", err)
+	if err := runtime.EnsureVolume(ctx, volume); err == nil {
+		t.Fatal("a rolled-back volume was adopted by the Phase 3B reader")
 	}
-	if _, err := ApplyMetadataSweep(
-		ctx, runtime, host, MetadataStagePrepare,
-		[]MetadataTargetRef{{Kind: MetadataKindVolume, ID: volume}},
-		filepath.Join(t.TempDir(), "backups"),
-	); err == nil {
-		t.Fatal("expected the sweep to refuse a running runtime")
+	if _, stillThere := appleLabels(t, runtime, "volume", volume); !stillThere {
+		t.Fatal("a rolled-back volume was removed by the Phase 3B reader")
+	}
+
+	// And the data the whole exercise exists to protect is still there.
+	if sentinel := readVolumeSentinel(
+		t, runtime, volume, image,
+	); sentinel != "p3b-rollback" {
+		t.Fatalf("volume sentinel = %q after the rollback", sentinel)
 	}
 }
 
-// TestAppleContainerMetadataRefusesRetireBeforePrepare proves the staging order
-// is enforced against a real host rather than only in the planner's unit tests.
-func TestAppleContainerMetadataRefusesRetireBeforePrepare(t *testing.T) {
-	runtime, prefix := appleContainerRuntimeForPhase(t, "labelp3aorder")
-	image := strings.TrimSpace(os.Getenv(appleContainerImageEnv))
-	ctx := context.Background()
-	_, volume, _ := appleMetadataProbes(t, runtime, prefix, image)
-	host, err := runtime.ResolveMetadataHost(ctx)
-	if err != nil {
-		t.Fatalf("resolve host: %v", err)
-	}
-	stopSystemForTest(t, runtime)
-	if _, err := ApplyMetadataSweep(
-		ctx, runtime, host, MetadataStageRetire,
-		[]MetadataTargetRef{{Kind: MetadataKindVolume, ID: volume}},
-		filepath.Join(t.TempDir(), "backups"),
-	); err == nil {
-		t.Fatal("expected retire on a legacy-only resource to be refused")
-	}
-}
-
-func classOf(
-	t *testing.T,
-	inventory *OwnershipInventory,
-	target MetadataTargetRef,
-) OwnershipClass {
-	t.Helper()
-	for _, record := range inventory.Records {
-		if record.Kind == target.Kind && record.ID == target.ID {
-			return record.Class
-		}
-	}
-	t.Fatalf("%s is missing from the inventory", target)
-	return ""
-}
-
-func requireNoLegacyResidue(
-	t *testing.T,
-	appRoot string,
-	target MetadataTargetRef,
-) {
-	t.Helper()
-	layout, err := layoutFor(target.Kind)
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory := filepath.Join(appRoot, layout.directory, target.ID)
-	for name := range layout.documents {
-		path := filepath.Join(directory, name)
-		data, err := os.ReadFile(path)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if strings.Contains(string(data), LegacyLabelNamespace) {
-			t.Fatalf(
-				"%s still carries the legacy namespace after retire: %s",
-				path, data,
-			)
-		}
+// TestAppleContainerMetadataRollbackRefusesWhileTheRuntimeIsUp proves the
+// stopped-state gate is real rather than advisory. It is the guard that keeps a
+// recovery from editing a document the runtime is holding its own view of.
+func TestAppleContainerMetadataRollbackRefusesWhileTheRuntimeIsUp(t *testing.T) {
+	runtime, _ := appleContainerRuntimeForPhase(t, "labelp3b")
+	if err := runtime.RequireServicesStopped(context.Background()); err == nil {
+		t.Fatal("the stopped-state proof passed while Apple Container was running")
 	}
 }

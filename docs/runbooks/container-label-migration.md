@@ -10,20 +10,40 @@ container label は表示名ではなく**互換性 identifier** である。`ag
 label key の正典は `apps/control-plane/internal/lifecycle/ownership.go` **1 箇所だけ**である。
 新しい判定箇所を足すときも、key 文字列を書かず必ずこの file の関数を通す。
 
-## 分類（Phase 1 以降で共通）
+## 分類（P3B 以降）
+
+**P3B の binary は `com.mrbaron3.servo.*` だけを読む。** 判定はすべて新 namespace の
+`com.mrbaron3.servo.agentopsctl` から導かれ、旧 namespace は read も分類もされない。
 
 | 分類 | 条件 | 所有か | 扱い |
 | --- | --- | --- | --- |
-| `legacy-only` | 旧 namespace のみ `=v1` | 所有 | 移行前に作られた container。P2 の移行対象。 |
-| `current-only` | 新 namespace のみ `=v1` | 所有 | P3 後の姿。P1/P2 でも読める。 |
-| `dual` | 新旧とも `=v1` | 所有 | P1 の writer が作った姿。 |
-| `conflicting` | 新旧が**異なる値**（片側が空文字も含む） | **判定不能** | fail-closed。unowned として掃討しない。 |
-| `unmanaged` | key はあるが値が `v1` でない | 非所有 | 別 deployment の名前。触らない。 |
-| `missing-label` | どちらの key も無い | 非所有 | 触らない。 |
+| `owned` | `com.mrbaron3.servo.agentopsctl=v1` | 所有 | 通常の managed resource。 |
+| `unmanaged` | 新 key はあるが値が `v1` でない | 非所有 | 別 deployment の名前。触らない。 |
+| `missing-label` | 新 key が無い | 非所有 | 触らない。**旧 namespace だけを持つ resource もここに落ちる。** |
+| `malformed` | 新 namespace が中途半端（marker が空文字／marker 無しで `com.mrbaron3.servo.role`・`spec-sha256` がある） | **判定不能** | fail-closed。unowned として扱わない。 |
 
-`conflicting` を `unmanaged` と同一視しないことが本移行の安全性そのものである。`unmanaged` は
-「他人のもの」を意味し、後続 phase の掃討判断で使われる。部分移行した自分の container を
-そこへ落とすと、排他 attach 中の volume を持ったまま削除・再作成の対象になり得る。
+`malformed` を `unmanaged` と同一視しないことが本契約の安全性そのものである。`unmanaged` は
+「他人のもの」を意味し、名前が空いているという判断に使われる。作成途中で中断した自分の
+container をそこへ落とすと、排他 attach 中の volume を持ったまま削除・再作成の対象になり得る。
+
+### P3B で何が変わったか
+
+- **旧 namespace だけを持つ resource は `missing-label`＝非所有になった。** `EnsureVolume` /
+  `EnsureNetwork` / `Delete` / drain / reconcile はいずれも**拒否する**。**採用も変更も削除もしない。**
+  Apple Container の named volume は排他 attach なので、「見えない」ものは「空いている名前」ではない。
+- **`dual` の resource は新 label だけで評価される。** 旧 label が食い違っていても参照しないので、
+  かつて `conflicting` だった組み合わせは今は単に新 label の値どおりに読まれる
+  （新が `v1` なら所有、`v2` なら `unmanaged`）。
+- **中途半端な新 label は依然 fail-closed** である（上表 `malformed`）。
+- 旧分類 `legacy-only` / `current-only` / `dual` は `owned` に統合され、`conflicting` は
+  `malformed` に置き換わった。
+
+### 旧 binary との対照（P1〜P3A の 6 分類）
+
+移行期の evidence を読むときのために残す。P1〜P3A の binary は新旧両方を読み、
+`legacy-only` / `current-only` / `dual` / `conflicting` / `unmanaged` / `missing-label` の
+6 分類を出した。`conflicting` は新旧が異なる値（片側が空文字も含む）を指し、P3B の
+`malformed` とは**別の条件**である。
 
 ## Phase gate
 
@@ -32,7 +52,7 @@ label key の正典は `apps/control-plane/internal/lifecycle/ownership.go` **1 
 | **P1 dual label**（本 PR で実装済み） | なし | 新規作成 resource が新旧両 label を持ち、reader が上表 6 分類を明示し、旧 binary へ戻しても発見できることを grounded に確認済み |
 | **P2 旧 container 掃討**（本 PR で実装済み） | P1 が merge 済みで、稼働 host の inventory が取れている | old-only container が 0 件、移行・skip・conflict・block の bounded audit が残り、Apple Container 上で drain/recreate と volume detach/attach、restart 整合、rollback を grounded に確認済み |
 | **P3A 旧 write 停止＋obsolete label 掃討**（本 PR で実装済み） | P2 の gate を満たし、dual label 観測窓で ownership／attachment の回帰が無い | 新規作成 resource が `current-only` になり、reader は 6 分類を保ったまま、全 managed container / volume / network が `current-only` へ移行済み |
-| **P3B 旧 read 削除**（未実装） | P3A が merge 済みで、host に `legacy-only` が 0 件 | 旧 namespace の read が消え、reader が `com.mrbaron3.servo.*` だけを見る |
+| **P3B 旧 read 削除**（本 PR で実装済み） | P3A が merge 済みで、host に `legacy-only` が 0 件 | 旧 namespace の read が消え、reader が `com.mrbaron3.servo.*` だけを見る。production Go source に旧 key の string literal が 1 つも残らない（`TestNoProductionCodeReferencesTheLegacyNamespace` が回帰を止める） |
 
 **P1 から P3 へ直接飛ばない。** 旧 write と旧 read は同じ PR で消さない（write を先に止める）。
 **P3A と P3B も同じ PR にしない。** write 停止と掃討が終わって初めて read を消せる。
@@ -51,9 +71,10 @@ agentopsctl migrate-labels -evidence-dir <dir>   # 上記に加えて durable �
 worktree に file を落とさないためである。観測窓のサンプルなど控えが要るときだけ `-evidence-dir` を渡す。
 `--only` は `--apply` 専用で、inventory には渡せない（gate として読む件数が host 全体である必要があるため）。
 
-出力の `pending` が P2 の移行対象（`legacy-only` かつ忠実な replacement を再構築できるもの）、
-`blocked` は所有しているが**同一の replacement を作れない**もの、`conflicting` は部分移行、
-`skipped` は移行不要（`dual` / `current-only`）または非所有（`unmanaged` / `missing-label`）である。
+出力の `skipped` は所有かつ完全に label 済み、または非所有（`unmanaged` / `missing-label`）、
+`malformed` は中途半端な新 label（fail-closed）、`blocked` は未知 class に対する fail-closed 既定である。
+`pending` / `migrated` は**撤去済みの P2 sweep だけが出した歴史的な値**で、
+`evidence/label-p2/*.json` を読むために型としてのみ残っている。
 
 subcommand が使えない状況（binary が無い等）では Apple Container の listing を直接分類する。
 **listing は read-only であり、label selector による一括削除は行わない。**
@@ -61,21 +82,20 @@ subcommand が使えない状況（binary が無い等）では Apple Container 
 ```sh
 container list --all --format json | python3 -c '
 import json, sys, collections
-LEG = "com.mrbaron3.workflow.agentopsctl"
 CUR = "com.mrbaron3.servo.agentopsctl"
+ROLE = "com.mrbaron3.servo.role"
+SPEC = "com.mrbaron3.servo.spec-sha256"
 
 def classify(labels):
-    legacy, current = LEG in labels, CUR in labels
-    if not legacy and not current:
+    if CUR not in labels:
+        # 旧 namespace だけの resource もここに落ちる（P3B は読まない）。
+        if ROLE in labels or SPEC in labels:
+            return "malformed"
         return "missing-label"
-    if legacy and current:
-        if labels[LEG] != labels[CUR]:
-            return "conflicting"
-        return "dual" if labels[LEG] == "v1" else "unmanaged"
-    value = labels[LEG] if legacy else labels[CUR]
-    if value != "v1":
-        return "unmanaged"
-    return "legacy-only" if legacy else "current-only"
+    value = labels[CUR]
+    if value.strip() == "":
+        return "malformed"
+    return "owned" if value == "v1" else "unmanaged"
 
 counts = collections.Counter()
 for item in json.load(sys.stdin):
@@ -87,38 +107,83 @@ print("---", dict(counts))
 '
 ```
 
+移行期の host を旧 6 分類で読み直したいときは、`git show` で P3A 時点のこの節を参照する。
+
 `volume list` / `network list` は `item["configuration"]["labels"]` と `item["id"]` で同じ分類ができる。
 
 読み方:
 
-- `conflicting` が 1 件でもあれば、**そこで止める**。`agentopsctl` はその resource に触れる操作を
-  fail-closed で拒否する。error は**食い違っている 2 つの key 名だけ**を出し、label の値そのものは出さない
+- `malformed` が 1 件でもあれば、**そこで止める**。`agentopsctl` はその resource に触れる操作を
+  fail-closed で拒否する。error は**問題のある key 名だけ**を出し、label の値そのものは出さない
   （label 値は事故や外部由来の任意文字列で、durable な lifecycle failure record にも残るため）。
-  どちらの値が古いかは `container inspect <name>` で確認する。解消手順は下記「conflicting の解消」を見る。
-- `conflicting` の error は drift の error と区別される。「DRAINING して stop して restart」を促す文言が
-  出たらそれは drift であって部分移行ではない。**部分移行に対して drift の手順を実行しない**
-  （排他 attach 中の named volume を持つ container を削除・再作成することになる）。
-- `legacy-only` が残っている限り P3 の gate は満たさない。
+  実際の値は `container inspect <name>` で確認する。
+- `malformed` の error は drift の error と区別される。「DRAINING して stop して restart」を促す文言が
+  出たらそれは drift であって中途半端な label ではない。**中途半端な label に対して drift の手順を
+  実行しない**（排他 attach 中の named volume を持つ container を削除・再作成することになる）。
+- `missing-label` の中に**旧 namespace だけを持つ resource が混ざり得る**。P3B の binary からは
+  区別が付かないので、素性を知りたいときは `container inspect <name>` で label を直接見る。
+  いずれにせよ `agentopsctl` は触らない。
 - `unmanaged` / `missing-label` は移行対象ではない。数を減らそうとしない。
 
-## Rollback（P1 → 移行前 binary）
+## Rollback（P3B → P1/P2/P3A）
 
-P1 の writer は新旧**両方**の label を書く。旧 binary は旧 namespace しか読まないが、
-それは常に存在するので、P1 が作った container / network / volume はそのまま発見できる。
+**P3B へ上げたあとの rollback は、意図的な運用判断である。** 自動 fallback は存在しない。
+P3B の binary は `com.mrbaron3.servo.*` しか読まないので、旧 label へ戻した resource は
+**その binary からは見えなくなる**。戻すなら binary も一緒に戻す。
 
-1. 移行前 revision の `agentopsctl` を用意する（build し直すか、以前の binary を使う）。
-2. 稼働 topology を `agentopsctl drain` → `stop` で止める必要は**無い**。label は変えないので、
-   旧 binary はそのまま `status` / `start` を継続できる。
-3. 旧 binary で `agentopsctl status` を実行し、control / triage / runner / postgres が
-   期待どおり認識されることを確認する。
-4. 以後、旧 binary が新しく作る container は `legacy-only` になる。再び P1 の binary へ進めても
-   `legacy-only` は所有として読めるので、行き止まりにならない。
+### 一方向であること
 
-戻せない状況が 1 つだけある: 手動または外部 tool で**新旧の値を食い違わせた**場合
-（`conflicting`）。これは P1 の binary でも旧 binary でも安全に扱えないので、
-下記「conflicting の解消」を先に行ってから rollback する。
+`agentopsctl migrate-label-metadata --rollback` は残してある。これは P3A の書き換えを
+**undo できるが redo できない**。P3A の 2 stage（`prepare` / `retire`）は撤去済みで、
+`--stage` を渡すと理由を出して拒否される（runtime には一切触れない）。
 
-## conflicting の解消
+- **undo できる**: rollback は保全済み private backup の**逐語 bytes** へ document を戻す。
+  label の中身を解釈しないので、このbinaryが読めない namespace の label でも正しく復元できる。
+- **redo できない**: 前へ進める stage が無い。もう一度 `current-only` にしたければ
+  P3A の binary を使う。
+
+### 必要なもの
+
+次の 3 つが揃わない限り rollback しない。
+
+1. **保全済みの private backup root**（P3A の `--apply` が書いた `rollback-plan.json` を含む）。
+   repository には入っていない。既定は `$XDG_STATE_HOME/agentops/label-metadata-backups`。
+   backup は container の `config.json` の逐語 copy であり `POSTGRES_PASSWORD` を含む
+   **credential store**なので、git work tree の中には無い。
+2. **全 managed resource が `current-only` である証跡**（P3A の観測窓と事後 inventory）。
+   これが無いと、戻した先がどの状態なのかを後から言えない。
+3. **P3B 以前の binary**。rollback 後の host を操作するのはこちらである。
+
+### 手順
+
+```sh
+# 1. managed container を全て停止する（rollback は runtime を止めて metadata を書く）。
+agentopsctl drain && agentopsctl stop
+
+# 2. 保全済み plan を渡す。runtime の停止・再起動は command 側が面倒を見る。
+agentopsctl migrate-label-metadata --rollback <backup-root>/retire-<stamp>/rollback-plan.json
+
+# 3. ここから先は P3B の binary では host が見えない。P3B 以前の binary へ差し替える。
+#    差し替えずに `agentopsctl status` を叩くと、resource は missing-label として
+#    「所有していない」と報告される。これは異常ではなく、この phase の設計どおりである。
+```
+
+rollback は**冪等**である。中断したら同じ plan で再実行してよい。P3A 実行後に生まれた
+document（container を start すると runtime が作る `config.json`）も、sweep が書いた label と
+完全一致することを確認したうえで面倒を見る（`reconciled` に記録される）。
+
+### 移行期の rollback（歴史的記録）
+
+P1 の writer は新旧**両方**の label を書いていたため、P1/P2 の間は binary を戻すだけで
+rollback できた（旧 binary は旧 namespace を読み、それは常に存在した）。P3A が旧 write を止め、
+P3B が旧 read を止めたことで、その無料の互換性は失われている。上記が現在の手順である。
+
+## conflicting の解消（**移行期の記録**）
+
+> `conflicting`（新旧 namespace が異なる値）は P1〜P3A の分類である。P3B の binary は旧
+> namespace を読まないので、この状態を検出しない——新 label の値どおりに読むだけである。
+> 移行期の host を扱うときのために手順を残す。P3B 時点の fail-closed は `malformed` であり、
+> こちらは resource を作り直さずに label を書き直せば解ける。
 
 **Apple Container は既存 resource の label を変更できない。** `container` CLI に update/relabel 相当の
 subcommand は無く（1.1.0 で確認）、label は create 時にしか設定できない。したがって解消は
@@ -382,7 +447,14 @@ artifact ではなく **credential store** である。したがって:
 **sanitize した evidence では rollback できない**（絶対 path を持たないため）。だから 2 つに分ける。
 evidence には host path も document の中身も入らない――`TestCommittedEvidenceCarriesNoHostPath` が回帰を止める。
 
-### 手順
+### 手順（**P3B で撤去済み。実行しないこと**）
+
+> **`migrate-label-metadata --stage` は Phase 3B で撤去された。** `--stage` / `--apply` /
+> `--only` / `--evidence-dir` / `--backup-dir` を渡すと、runtime に一切触れずに理由を出して
+> 拒否される。両 stage とも 2 つの namespace を比較して書き込む処理であり、読む側が 1 つに
+> なった以上成立しない。**残っているのは `--rollback` だけ**である（上記「Rollback」節）。
+>
+> 以下は撤去された staged migration の設計記録である。
 
 ```sh
 # 1. read-only の plan。host は変わらない。全 managed resource の分類と対象 document が出る。
@@ -461,25 +533,66 @@ image は `/bin/sh` を持つ必要がある（`--entrypoint` で override す�
   metadata document を書き換えることで、volume を 1 つも削除せずに
   `legacy-only` → `dual` → `current-only` を通す。上記「Phase 3A」節を見る。
 
-### P3B の entry gate
+### P3B の entry gate（**充足済み**）
 
-P3B（旧 read の削除）へ進む条件は次のとおり。
+P3B（旧 read の削除）へ進む条件と、その充足状況。
 
 - `agentopsctl migrate-label-metadata --stage retire` の plan で、**host の `legacy-only` が 0 件**。
   container だけでなく **volume と network も 0 件**であること。
+  → **充足。** 実 host の read-only inventory は 7 container / 23 volume / 8 network、
+  うち 32 件が `current-only`、`legacy-only` / `dual` / `conflicting` は 0 件、
+  `com.mrbaron3.workflow.*` の key は 1 つも存在しない。
 - P3A の掃討後に **20 分以上・3 サンプル以上**の観測窓で ownership／attachment の回帰が 0 件。
+  → **充足。** `evidence/label-p3a/observation-window.json`（21m17s / 3 サンプル）。
 - 旧 read を消しても `EnsureVolume` / `EnsureNetwork` が自分の resource を所有と読めること
   （＝全 managed resource が `current-only`）。
+  → **充足。** 上記 32 件が `current-only`。
+
+## Phase 3B: 旧 read の削除
+
+### 何が変わったか
+
+- **reader は `com.mrbaron3.servo.*` だけを見る。** `ClassifyOwnership` / `RequireOwned` /
+  `RequireManaged` / `RequireRole` / `RequireSpecDigest`、inventory、reconcile、attachment lookup、
+  operator diagnostics のすべてが新 namespace 単独で判定する。
+- **分類が 6 から 4 になった**（上記「分類（P3B 以降）」）。`legacy-only` / `current-only` / `dual`
+  は `owned` に統合、`conflicting` は `malformed` に置き換え。
+- **旧 namespace だけの resource は非所有**になった。`missing-label` として扱われ、
+  採用も変更も削除もされない。
+- **production Go source に旧 key の string literal が 1 つも無い。**
+  `TestNoProductionCodeReferencesTheLegacyNamespace` が AST の string literal を走査して回帰を止める
+  （comment は対象外——この境界は説明されるべきものだからである）。
+- **前へ進める migration は 1 つも残っていない。** `migrate-labels --apply` は P3A で、
+  `migrate-label-metadata --stage` は P3B で撤去された。両方とも runtime に触れる前に拒否する。
+- **`migrate-label-metadata --rollback` は残る。** label key を一切解釈せず、記録済みの label map を
+  逐語で書き戻すだけなので、このbinaryが読めない namespace でも正しく復元できる。
+
+### P3B でやらないこと
+
+- host への破壊的操作。P3B は code / test / docs だけの変更であり、
+  container・volume・network を 1 つも作らず・消さず・書き換えない。
+- `unmanaged` / `missing-label` の resource への操作。**件数を減らそうとしない。**
+  旧 namespace だけを持つ resource が仮に現れても、掃討対象にしない。
 
 ## grounded 検証の実行
 
-実機 Apple Container 上で label の round-trip と 6 分類、rollback predicate を接地する:
+実機 Apple Container 上で label の round-trip と分類、そして P3B の一方向境界を接地する:
 
 ```sh
 AGENTOPS_TEST_APPLE_CONTAINER=1 \
 AGENTOPS_TEST_APPLE_IMAGE=<手元にある image reference> \
 go test ./apps/control-plane/internal/lifecycle/ -run AppleContainer -v -count=1
 ```
+
+P3B が実機で証明すること:
+
+- 新 namespace だけを書いた resource を runtime が返し、reader が `owned` と読む。
+- **旧 namespace だけの volume / container を refuse し、かつ消さない。**
+  refuse したあとも resource と label がそのまま残っていることまで確認する
+  （排他 attach の named volume を「空いた名前」と誤読しないこと）。
+- rollback（`-run AppleContainerMetadata`）が document を逐語 bytes へ戻し、runtime が
+  戻った label を報告し、**その resource がこの binary から見えなくなり**、それでも
+  volume の中の sentinel は無傷であること。一方向境界そのものの接地である。
 
 P2 の掃討だけを接地する場合（`/bin/sh` と `/bin/sleep` を持つ image が必要）:
 

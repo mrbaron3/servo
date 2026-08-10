@@ -1494,10 +1494,12 @@ func (manager *manager) ensurePostgres(ctx context.Context) (bool, error) {
 			}
 			if err := validateSpecActual(actual, spec); err != nil {
 				// Drift is resolved by draining, stopping, and restarting onto
-				// the preserved volume. A partial label migration is resolved by
-				// fixing the labels — following the drift remediation would
-				// delete and recreate a container that is not drifting at all.
-				if errors.Is(err, lifecycle.ErrConflictingLabels) {
+				// the preserved volume. Incomplete ownership labels are resolved
+				// by fixing the labels — following the drift remediation would
+				// delete and recreate a container that is not drifting at all,
+				// and this is the PostgreSQL container, whose named volume the
+				// recreation would have to detach and re-attach.
+				if errors.Is(err, lifecycle.ErrMalformedOwnershipLabels) {
 					return false, err
 				}
 				return false, fmt.Errorf(

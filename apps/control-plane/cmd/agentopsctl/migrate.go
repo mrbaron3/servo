@@ -115,21 +115,21 @@ func (manager *manager) MigrateLabels(
 	// before discovering that its own verification, which still demands a dual
 	// replacement, can no longer pass.
 	//
-	// The replacement is `migrate-label-metadata`, which moves the same labels in
-	// two reviewable stages and deletes nothing. The read-only inventory below
-	// is unaffected: it is still how an operator reads the phase gate.
+	// Its replacement, `migrate-label-metadata --stage`, has since been retired
+	// too: Phase 3B removed every path that reads the legacy namespace, and both
+	// of that command's stages existed only to compare the two namespaces. No
+	// forward container label migration remains in this binary. The read-only
+	// inventory below is unaffected.
 	if apply {
 		return fmt.Errorf(
 			"migrate-labels --apply is retired as of Phase 3A of Issue #123.\n" +
 				"It migrated a container by deleting and recreating it, which " +
 				"now produces a current-only replacement in one step and " +
 				"skips the staged migration the epic requires.\n" +
-				"Use the staged, non-destructive replacement instead:\n" +
-				"  agentopsctl migrate-label-metadata --stage prepare\n" +
-				"  agentopsctl migrate-label-metadata --stage prepare --apply " +
-				"--only <kind/id>,...\n" +
-				"  agentopsctl migrate-label-metadata --stage retire --apply " +
-				"--only <kind/id>,...\n" +
+				"Its staged replacement, `migrate-label-metadata --stage`, is " +
+				"retired as of Phase 3B: this binary reads " +
+				lifecycle.CurrentLabelNamespace + ".* only, so there is no " +
+				"legacy namespace left to migrate from.\n" +
 				"`agentopsctl migrate-labels` without --apply remains the " +
 				"read-only inventory.",
 		)
@@ -139,8 +139,7 @@ func (manager *manager) MigrateLabels(
 		return fmt.Errorf(
 			"--only applied to the retired --apply path; the inventory always " +
 				"reports the whole host so its counts can be read as a phase " +
-				"gate. Pass exact targets to `migrate-label-metadata --only` " +
-				"instead",
+				"gate",
 		)
 	}
 	// The inventory promises not to change the host, and starting the Apple
@@ -198,10 +197,10 @@ func (manager *manager) MigrateLabels(
 		}
 		fmt.Printf("\nevidence: %s\n", path)
 	}
-	if audit.HasConflicts() {
+	if audit.HasMalformed() {
 		fmt.Println(
-			"\nconflicting containers are present; resolve them before " +
-				"migrating",
+			"\ncontainers with incomplete ownership labels are present; " +
+				"resolve them before acting on this host",
 		)
 	}
 	return nil

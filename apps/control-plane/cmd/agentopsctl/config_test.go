@@ -77,8 +77,8 @@ func TestValidateRunnerActualRequiresFullHardenedTopology(t *testing.T) {
 	actual := &lifecycle.ContainerActual{ID: cfg.RunnerContainer}
 	actual.Status.State = "running"
 	actual.Configuration.Labels = map[string]string{
-		"com.mrbaron3.workflow.agentopsctl": "v1",
-		"com.mrbaron3.workflow.role":        "runner",
+		"com.mrbaron3.servo.agentopsctl": "v1",
+		"com.mrbaron3.servo.role":        "runner",
 	}
 	actual.Configuration.Image.Reference = "docker.io/library/agentops-runner:dev"
 	actual.Configuration.Networks = append(
@@ -125,8 +125,8 @@ func TestValidateTriageActualHasNoWorkspaceOrDevelopmentImage(t *testing.T) {
 	actual := &lifecycle.ContainerActual{ID: cfg.TriageContainer}
 	actual.Status.State = "running"
 	actual.Configuration.Labels = map[string]string{
-		"com.mrbaron3.workflow.agentopsctl": "v1",
-		"com.mrbaron3.workflow.role":        "triage",
+		"com.mrbaron3.servo.agentopsctl": "v1",
+		"com.mrbaron3.servo.role":        "triage",
 	}
 	actual.Configuration.Image.Reference = "docker.io/library/agentops-triage:dev"
 	actual.Configuration.Networks = append(

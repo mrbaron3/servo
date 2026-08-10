@@ -324,14 +324,6 @@ func TestRestoreMetadataFileRefusesACorruptedBackup(t *testing.T) {
 	}
 }
 
-func TestRequireNoSymlinkInPathAcceptsAnOrdinaryPath(t *testing.T) {
-	directory := t.TempDir()
-	path := writeProbeDocument(t, directory)
-	if err := requireNoSymlinkInPath(path, directory); err != nil {
-		t.Fatalf("expected an ordinary path to be accepted, got %v", err)
-	}
-}
-
 func TestUmaskDoesNotWidenTheTemporaryFile(t *testing.T) {
 	// A 0600 source must not come back as 0644 because the temporary file was
 	// created with a default mode and then chmod-ed.

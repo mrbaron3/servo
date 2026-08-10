@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"syscall"
 )
 
@@ -75,7 +74,7 @@ type metadataFileApplication struct {
 	// the private rollback plan instead.
 	BeforeLabels map[string]string `json:"-"`
 	AfterLabels  map[string]string `json:"-"`
-	// BeforeOwnership and AfterOwnership are the six ownership keys alone, which
+	// BeforeOwnership and AfterOwnership are the ownership keys alone, which
 	// is what the evidence is allowed to publish.
 	BeforeOwnership map[string]string `json:"beforeOwnershipLabels"`
 	AfterOwnership  map[string]string `json:"afterOwnershipLabels"`
@@ -94,35 +93,6 @@ func (application *metadataFileApplication) Ref() metadataFileRef {
 func digestOf(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
-}
-
-// requireNoSymlinkInPath proves that no component between a trusted root and a
-// target is a symbolic link. Checking the final file alone is not enough: a
-// symlinked parent directory presents a perfectly ordinary regular file while
-// the write lands somewhere the operator never named.
-func requireNoSymlinkInPath(path, root string) error {
-	relative, err := filepath.Rel(root, path)
-	if err != nil {
-		return fmt.Errorf("resolve %s under %s: %w", path, root, err)
-	}
-	if relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-		return fmt.Errorf("%s is outside the expected root", path)
-	}
-	current := root
-	for _, component := range strings.Split(relative, string(os.PathSeparator)) {
-		if component == "." {
-			continue
-		}
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return fmt.Errorf("inspect %s: %w", current, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s is a symbolic link", current)
-		}
-	}
-	return nil
 }
 
 // requireOwnedByCurrentUser refuses a document owned by anybody else. Apple
