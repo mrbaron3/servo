@@ -18,7 +18,6 @@ import {
   Finding,
   Scores,
   Verdict,
-  type GateResult,
   type IssueContract,
   type RevisionBinding,
 } from '../domain/schema.js';
@@ -337,7 +336,7 @@ function persistRun(
   input: PanelInput,
   perspective: string | null,
   result: Pick<PerspectiveResult, 'verdict' | 'findings' | 'scores' | 'overall'>,
-  hardGates: Record<string, GateResult>,
+  hardGates: EvalRun['hardGates'],
   area: string,
 ): EvalRun {
   const id = store.nextId('EVAL', 5);

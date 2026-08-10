@@ -19,8 +19,12 @@ import {
 } from '../domain/development-review.js';
 import {
   DurableReleaseReceiptContract,
+  HistoricalDurableReleaseReceiptContract,
+  HistoricalReleasePolicyContract,
   LiveReleaseReceiptEvidenceContract,
+  PersistedLiveReleaseReceiptEvidenceContract,
   ReleaseArtifactContract,
+  ReleaseGradeReceiptContract,
   ReleaseMergeIntentReceiptContract,
   ReleaseMergeReceiptContract,
   ReleasePolicyContract,
@@ -28,7 +32,8 @@ import {
   legacyLiveReleaseReceiptEvidenceWire,
   releasePreMergeSemanticErrors,
   type DurableReleaseReceipt,
-  type LiveReleaseReceiptEvidenceV2,
+  type HistoricalDurableReleaseReceipt,
+  type PersistedLiveReleaseReceiptEvidence,
   type ReleaseArtifact,
   type ReleaseMergeIntentReceipt,
   type ReleaseMergeReceipt,
@@ -38,6 +43,7 @@ import {
   CanonicalRepository,
   EnqueueJobInput,
   GitHubLabelNameContract,
+  HistoricalRepositoryRegistrationConfigurationContract,
   IdempotencyConflictError,
   LeaseRejectedError,
   MonitorBrokerCursor,
@@ -158,6 +164,10 @@ interface MonitorBrokerRequestRow extends QueryResultRow {
   lease_token: string;
 }
 
+function persistedRegistrationConfiguration(value: unknown) {
+  return HistoricalRepositoryRegistrationConfigurationContract.parse(value);
+}
+
 function registration(row: RegistrationRow): RepositoryRegistration {
   return {
     id: row.id,
@@ -166,7 +176,7 @@ function registration(row: RegistrationRow): RepositoryRegistration {
     issueMonitorEnabled: row.issue_monitor_enabled,
     prMonitorEnabled: row.pr_monitor_enabled,
     executionEnabled: row.execution_enabled,
-    configuration: row.configuration,
+    configuration: persistedRegistrationConfiguration(row.configuration),
     version: Number(row.version),
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -189,14 +199,13 @@ function job(row: JobRow): JobEnvelope {
   };
 }
 
-function releaseRecord(row: ReleaseRow): ReleaseRecord {
+function releaseRecordBase(row: ReleaseRow): Omit<ReleaseRecord, 'policy'> {
   return {
     id: row.id,
     registrationId: row.registration_id,
     releaseKey: row.release_key,
     repository: row.repository,
     issueNumber: Number(row.issue_number),
-    policy: ReleasePolicyContract.parse(row.policy),
     status: row.status,
     pullRequest: row.pull_request_number === null
       ? null
@@ -207,6 +216,16 @@ function releaseRecord(row: ReleaseRow): ReleaseRecord {
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     completedAt: row.completed_at?.toISOString() ?? null,
+  };
+}
+
+function releaseRecord(row: ReleaseRow): ReleaseRecord {
+  return {
+    ...releaseRecordBase(row),
+    // Persisted v2/v3 policies are immutable history. Every writer remains on
+    // ReleasePolicyContract, while every row reader accepts the historical
+    // repository-grader namespace so upgrades cannot strand active recovery.
+    policy: HistoricalReleasePolicyContract.parse(row.policy),
   };
 }
 
@@ -337,7 +356,9 @@ async function releaseReceipts(
     [releaseId, includeMergeIntent],
   );
   return result.rows.map((row) => ({
-    receipt: DurableReleaseReceiptContract.parse(row.payload),
+    // Historical grade aliases are accepted only while decoding durable rows.
+    // recordReleaseReceipt below continues to enforce the canonical contract.
+    receipt: HistoricalDurableReleaseReceiptContract.parse(row.payload),
     publishedAt: row.published_at?.toISOString() ?? null,
   }));
 }
@@ -825,7 +846,9 @@ export class PostgresControlStore {
   }
 
   /** Assemble and independently certify one completed release from durable records only. */
-  async exportReleaseEvidence(releaseId: string): Promise<LiveReleaseReceiptEvidenceV2> {
+  async exportReleaseEvidence(
+    releaseId: string,
+  ): Promise<PersistedLiveReleaseReceiptEvidence> {
     const parsedId = z.string().uuid().parse(releaseId);
     return transaction(this.pool, async (client) => {
       await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -847,9 +870,13 @@ export class PostgresControlStore {
       }
       const entries = await releaseReceipts(client, release.id, true);
       const receipts = entries.map((entry) => entry.receipt);
-      const one = <K extends DurableReleaseReceipt['kind']>(kind: K) =>
+      const one = <K extends HistoricalDurableReleaseReceipt['kind']>(kind: K) =>
         receipts.find((receipt) => receipt.kind === kind);
       const requirementsAuthority = one('requirements-authority');
+      const canonicalV4 = requirementsAuthority !== undefined
+        && ReleasePolicyContract.safeParse(release.policy).success
+        && receipts.filter((receipt) => receipt.kind === 'grade')
+          .every((receipt) => ReleaseGradeReceiptContract.safeParse(receipt).success);
       const artifacts = await client.query<ReleaseArtifactRow>(
         `SELECT * FROM agentops_control.release_artifacts
           WHERE release_id = $1 ORDER BY recorded_at, id`,
@@ -857,8 +884,9 @@ export class PostgresControlStore {
       );
       const evidence = LiveReleaseReceiptEvidenceContract.parse({
         // Merged releases from before schema 17 remain historical v2 evidence.
-        // Every release with frozen requirements exports the canonical v4 wire.
-        schemaVersion: requirementsAuthority ? '4.0' : '2.0',
+        // Historical v3 policies/grade aliases stay on their immutable wire;
+        // every canonical release with frozen requirements exports v4.
+        schemaVersion: canonicalV4 ? '4.0' : requirementsAuthority ? '3.0' : '2.0',
         release: {
           id: release.id,
           repository: release.repository,
@@ -898,9 +926,14 @@ export class PostgresControlStore {
           : 'passed',
       });
       assertLiveReleaseReceiptEvidence(evidence);
-      return requirementsAuthority
-        ? evidence
-        : legacyLiveReleaseReceiptEvidenceWire(evidence) as LiveReleaseReceiptEvidenceV2;
+      return canonicalV4
+        ? PersistedLiveReleaseReceiptEvidenceContract.parse(evidence)
+        : PersistedLiveReleaseReceiptEvidenceContract.parse(
+          legacyLiveReleaseReceiptEvidenceWire(
+            evidence,
+            requirementsAuthority ? '3.0' : '2.0',
+          ),
+        );
     });
   }
 
@@ -2586,7 +2619,7 @@ export class PostgresControlStore {
               issueMonitorEnabled: row.issue_monitor_enabled!,
               prMonitorEnabled: row.pr_monitor_enabled!,
               executionEnabled: row.execution_enabled!,
-              configuration: row.configuration ?? {},
+              configuration: persistedRegistrationConfiguration(row.configuration ?? {}),
               version: Number(row.current_version),
               createdAt: row.created_at!.toISOString(),
               updatedAt: row.updated_at!.toISOString(),

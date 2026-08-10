@@ -181,6 +181,57 @@ integration('PostgreSQL control store', () => {
     return id;
   }
 
+  it('keeps historical Registration grader aliases decode-only', async () => {
+    const store = await migratedStore();
+    const created = await registration(store, '-historical-policy');
+    const historicalConfiguration = {
+      releaseEvidence: {
+        authority: 'human-ready-allowed',
+        requiredGateSignals: [
+          { source: 'repository-grader', name: 'contracts' },
+          { source: 'repository-grader', name: 'contracts' },
+        ],
+        requiredReviewPerspectives: ['security', 'security'],
+        minimumHeadEpochs: 1,
+      },
+    };
+    await expect(store.createRegistration({
+      repository: 'mrbaron3/control-store-historical-writer',
+      configuration: historicalConfiguration,
+    })).rejects.toThrow();
+
+    await pool.query(
+      `UPDATE agentops_control.repository_registrations
+          SET configuration = $2
+        WHERE id = $1`,
+      [created.id, historicalConfiguration],
+    );
+    await expect(store.getRegistration(created.id)).resolves.toMatchObject({
+      id: created.id,
+      configuration: historicalConfiguration,
+    });
+    await expect(store.listRegistrations()).resolves.toContainEqual(
+      expect.objectContaining({
+        id: created.id,
+        configuration: historicalConfiguration,
+      }),
+    );
+    await enqueueRunner(store, created.id, created.version, '-historical-policy');
+    const lease = await store.acquireLease({
+      workerId: 'runner-historical-policy',
+      durationMs: 10_000,
+    });
+    expect(lease).not.toBeNull();
+    await expect(store.assertExecutionGuard({
+      token: lease!.token,
+      workerId: 'runner-historical-policy',
+      boundary: 'provider',
+    })).resolves.toMatchObject({
+      ok: true,
+      registration: { configuration: historicalConfiguration },
+    });
+  });
+
   it('atomically fences racing enqueue and lease acquisition when drain commits', async () => {
     const store = await migratedStore();
     const registered = await registration(store, '-mode-fence');

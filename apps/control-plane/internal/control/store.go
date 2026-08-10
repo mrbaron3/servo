@@ -26,25 +26,71 @@ const (
 )
 
 type Store struct {
-	pool                    *pgxpool.Pool
-	legacyForwarderDisabled bool
+	pool     *pgxpool.Pool
+	topology RuntimeTopology
 }
 
-// DisableLegacyForwarder removes the compatibility-only CLI forwarder from
-// supervision and status projection. It must be configured before the store
-// is shared with long-running control-plane goroutines.
-func (store *Store) DisableLegacyForwarder() {
-	store.legacyForwarderDisabled = true
+// RuntimeTopology is the immutable authority for the components managed by one
+// control-plane process. Its zero value manages no components so omission
+// cannot silently activate the credential-bearing legacy forwarder.
+type RuntimeTopology string
+
+const (
+	RuntimeTopologyLegacyCLIForwarder   RuntimeTopology = "legacy-cli-forwarder"
+	RuntimeTopologySignedWebhookIngress RuntimeTopology = "signed-webhook-ingress"
+)
+
+// ManagesComponent reports whether this topology owns a runtime component.
+func (topology RuntimeTopology) ManagesComponent(component string) bool {
+	switch component {
+	case ComponentIssueMonitor, ComponentPRMonitor, ComponentExecution, ComponentQueue:
+		return topology == RuntimeTopologyLegacyCLIForwarder ||
+			topology == RuntimeTopologySignedWebhookIngress
+	case ComponentForwarder:
+		return topology == RuntimeTopologyLegacyCLIForwarder
+	default:
+		return false
+	}
 }
 
 // ManagesComponent reports whether this control-store instance exposes a
-// component in its runtime topology. The legacy default remains enabled for
-// compatibility callers that construct Store directly.
+// component in its explicitly selected runtime topology.
 func (store *Store) ManagesComponent(component string) bool {
-	return component != ComponentForwarder || !store.legacyForwarderDisabled
+	return store.topology.ManagesComponent(component)
 }
 
 func OpenStore(ctx context.Context, databaseURL, migrationRoot string) (*Store, error) {
+	return nil, fmt.Errorf(
+		"runtime topology is required; use OpenStoreWithTopology or " +
+			"OpenLegacyCLIForwarderStore explicitly",
+	)
+}
+
+// OpenLegacyCLIForwarderStore is the explicit compatibility-oracle boundary.
+// Standard production must use RuntimeTopologySignedWebhookIngress instead.
+func OpenLegacyCLIForwarderStore(
+	ctx context.Context,
+	databaseURL, migrationRoot string,
+) (*Store, error) {
+	return OpenStoreWithTopology(
+		ctx,
+		databaseURL,
+		migrationRoot,
+		RuntimeTopologyLegacyCLIForwarder,
+	)
+}
+
+// OpenStoreWithTopology binds one immutable runtime topology when the Store is
+// created so supervision, execution, and status projection share one authority.
+func OpenStoreWithTopology(
+	ctx context.Context,
+	databaseURL, migrationRoot string,
+	topology RuntimeTopology,
+) (*Store, error) {
+	if topology != RuntimeTopologyLegacyCLIForwarder &&
+		topology != RuntimeTopologySignedWebhookIngress {
+		return nil, fmt.Errorf("unsupported runtime topology %q", topology)
+	}
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("%w: parse database URL: %v", ErrStoreUnavailable, err)
@@ -55,7 +101,7 @@ func OpenStore(ctx context.Context, databaseURL, migrationRoot string) (*Store, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: connect: %v", ErrStoreUnavailable, err)
 	}
-	store := &Store{pool: pool}
+	store := &Store{pool: pool, topology: topology}
 	if err := store.VerifySchema(ctx, migrationRoot); err != nil {
 		pool.Close()
 		return nil, err

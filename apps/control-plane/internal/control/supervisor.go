@@ -11,6 +11,7 @@ import (
 
 type SupervisionStore interface {
 	ListRegistrations(context.Context) ([]Registration, error)
+	ManagesComponent(string) bool
 	UpsertActualState(
 		context.Context,
 		Registration,
@@ -23,10 +24,6 @@ type SupervisionStore interface {
 
 type gateEscalationStore interface {
 	ReconcileGateEscalations(context.Context, time.Time) (int64, error)
-}
-
-type componentTopology interface {
-	ManagesComponent(string) bool
 }
 
 type ComponentRunner interface {
@@ -113,8 +110,7 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context) error {
 			ComponentPRMonitor,
 			ComponentForwarder,
 		} {
-			if topology, supported := supervisor.store.(componentTopology); supported &&
-				!topology.ManagesComponent(component) {
+			if !supervisor.store.ManagesComponent(component) {
 				continue
 			}
 			if registration.Desired(component) {

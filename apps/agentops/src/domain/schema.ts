@@ -65,6 +65,8 @@ export type GateResult = z.infer<typeof GateResult>;
 export { HARD_GATE_SIGNAL_NAMES } from '../graders/gate-names.js';
 export const HardGateSignalName = z.enum(HARD_GATE_SIGNAL_NAMES);
 export type HardGateSignalName = z.infer<typeof HardGateSignalName>;
+export const HardGateResults = z.partialRecord(HardGateSignalName, GateResult);
+export type HardGateResults = z.infer<typeof HardGateResults>;
 
 // --- the Issue Contract ----------------------------------------------------
 
@@ -868,7 +870,7 @@ const EvalRunRecord = z.object({
   promptVersion: z.string().default('v0'),
   graderVersion: z.string().default('v0'),
   verdict: Verdict,
-  hardGates: z.record(z.string(), GateResult).default({}),
+  hardGates: HardGateResults.default({}),
   findings: z.array(Finding).default([]),
   scores: Scores,
   overall: z.number().min(0).max(1),

@@ -5,7 +5,11 @@ import fs from 'node:fs';
 import { Store } from '../src/store/store.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { Issue, type AgentProvider } from '../src/domain/schema.js';
+// @ts-expect-error Stage 2 permanently removed the legacy GeneratorAgent alias.
+import type { GeneratorAgent } from '../src/domain/agent-runtime.js';
 import { pollable, isAiManaged } from '../src/pipeline/execution/guard.js';
+
+void (null as GeneratorAgent | null);
 
 function tmpStore(name: string): Store {
   const dir = path.join(os.tmpdir(), 'agentops-test', `${name}-${process.pid}`);

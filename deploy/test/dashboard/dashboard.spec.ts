@@ -3,7 +3,8 @@ import { expect, test, type Page } from '@playwright/test';
 async function bootstrap(page: Page): Promise<void> {
   await page.goto('/dashboard/bootstrap?token=dashboard-browser-bootstrap-token');
   await expect(page).toHaveURL('/');
-  await expect(page.getByRole('heading', { name: 'AgentOps Control' })).toBeVisible();
+  await expect(page).toHaveTitle('Servo Control');
+  await expect(page.getByRole('heading', { name: 'Servo Control' })).toBeVisible();
   await expect(page.locator('#mode')).toHaveText('MONITOR_ONLY');
   await expect(page.locator('#provenance')).toHaveText('mrbaron3/servo@aaaaaaaaaaaa');
 }
@@ -93,8 +94,27 @@ test('CRUD, desired/actual divergence, announcements, and same-origin network bo
     (await fetch('/v1/registrations?limit=200')).json()) as {
       items: Array<Record<string, unknown>>;
       [key: string]: unknown;
-    };
+  };
   const deliveryId = '00000000-0000-4000-8000-000000000015';
+  const lifecycleDeliveries = [{
+    id: '00000000-0000-4000-8000-000000000016',
+    mode: 'MONITOR_ONLY',
+    ignoredReason: 'lifecycle_monitor_only',
+    recovery: 'agentopsctl start --mode ACTIVE --build',
+  }, {
+    id: '00000000-0000-4000-8000-000000000017',
+    mode: 'OFF',
+    ignoredReason: 'lifecycle_off',
+    recovery: 'agentopsctl start --mode MONITOR_ONLY --build',
+    alternative: 'agentopsctl start --mode ACTIVE --build',
+  }, {
+    id: '00000000-0000-4000-8000-000000000018',
+    mode: 'DRAINING',
+    ignoredReason: 'lifecycle_draining',
+    recovery: 'agentopsctl start --mode ACTIVE --build',
+    status: 'active-leases=0 / in-flight-attempts=0',
+    persists: '排出完了後も DRAINING は維持されます',
+  }] as const;
   const targetItem = snapshot.items.find((item) =>
     (item.registration as Record<string, unknown>).repository === 'example/browser-control')!;
   // The remainder of this fixture isolates the just-created Registration; the
@@ -282,6 +302,25 @@ test('CRUD, desired/actual divergence, announcements, and same-origin network bo
       }),
     });
   });
+  for (const lifecycleDelivery of lifecycleDeliveries) {
+    await page.route(new RegExp(`/v1/deliveries/${lifecycleDelivery.id}$`), async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: lifecycleDelivery.id,
+          status: 'ignored',
+          routeAttempts: 1,
+          registrationId: registration.id,
+          registrationVersion: registration.version,
+          lastError: null,
+          ignoredReason: lifecycleDelivery.ignoredReason,
+          updatedAt: '2026-07-26T00:00:00Z',
+          retryAttempts: [],
+        }),
+      });
+    });
+  }
   await page.route('**/v1/registrations?limit=200&pageToken=expired-snapshot', async (route) => {
     await route.fulfill({
       status: 400,
@@ -335,12 +374,64 @@ test('CRUD, desired/actual divergence, announcements, and same-origin network bo
   await expect(page.getByRole('alert')).toContainText('ページsnapshot');
   await expect(card.getByRole('button', { name: '編集' })).toBeEnabled();
   await card.getByText('配送・ジョブ詳細', { exact: true }).click();
+  await expect(card.getByRole('list', { name: '最近の失敗・無視配送' })).toBeVisible();
   await expect(card).toContainText('Issue cursor advanced');
   await expect(card).toContainText('PR cursor advanced');
   await expect(card).not.toContainText('Issue poll');
   await card.getByRole('button', { name: '確認・再試行' }).click();
   await expect(page.locator('#retry-delivery')).toBeDisabled();
   await page.locator('#delivery-dialog [data-delivery-close]').last().click();
+  for (const lifecycleDelivery of lifecycleDeliveries) {
+    snapshot.mode = lifecycleDelivery.mode;
+    targetItem.mode = lifecycleDelivery.mode;
+    targetItem.recentDeliveryFailures = [{
+      id: lifecycleDelivery.id,
+      deliveryKey: `browser-${lifecycleDelivery.mode.toLowerCase()}-delivery`,
+      event: 'issues',
+      action: 'opened',
+      status: 'ignored',
+      ignoredReason: lifecycleDelivery.ignoredReason,
+      lastError: null,
+      routeAttempts: 1,
+      registrationVersion: registration.version,
+      updatedAt: '2026-07-26T00:00:00Z',
+    }];
+    await page.getByRole('button', { name: '再取得' }).click();
+    await expect(page.locator('#mode')).toHaveText(lifecycleDelivery.mode);
+    await expect(page.locator('#live')).toContainText(
+      `Operating Mode ${lifecycleDelivery.mode}`,
+    );
+    await card.getByText('配送・ジョブ詳細', { exact: true }).click();
+    await card.locator(`[data-delivery="${lifecycleDelivery.id}"]`).click();
+    await expect(page.locator('#delivery-title')).toBeFocused();
+    await expect(page.locator('#delivery-detail')).toContainText(lifecycleDelivery.mode);
+    await expect(page.locator('#delivery-detail')).toContainText(lifecycleDelivery.recovery);
+    if ('alternative' in lifecycleDelivery) {
+      await expect(page.locator('#delivery-detail')).toContainText(lifecycleDelivery.alternative);
+    }
+    if ('status' in lifecycleDelivery) {
+      await expect(page.locator('#delivery-detail')).toContainText(lifecycleDelivery.status);
+    }
+    if ('persists' in lifecycleDelivery) {
+      await expect(page.locator('#delivery-detail')).toContainText(lifecycleDelivery.persists);
+    }
+    await expect(page.locator('#retry-delivery')).toBeDisabled();
+    await page.locator('#delivery-dialog [data-delivery-close]').last().click();
+  }
+  snapshot.mode = 'MONITOR_ONLY';
+  targetItem.mode = 'MONITOR_ONLY';
+  targetItem.recentDeliveryFailures = [{
+    id: deliveryId,
+    deliveryKey: 'browser-failed-delivery',
+    event: 'issues',
+    action: 'opened',
+    status: 'failed',
+    ignoredReason: null,
+    lastError: 'transient delivery failure',
+    routeAttempts: 2,
+    registrationVersion: registration.version,
+    updatedAt: '2026-07-26T00:00:00Z',
+  }];
   registration.executionEnabled = true;
   await page.getByRole('button', { name: '再取得' }).click();
   await card.getByText('配送・ジョブ詳細', { exact: true }).click();

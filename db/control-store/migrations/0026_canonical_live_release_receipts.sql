@@ -85,6 +85,79 @@ UPDATE agentops_control.release_receipt_outbox
 ALTER TABLE agentops_control.release_receipt_outbox
   ENABLE TRIGGER release_receipt_immutable;
 
+-- Fresh AI-triage promotions still call the private producer retained by
+-- migration 0016. Rewrite that producer as part of the wire migration so rows
+-- created after this migration cannot bypass the canonical receipt contract.
+DO $migration$
+DECLARE
+  definition text;
+  updated_definition text;
+BEGIN
+  SELECT pg_get_functiondef(
+    'agentops_control.promote_triage_release_new_identity(uuid,text,jsonb,text,text,jsonb)'
+      ::regprocedure
+  ) INTO definition;
+  updated_definition := replace(
+    definition,
+    'triage_invocation_id',
+    'triage_invocation_key'
+  );
+  updated_definition := replace(
+    updated_definition,
+    '  triage_invocation_key text;',
+    $declarations$  triage_invocation_key text;
+  triage_invocation_ref text;
+  triage_invocation_hash bytea;
+  triage_invocation_hex text;$declarations$
+  );
+  updated_definition := replace(
+    updated_definition,
+    '  authority_route := CASE',
+    $canonical$  IF triage_invocation_key IS NOT NULL THEN
+    triage_invocation_hash := sha256(
+      convert_to(durable_release_id::text, 'UTF8')
+      || decode('00', 'hex')
+      || convert_to(triage_invocation_key, 'UTF8')
+    );
+    triage_invocation_hex := encode(triage_invocation_hash, 'hex');
+    triage_invocation_ref := 'invocation:'
+      || substr(triage_invocation_hex, 1, 8) || '-'
+      || substr(triage_invocation_hex, 9, 4) || '-'
+      || '4' || substr(triage_invocation_hex, 14, 3) || '-'
+      || lpad(to_hex(
+        (get_byte(triage_invocation_hash, 8) & 63) | 128
+      ), 2, '0')
+      || substr(triage_invocation_hex, 19, 2) || '-'
+      || substr(triage_invocation_hex, 21, 12);
+  END IF;
+
+  authority_route := CASE$canonical$
+  );
+  updated_definition := replace(
+    updated_definition,
+    '''triageInvocationId'', triage_invocation_key',
+    '''triageInvocationRef'', triage_invocation_ref'
+  );
+  updated_definition := replace(
+    updated_definition,
+    '''invocationId'', triage_invocation_key',
+    $canonical$'invocationKey', triage_invocation_key,
+          'invocationRef', triage_invocation_ref$canonical$
+  );
+  IF updated_definition = definition
+     OR position('triage_invocation_id' IN updated_definition) <> 0
+     OR position('''triageInvocationId''' IN updated_definition) <> 0
+     OR position('''invocationId''' IN updated_definition) <> 0
+     OR position('''triageInvocationRef''' IN updated_definition) = 0
+     OR position('''invocationKey''' IN updated_definition) = 0
+     OR position('''invocationRef''' IN updated_definition) = 0
+     OR position('triage_invocation_hash := sha256(' IN updated_definition) = 0 THEN
+    RAISE EXCEPTION 'triage promotion receipt rewrite did not match migration 0017';
+  END IF;
+  EXECUTE updated_definition;
+END
+$migration$;
+
 ALTER FUNCTION agentops_control.record_release_receipt(jsonb)
   RENAME TO record_release_receipt_without_canonical_wire;
 REVOKE ALL ON FUNCTION

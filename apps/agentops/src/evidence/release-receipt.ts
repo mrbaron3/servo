@@ -126,15 +126,15 @@ function normalizeLiveReleaseEvidence(input: unknown): unknown {
 }
 
 /**
- * Serialize a canonical in-memory certificate back to the immutable v2 wire.
- * This is used only for releases that predate frozen requirements authority.
+ * Serialize a canonical in-memory certificate back to an immutable v2/v3 wire.
  * The old two-valued review field cannot preserve `needs_human`; that loss is
  * a property of the historical wire and is never used for new v4 evidence.
  */
 export function legacyLiveReleaseReceiptEvidenceWire(
   evidence: LiveReleaseReceiptEvidence,
+  schemaVersion: '2.0' | '3.0' = '2.0',
 ): unknown {
-  const legacyReceipt = (receipt: DurableReleaseReceipt): unknown => {
+  const legacyReceipt = (receipt: HistoricalDurableReleaseReceipt): unknown => {
     if (receipt.kind === 'authority'
       && receipt.route === 'ai-triage-then-human-ready') {
       const { triageInvocationRef, ...rest } = receipt;
@@ -183,10 +183,13 @@ export function legacyLiveReleaseReceiptEvidenceWire(
   const { pullRequestNumber, ...release } = evidence.release;
   return {
     ...evidence,
-    schemaVersion: '2.0',
+    schemaVersion,
     release: { ...release, pullRequest: pullRequestNumber },
     receipts: {
       authority: legacyReceipt(evidence.receipts.authority),
+      ...(schemaVersion === '3.0' && evidence.receipts.requirementsAuthority
+        ? { requirementsAuthority: legacyReceipt(evidence.receipts.requirementsAuthority) }
+        : {}),
       runtime: evidence.receipts.runtime.map(legacyReceipt),
       builds: evidence.receipts.builds.map(legacyReceipt),
       grades: evidence.receipts.grades.map(legacyReceipt),
@@ -198,6 +201,28 @@ export function legacyLiveReleaseReceiptEvidenceWire(
     },
   };
 }
+const GitHubCheckSignalContract = z.object({
+  source: z.literal('github-check'),
+  name: BoundedName,
+}).strict();
+const RepositoryGraderSignalContract = z.object({
+  source: z.literal('repository-grader'),
+  name: z.enum(HARD_GATE_SIGNAL_NAMES),
+}).strict();
+const HistoricalRepositoryGraderSignalContract = z.object({
+  source: z.literal('repository-grader'),
+  name: BoundedName,
+}).strict();
+
+/** Canonical source-discriminated signal contract used by every new writer. */
+export const ReleaseGateSignalContract = z.discriminatedUnion('source', [
+  RepositoryGraderSignalContract,
+  GitHubCheckSignalContract,
+]);
+const HistoricalReleaseGateSignalContract = z.discriminatedUnion('source', [
+  HistoricalRepositoryGraderSignalContract,
+  GitHubCheckSignalContract,
+]);
 
 const ReceiptBase = z.object({
   receiptId: Uuid,
@@ -275,14 +300,23 @@ export type ReleaseBuildReceipt = z.infer<typeof ReleaseBuildReceiptContract>;
 export const ReleaseGradeReceiptContract = ReceiptBase.extend({
   kind: z.literal('grade'),
   head: Head,
-  signal: z.object({
-    source: z.enum(['repository-grader', 'github-check']),
-    name: BoundedName,
-  }).strict(),
+  signal: ReleaseGateSignalContract,
   status: z.literal('passed'),
   detailsDigest: Digest,
 }).strict();
 export type ReleaseGradeReceipt = z.infer<typeof ReleaseGradeReceiptContract>;
+
+/** Decode-only grade receipt for immutable v2/v3 evidence written before Stage 2. */
+export const HistoricalReleaseGradeReceiptContract = ReceiptBase.extend({
+  kind: z.literal('grade'),
+  head: Head,
+  signal: HistoricalReleaseGateSignalContract,
+  status: z.literal('passed'),
+  detailsDigest: Digest,
+}).strict();
+export type HistoricalReleaseGradeReceipt = z.infer<
+  typeof HistoricalReleaseGradeReceiptContract
+>;
 
 const CanonicalReleaseReviewReceiptContract = ReceiptBase.extend({
   kind: z.literal('review'),
@@ -425,24 +459,149 @@ export const DurableReleaseReceiptContract = z.union([
 ]);
 export type DurableReleaseReceipt = z.infer<typeof DurableReleaseReceiptContract>;
 
+const HistoricalAiTriageAuthority = ReceiptBase.extend({
+  kind: z.literal('authority'),
+  route: z.literal('ai-triage-then-human-ready'),
+  actor: HumanActor,
+  readyLabel: BoundedName,
+  readyAt: Timestamp,
+  triageInvocationId: BoundedName,
+  triageCompletedAt: Timestamp,
+  sourceDigest: Sha256,
+  decision: z.object({
+    schemaVersion: z.literal(1),
+    readiness: z.literal('ready_candidate'),
+  }).strict(),
+}).strict();
+const HistoricalReleaseAuthorityReceiptContract = z.discriminatedUnion('route', [
+  HumanReadyAuthority,
+  HistoricalAiTriageAuthority,
+]);
+const HistoricalReleaseBuildReceiptContract = ReceiptBase.extend({
+  kind: z.literal('build'),
+  head: Head,
+  parentHead: Head.nullable(),
+  invocationId: BoundedName,
+  role: z.enum(['generator', 'repair']),
+}).strict();
+const HistoricalReleaseReviewReceiptContract = ReceiptBase.extend({
+  kind: z.literal('review'),
+  head: Head,
+  headEpoch: z.number().int().positive().max(1_024),
+  perspective: BoundedName,
+  invocationId: BoundedName,
+  verdict: z.enum(['approved', 'findings']),
+  findings: z.array(z.object({
+    findingId: BoundedName,
+    lineage: z.enum(['new', 'persisted']),
+  }).strict()).max(1_024),
+}).strict();
+const HistoricalReleaseRuntimeReceiptContract = ReceiptBase.extend({
+  kind: z.literal('runtime-provenance'),
+  consumer: ReleaseRuntimeConsumerContract,
+  environment: ReleaseRuntimeEnvironmentContract,
+  invocations: z.array(z.object({
+    invocationId: BoundedName,
+    invocationKey: BoundedName.optional(),
+    role: z.enum(['triage', 'planning', 'ui-design', 'generator', 'repair', 'reviewer']),
+    provider: BoundedName,
+    model: ProviderModelSelectionContract,
+    head: Head.optional(),
+  }).strict()).min(1).max(512),
+}).strict();
+const HistoricalReleaseMergeIntentReceiptContract = ReceiptBase.extend({
+  kind: z.literal('merge-intent'),
+  pullRequest: z.number().int().positive().max(2_147_483_647),
+  expectedHead: Head,
+  observedPrHead: Head,
+}).strict();
+const HistoricalReleaseMergeReceiptContract = ReceiptBase.extend({
+  kind: z.literal('merge'),
+  pullRequest: z.number().int().positive().max(2_147_483_647),
+  expectedHead: Head,
+  observedPrHead: Head,
+  mergeSha: Head,
+  actor: BoundedName,
+  issueState: z.literal('CLOSED'),
+  issueStateReason: z.literal('COMPLETED'),
+  mergeReachableFromDefaultBranch: z.literal(true),
+  mergedAt: Timestamp,
+}).strict();
+
+/** Decode durable rows written before canonical grader names were enforced. */
+export const HistoricalDurableReleaseReceiptContract = z.union([
+  ReleaseAuthorityReceiptContract,
+  ReleaseRequirementsAuthorityReceiptContract,
+  ReleaseBuildReceiptContract,
+  HistoricalReleaseGradeReceiptContract,
+  ReleaseReviewReceiptContract,
+  ReleaseFindingResolutionReceiptContract,
+  ReleaseRuntimeReceiptContract,
+  ReleaseMergeIntentReceiptContract,
+  ReleaseMergeReceiptContract,
+  ReleaseInterventionReceiptContract,
+]);
+export type HistoricalDurableReleaseReceipt = z.infer<
+  typeof HistoricalDurableReleaseReceiptContract
+>;
+
+const RequiredReviewPerspectivesContract = z.array(z.enum(REVIEW_PERSPECTIVE_KEYS))
+  .min(2)
+  .max(REVIEW_PERSPECTIVE_KEYS.length)
+  .superRefine((perspectives, context) => {
+    const seen = new Set<string>();
+    perspectives.forEach((perspective, index) => {
+      if (seen.has(perspective)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index],
+          message: 'required review perspectives must be unique',
+        });
+      }
+      seen.add(perspective);
+    });
+  });
+
+const HistoricalRequiredReviewPerspectivesContract = z
+  .array(z.enum(REVIEW_PERSPECTIVE_KEYS))
+  .min(2)
+  .max(REVIEW_PERSPECTIVE_KEYS.length);
+
 export const ReleasePolicyContract = z.object({
   authority: z.enum(['human-ready-allowed', 'ai-triage-required']),
-  requiredGateSignals: z.array(z.discriminatedUnion('source', [
-    z.object({
-      source: z.literal('repository-grader'),
-      name: z.enum(HARD_GATE_SIGNAL_NAMES),
-    }).strict(),
-    z.object({
-      source: z.literal('github-check'),
-      name: BoundedName,
-    }).strict(),
-  ])).min(1).max(64),
-  requiredReviewPerspectives: z.array(z.enum(REVIEW_PERSPECTIVE_KEYS))
-    .min(2)
-    .max(REVIEW_PERSPECTIVE_KEYS.length),
+  requiredGateSignals: z.array(ReleaseGateSignalContract).min(1).max(64)
+    .superRefine((signals, context) => {
+      const seen = new Set<string>();
+      signals.forEach((signal, index) => {
+        const key = `${signal.source}:${signal.name}`;
+        if (seen.has(key)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index],
+            message: 'required gate signals must be unique by source and name',
+          });
+        }
+        seen.add(key);
+      });
+    }),
+  requiredReviewPerspectives: RequiredReviewPerspectivesContract,
   minimumHeadEpochs: z.number().int().positive().max(32),
 }).strict();
 export type ReleasePolicy = z.infer<typeof ReleasePolicyContract>;
+
+/**
+ * Decode-only persisted policy; grader names and requirement-array uniqueness
+ * were historically looser. New writers use ReleasePolicyContract above.
+ */
+export const HistoricalReleasePolicyContract = z.object({
+  authority: z.enum(['human-ready-allowed', 'ai-triage-required']),
+  requiredGateSignals: z.array(HistoricalReleaseGateSignalContract).min(1).max(64),
+  requiredReviewPerspectives: HistoricalRequiredReviewPerspectivesContract,
+  minimumHeadEpochs: z.number().int().positive().max(32),
+}).strict();
+export type HistoricalReleasePolicy = z.infer<
+  typeof HistoricalReleasePolicyContract
+>;
 
 export const ReleaseArtifactContract = z.object({
   kind: BoundedName,
@@ -455,62 +614,151 @@ export const ReleaseArtifactContract = z.object({
 }).strict();
 export type ReleaseArtifact = z.infer<typeof ReleaseArtifactContract>;
 
-const CanonicalLiveReleaseReceiptEvidenceContract = z.object({
-  schemaVersion: z.enum(['2.0', '3.0', '4.0']),
-  release: z.object({
-    id: Uuid,
-    repository: Repository,
-    issueNumber: z.number().int().positive().max(2_147_483_647),
-    pullRequestNumber: z.number().int().positive().max(2_147_483_647),
-    finalHead: Head,
-    mergeSha: Head,
-    createdAt: Timestamp,
-    completedAt: Timestamp,
-  }).strict(),
-  policy: ReleasePolicyContract,
-  receipts: z.object({
-    authority: ReleaseAuthorityReceiptContract,
-    requirementsAuthority: ReleaseRequirementsAuthorityReceiptContract.optional(),
-    runtime: z.array(ReleaseRuntimeReceiptContract).min(1).max(256),
-    builds: z.array(ReleaseBuildReceiptContract).min(1).max(256),
-    grades: z.array(ReleaseGradeReceiptContract).min(1).max(256),
-    reviews: z.array(ReleaseReviewReceiptContract).min(2).max(512),
-    findingResolutions: z.array(ReleaseFindingResolutionReceiptContract).max(1_024),
-    mergeIntent: ReleaseMergeIntentReceiptContract,
-    merge: ReleaseMergeReceiptContract,
-    interventions: z.array(ReleaseInterventionReceiptContract).max(256),
-  }).strict(),
+const ReleaseEvidenceRecord = z.object({
+  id: Uuid,
+  repository: Repository,
+  issueNumber: z.number().int().positive().max(2_147_483_647),
+  pullRequestNumber: z.number().int().positive().max(2_147_483_647),
+  finalHead: Head,
+  mergeSha: Head,
+  createdAt: Timestamp,
+  completedAt: Timestamp,
+}).strict();
+const ReleaseReceiptCollection = {
+  authority: ReleaseAuthorityReceiptContract,
+  runtime: z.array(ReleaseRuntimeReceiptContract).min(1).max(256),
+  builds: z.array(ReleaseBuildReceiptContract).min(1).max(256),
+  reviews: z.array(ReleaseReviewReceiptContract).min(2).max(512),
+  findingResolutions: z.array(ReleaseFindingResolutionReceiptContract).max(1_024),
+  mergeIntent: ReleaseMergeIntentReceiptContract,
+  merge: ReleaseMergeReceiptContract,
+  interventions: z.array(ReleaseInterventionReceiptContract).max(256),
+};
+const ReleaseEvidenceEnvelope = {
+  release: ReleaseEvidenceRecord,
   artifacts: z.array(ReleaseArtifactContract).min(1).max(256),
   result: z.enum(['passed', 'passed-with-interventions']),
-}).strict().superRefine((value, context) => {
-  if (value.schemaVersion !== '2.0' && !value.receipts.requirementsAuthority) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['receipts', 'requirementsAuthority'],
-      message: 'requirementsAuthority is required for release evidence v3+',
-    });
-  }
-  if (value.schemaVersion === '2.0' && value.receipts.requirementsAuthority) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['receipts', 'requirementsAuthority'],
-      message: 'requirementsAuthority requires release evidence v3',
-    });
-  }
-});
+};
+
+const NormalizedHistoricalLiveReleaseReceiptEvidenceV2Contract = z.object({
+  ...ReleaseEvidenceEnvelope,
+  schemaVersion: z.literal('2.0'),
+  policy: HistoricalReleasePolicyContract,
+  receipts: z.object({
+    ...ReleaseReceiptCollection,
+    requirementsAuthority: z.never().optional(),
+    grades: z.array(HistoricalReleaseGradeReceiptContract).min(1).max(256),
+  }).strict(),
+}).strict();
+
+const NormalizedHistoricalLiveReleaseReceiptEvidenceV3Contract = z.object({
+  ...ReleaseEvidenceEnvelope,
+  schemaVersion: z.literal('3.0'),
+  policy: HistoricalReleasePolicyContract,
+  receipts: z.object({
+    ...ReleaseReceiptCollection,
+    requirementsAuthority: ReleaseRequirementsAuthorityReceiptContract,
+    grades: z.array(HistoricalReleaseGradeReceiptContract).min(1).max(256),
+  }).strict(),
+}).strict();
+
+const LiveReleaseReceiptEvidenceV4Contract = z.object({
+  ...ReleaseEvidenceEnvelope,
+  schemaVersion: z.literal('4.0'),
+  policy: ReleasePolicyContract,
+  receipts: z.object({
+    ...ReleaseReceiptCollection,
+    requirementsAuthority: ReleaseRequirementsAuthorityReceiptContract,
+    grades: z.array(ReleaseGradeReceiptContract).min(1).max(256),
+  }).strict(),
+}).strict();
+
+const CanonicalLiveReleaseReceiptEvidenceContract = z.discriminatedUnion(
+  'schemaVersion',
+  [
+    NormalizedHistoricalLiveReleaseReceiptEvidenceV2Contract,
+    NormalizedHistoricalLiveReleaseReceiptEvidenceV3Contract,
+    LiveReleaseReceiptEvidenceV4Contract,
+  ],
+);
+
 export const LiveReleaseReceiptEvidenceContract = z.preprocess(
   normalizeLiveReleaseEvidence,
   CanonicalLiveReleaseReceiptEvidenceContract,
 );
-/** @deprecated Use LiveReleaseReceiptEvidenceContract. */
-export const LiveReleaseReceiptEvidenceV2Contract = LiveReleaseReceiptEvidenceContract;
 export type LiveReleaseReceiptEvidence = z.infer<
   typeof LiveReleaseReceiptEvidenceContract
 >;
-/** @deprecated Use LiveReleaseReceiptEvidence. */
-export type LiveReleaseReceiptEvidenceV2 = LiveReleaseReceiptEvidence;
 
-function receiptList(evidence: LiveReleaseReceiptEvidence): DurableReleaseReceipt[] {
+const HistoricalReleaseEvidenceRecord = z.object({
+  id: Uuid,
+  repository: Repository,
+  issueNumber: z.number().int().positive().max(2_147_483_647),
+  pullRequest: z.number().int().positive().max(2_147_483_647),
+  finalHead: Head,
+  mergeSha: Head,
+  createdAt: Timestamp,
+  completedAt: Timestamp,
+}).strict();
+const HistoricalReleaseReceiptCollection = {
+  authority: HistoricalReleaseAuthorityReceiptContract,
+  runtime: z.array(HistoricalReleaseRuntimeReceiptContract).min(1).max(256),
+  builds: z.array(HistoricalReleaseBuildReceiptContract).min(1).max(256),
+  reviews: z.array(HistoricalReleaseReviewReceiptContract).min(2).max(512),
+  findingResolutions: z.array(ReleaseFindingResolutionReceiptContract).max(1_024),
+  mergeIntent: HistoricalReleaseMergeIntentReceiptContract,
+  merge: HistoricalReleaseMergeReceiptContract,
+  interventions: z.array(ReleaseInterventionReceiptContract).max(256),
+};
+const HistoricalReleaseEvidenceEnvelope = {
+  release: HistoricalReleaseEvidenceRecord,
+  artifacts: z.array(ReleaseArtifactContract).min(1).max(256),
+  result: z.enum(['passed', 'passed-with-interventions']),
+};
+const HistoricalLiveReleaseReceiptEvidenceV2Contract = z.object({
+  ...HistoricalReleaseEvidenceEnvelope,
+  schemaVersion: z.literal('2.0'),
+  policy: HistoricalReleasePolicyContract,
+  receipts: z.object({
+    ...HistoricalReleaseReceiptCollection,
+    requirementsAuthority: z.never().optional(),
+    grades: z.array(HistoricalReleaseGradeReceiptContract).min(1).max(256),
+  }).strict(),
+}).strict();
+const HistoricalLiveReleaseReceiptEvidenceV3Contract = z.object({
+  ...HistoricalReleaseEvidenceEnvelope,
+  schemaVersion: z.literal('3.0'),
+  policy: HistoricalReleasePolicyContract,
+  receipts: z.object({
+    ...HistoricalReleaseReceiptCollection,
+    requirementsAuthority: ReleaseRequirementsAuthorityReceiptContract,
+    grades: z.array(HistoricalReleaseGradeReceiptContract).min(1).max(256),
+  }).strict(),
+}).strict();
+
+export const PersistedLiveReleaseReceiptEvidenceContract = z.discriminatedUnion(
+  'schemaVersion',
+  [
+    HistoricalLiveReleaseReceiptEvidenceV2Contract,
+    HistoricalLiveReleaseReceiptEvidenceV3Contract,
+    LiveReleaseReceiptEvidenceV4Contract,
+  ],
+);
+export type PersistedLiveReleaseReceiptEvidence = z.infer<
+  typeof PersistedLiveReleaseReceiptEvidenceContract
+>;
+
+/** @deprecated Use PersistedLiveReleaseReceiptEvidenceContract. */
+export const LiveReleaseReceiptEvidenceV2Contract =
+  PersistedLiveReleaseReceiptEvidenceContract;
+/** @deprecated Use PersistedLiveReleaseReceiptEvidence. */
+export type LiveReleaseReceiptEvidenceV2 = PersistedLiveReleaseReceiptEvidence;
+
+type SemanticDurableReleaseReceipt = HistoricalDurableReleaseReceipt;
+
+function receiptList(
+  evidence: LiveReleaseReceiptEvidence,
+): SemanticDurableReleaseReceipt[] {
   return [
     evidence.receipts.authority,
     ...(evidence.receipts.requirementsAuthority
@@ -556,7 +804,7 @@ export function liveReleaseReceiptSemanticErrors(input: unknown): string[] {
   const errors: string[] = [];
   const release = evidence.release;
   const all = receiptList(evidence);
-  const byId = new Map<string, DurableReleaseReceipt>();
+  const byId = new Map<string, SemanticDurableReleaseReceipt>();
 
   for (const receipt of all) {
     if (byId.has(receipt.receiptId)) {
@@ -688,10 +936,7 @@ export function liveReleaseReceiptSemanticErrors(input: unknown): string[] {
   if (!finalBuild) errors.push('release.finalHead must have a build receipt');
 
   const requiredSignals = evidence.policy.requiredGateSignals.map(signalKey);
-  if (new Set(requiredSignals).size !== requiredSignals.length) {
-    errors.push('policy.requiredGateSignals must be unique by source and name');
-  }
-  const finalGrades = new Map<string, ReleaseGradeReceipt>();
+  const finalGrades = new Map<string, HistoricalReleaseGradeReceipt>();
   for (const grade of evidence.receipts.grades) {
     const build = buildsByHead.get(grade.head);
     if (!build || !grade.causes.includes(build.receiptId)) {
@@ -783,9 +1028,6 @@ export function liveReleaseReceiptSemanticErrors(input: unknown): string[] {
     errors.push('review evidence has fewer head epochs than policy requires');
   }
   const requiredPerspectives = evidence.policy.requiredReviewPerspectives;
-  if (new Set(requiredPerspectives).size !== requiredPerspectives.length) {
-    errors.push('policy.requiredReviewPerspectives must be unique');
-  }
   const finalEpoch = epochByHead.get(release.finalHead);
   if (
     finalEpoch === undefined
@@ -931,8 +1173,8 @@ export function releasePreMergeSemanticErrors(input: {
   issueNumber: number;
   pullRequestNumber: number;
   expectedHead: string;
-  policy: ReleasePolicy;
-  receipts: readonly DurableReleaseReceipt[];
+  policy: HistoricalReleasePolicy;
+  receipts: readonly HistoricalDurableReleaseReceipt[];
 }): string[] {
   const errors: string[] = [];
   const authority = input.receipts.filter((receipt) => receipt.kind === 'authority');
@@ -1032,7 +1274,9 @@ export function releasePreMergeSemanticErrors(input: {
   };
   const mergedAt = new Date(Date.parse(completedAt) + 1).toISOString();
   const fullErrors = liveReleaseReceiptSemanticErrors({
-    schemaVersion: '4.0',
+    // Preflight also certifies immutable v3 policies/grade aliases. Receipt
+    // fields have already been normalized by the durable-row decoder.
+    schemaVersion: '3.0',
     release: {
       id: input.releaseId,
       repository: input.repository,

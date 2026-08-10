@@ -91,7 +91,7 @@ func runAdministrativeCommand(args []string) error {
 				"usage: agentops-control progress --repository owner/name [--issue N] [--limit 1..200]",
 			)
 		}
-		store, err := control.OpenStore(ctx, databaseURL, root)
+		store, err := openStandardControlStore(ctx, databaseURL, root)
 		if err != nil {
 			return err
 		}

@@ -22,6 +22,24 @@ import (
 	"github.com/mrbaron3/servo/apps/control-plane/internal/lifecycle"
 )
 
+// The standard OCI deployment has one topology authority shared by Store,
+// Supervisor, and ProductionRunner. GitHub credentials and gh remain runner-only.
+const standardRuntimeTopology = control.RuntimeTopologySignedWebhookIngress
+
+var openControlStoreWithTopology = control.OpenStoreWithTopology
+
+var openStandardControlStore = func(
+	ctx context.Context,
+	databaseURL, root string,
+) (*control.Store, error) {
+	return openControlStoreWithTopology(
+		ctx,
+		databaseURL,
+		root,
+		standardRuntimeTopology,
+	)
+}
+
 func main() {
 	if err := runCommand(os.Args[1:]); err != nil {
 		slog.Error("agentops-control failed closed", "error", err)
@@ -106,16 +124,15 @@ func run() error {
 	defer stop()
 	startupContext, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	store, err := control.OpenStore(startupContext, databaseURL, root)
+	store, err := openStandardControlStore(
+		startupContext,
+		databaseURL,
+		root,
+	)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	const signedWebhookIngressOnly = true
-	if signedWebhookIngressOnly {
-		store.DisableLegacyForwarder()
-	}
-
 	supervisorID := environment("AGENTOPS_SUPERVISOR_ID", hostname())
 	reconciliationInterval := durationEnvironment(
 		"AGENTOPS_RECONCILIATION_INTERVAL",
@@ -151,10 +168,7 @@ func run() error {
 		TransientRetry: 2 * time.Second,
 		ForwarderRetry: 2 * time.Second,
 		HealthInterval: reconciliationInterval,
-		// Webhook ingress is the signed HTTP API in the standard OCI
-		// topology. GitHub credentials and gh remain runner-only.
-		SignedWebhookIngressOnly: signedWebhookIngressOnly,
-		Log:                      log,
+		Log:            log,
 	}
 	supervisor := control.NewSupervisor(
 		store,

@@ -49,6 +49,11 @@ type fakeMonitorStore struct {
 	failActualAt int
 	currentMode  lifecycle.Mode
 	lifecycleErr error
+	topology     RuntimeTopology
+}
+
+func (store *fakeMonitorStore) ManagesComponent(component string) bool {
+	return store.topology.ManagesComponent(component)
 }
 
 func (store *fakeMonitorStore) LifecycleMode(context.Context) (lifecycle.Mode, error) {
@@ -381,6 +386,39 @@ func TestMonitorOnlyPersistsObservationWithoutEnqueue(t *testing.T) {
 	}
 }
 
+func TestMonitorFailsClosedWhenLifecycleAuthorityIsUnavailable(t *testing.T) {
+	store := &fakeMonitorStore{lifecycleErr: ErrStoreUnavailable}
+	polls := 0
+	runner := &ProductionRunner{
+		Store: store,
+		Source: fakeMonitorSource{
+			calls: &polls,
+			items: []WorkItem{{
+				Repository: "owner/repo", Kind: "issue", Number: 1,
+				UpdatedAt: time.Now(),
+			}},
+		},
+		SupervisorID: "test",
+	}
+	err := runner.pollOnce(context.Background(), Registration{
+		ID: "registration-1", Repository: "owner/repo", Enabled: true,
+		IssueMonitorEnabled: true, ExecutionEnabled: true, Version: 1,
+	}, "issue", ComponentIssueMonitor)
+	if !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("pollOnce() error = %v, want store unavailable", err)
+	}
+	if polls != 1 || store.enqueued != 0 || store.savedCursors != 0 ||
+		store.actualStates != 0 {
+		t.Fatalf(
+			"polls=%d enqueued=%d cursors=%d actual=%d",
+			polls,
+			store.enqueued,
+			store.savedCursors,
+			store.actualStates,
+		)
+	}
+}
+
 func TestMonitorOnlyObservationIsReplayedAfterActiveCutover(t *testing.T) {
 	store := &fakeMonitorStore{currentMode: lifecycle.ModeMonitorOnly}
 	polls := 0
@@ -531,7 +569,7 @@ func (command *fakeCommand) Start() error                       { return nil }
 func (command *fakeCommand) Wait() error                        { return command.wait }
 
 func TestForwarderRestartsAndPersistsBeforeContinuing(t *testing.T) {
-	store := &fakeMonitorStore{}
+	store := &fakeMonitorStore{topology: RuntimeTopologyLegacyCLIForwarder}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	commands := 0
@@ -621,13 +659,12 @@ func TestForwarderHeartbeatKeepsActualStateFresh(t *testing.T) {
 
 func TestPRIntentSignedWebhookIngressNeverExecutesControlSideGH(t *testing.T) {
 	t.Run("PR-INTENT credential-free signed webhook ingress", func(t *testing.T) {
-		store := &fakeMonitorStore{}
+		store := &fakeMonitorStore{topology: RuntimeTopologySignedWebhookIngress}
 		commands := 0
 		runner := &ProductionRunner{
-			Store:                    store,
-			SupervisorID:             "test",
-			SignedWebhookIngressOnly: true,
-			HealthInterval:           time.Millisecond,
+			Store:          store,
+			SupervisorID:   "test",
+			HealthInterval: time.Millisecond,
 			Command: func(context.Context, string, ...string) Command {
 				commands++
 				return nil
@@ -662,6 +699,7 @@ func TestForwarderStopsWhenHeartbeatCannotBePersisted(t *testing.T) {
 	store := &fakeMonitorStore{
 		actualError:  persistError,
 		failActualAt: 2,
+		topology:     RuntimeTopologyLegacyCLIForwarder,
 	}
 	commandCancelled := make(chan struct{})
 	factory := func(ctx context.Context, _ string, _ ...string) Command {

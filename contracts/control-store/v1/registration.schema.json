@@ -38,6 +38,23 @@
       "type": "boolean"
     },
     "configuration": {
+      "$ref": "#/$defs/historicalRegistrationConfiguration"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "historicalRegistrationConfiguration": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -46,78 +63,7 @@
           "default": "squash"
         },
         "releaseEvidence": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "authority",
-            "requiredGateSignals",
-            "requiredReviewPerspectives",
-            "minimumHeadEpochs"
-          ],
-          "properties": {
-            "authority": {
-              "enum": ["human-ready-allowed", "ai-triage-required"]
-            },
-            "requiredGateSignals": {
-              "type": "array",
-              "minItems": 1,
-              "maxItems": 64,
-              "items": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["source", "name"],
-                    "properties": {
-                      "source": { "const": "repository-grader" },
-                      "name": {
-                        "enum": [
-                          "build",
-                          "typecheck",
-                          "unit_tests",
-                          "api_tests",
-                          "grader_profile",
-                          "secrets_scan",
-                          "scope_check",
-                          "playwright"
-                        ]
-                      }
-                    }
-                  },
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["source", "name"],
-                    "properties": {
-                      "source": { "const": "github-check" },
-                      "name": { "type": "string", "minLength": 1, "maxLength": 128 }
-                    }
-                  }
-                ]
-              }
-            },
-            "requiredReviewPerspectives": {
-              "type": "array",
-              "minItems": 2,
-              "maxItems": 7,
-              "items": {
-                "enum": [
-                  "functionality",
-                  "codeQuality",
-                  "testQuality",
-                  "ux",
-                  "accessibility",
-                  "security",
-                  "type-design"
-                ]
-              }
-            },
-            "minimumHeadEpochs": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 32
-            }
-          }
+          "$ref": "#/$defs/historicalReleaseEvidencePolicy"
         },
         "gateTimeoutSeconds": {
           "type": "object",
@@ -134,17 +80,61 @@
         }
       }
     },
-    "version": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "createdAt": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "updatedAt": {
-      "type": "string",
-      "format": "date-time"
+    "historicalReleaseEvidencePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "requiredGateSignals",
+        "requiredReviewPerspectives",
+        "minimumHeadEpochs"
+      ],
+      "properties": {
+        "authority": {
+          "enum": ["human-ready-allowed", "ai-triage-required"]
+        },
+        "requiredGateSignals": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "name"],
+            "properties": {
+              "source": {
+                "enum": ["repository-grader", "github-check"]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            }
+          }
+        },
+        "requiredReviewPerspectives": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 7,
+          "items": {
+            "enum": [
+              "functionality",
+              "codeQuality",
+              "testQuality",
+              "ux",
+              "accessibility",
+              "security",
+              "type-design"
+            ]
+          }
+        },
+        "minimumHeadEpochs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        }
+      }
     }
   }
 }

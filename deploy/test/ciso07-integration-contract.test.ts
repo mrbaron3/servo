@@ -122,15 +122,18 @@ describe('CISO-07 integrated release source contracts', () => {
       }));
 
     const manager = read('apps/control-plane/cmd/agentopsctl/manager.go');
-    for (const target of [
-      'postgres',
-      'control',
-      'github-broker',
-      'triage',
-      'runner',
+    for (const [image, target] of [
+      ['PostgresImage', 'postgres'],
+      ['ControlImage', 'control'],
+      ['GitHubBrokerImage', 'github-broker'],
+      ['TriageImage', 'triage'],
+      ['RunnerImage', 'runner'],
     ]) {
-      expect(manager).toMatch(new RegExp(`BuildImage\\([\\s\\S]*?"${target}"`));
+      expect(manager).toMatch(new RegExp(
+        `BuildImage\\(\\s*ctx,\\s*manager\\.config\\.${image},\\s*"${target}",`,
+      ));
     }
+    expect(manager).not.toContain('"triage-runner"');
   });
 
   it('vendors the direct Node contract checker dependencies into the runner root', () => {

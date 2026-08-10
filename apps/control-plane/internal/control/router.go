@@ -15,6 +15,19 @@ import (
 
 var commitSHAPattern = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
 
+func inactiveLifecycleReason(mode lifecycle.Mode) (string, error) {
+	switch mode {
+	case lifecycle.ModeMonitorOnly:
+		return "lifecycle_monitor_only", nil
+	case lifecycle.ModeDraining:
+		return "lifecycle_draining", nil
+	case lifecycle.ModeOff:
+		return "lifecycle_off", nil
+	default:
+		return "", fmt.Errorf("unsupported lifecycle mode %q", mode)
+	}
+}
+
 type RouterStore interface {
 	LifecycleMode(context.Context) (lifecycle.Mode, error)
 	ClaimWebhook(context.Context, time.Duration) (*ClaimedDelivery, error)
@@ -155,11 +168,15 @@ func (router *Router) route(ctx context.Context, claim ClaimedDelivery) error {
 		return err
 	}
 	if mode != lifecycle.ModeActive {
+		reason, err := inactiveLifecycleReason(mode)
+		if err != nil {
+			return err
+		}
 		return router.Store.FinishWebhook(
 			ctx,
 			claim,
 			"ignored",
-			"monitor_only",
+			reason,
 		)
 	}
 	item, ok := workItemFromWebhook(claim)

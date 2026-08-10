@@ -8,6 +8,7 @@ import type {
   PR,
   RevisionCheck,
 } from '../domain/schema.js';
+import { HardGateSignalName } from '../domain/schema.js';
 import { findingOriginRef } from '../domain/finding-lineage.js';
 import type { GithubReleaseObservation } from '../pipeline/execution/pr-native.js';
 import type { Store } from '../store/store.js';
@@ -414,12 +415,17 @@ async function projectReleaseEvidence(
       && snapshot.headSha.toLowerCase() === head && snapshot.decision === 'approved',
   );
   for (const signal of input.release.policy.requiredGateSignals) {
+    const repositoryGate = HardGateSignalName.safeParse(signal.name);
     const facts = signal.source === 'github-check'
       ? input.githubChecks.find(
           (check) => check.name === signal.name && check.status === 'success',
         )
-      : finalRuns.map((run) => ({ run, status: run.hardGates[signal.name] }))
-          .find(({ status }) => status === 'pass');
+      : repositoryGate.success
+        ? finalRuns.map((run) => ({
+            run,
+            status: run.hardGates[repositoryGate.data],
+          })).find(({ status }) => status === 'pass')
+        : undefined;
     if (!facts) continue;
     const key = `grade:${signal.source}:${signal.name}:${head}`;
     if (receiptKeys.has(key)) continue;

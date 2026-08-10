@@ -3,7 +3,11 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import { describe, expect, it } from 'vitest';
 import { INTERVENTION_KINDS } from '../src/domain/schema.js';
 import {
-  LiveReleaseReceiptEvidenceV2Contract,
+  HistoricalReleaseGradeReceiptContract,
+  HistoricalReleasePolicyContract,
+  LiveReleaseReceiptEvidenceContract,
+  PersistedLiveReleaseReceiptEvidenceContract,
+  ReleaseGradeReceiptContract,
   ReleasePolicyContract,
   legacyLiveReleaseReceiptEvidenceWire,
   liveReleaseReceiptSemanticErrors,
@@ -23,6 +27,7 @@ const finalCorrectnessId = '50000000-0000-4000-8000-000000000004';
 const resolutionId = '60000000-0000-4000-8000-000000000000';
 const repositoryGradeId = '70000000-0000-4000-8000-000000000001';
 const githubCheckId = '70000000-0000-4000-8000-000000000002';
+const historicalGradeId = '70000000-0000-4000-8000-000000000003';
 const mergeIntentId = '75000000-0000-4000-8000-000000000000';
 const mergeId = '80000000-0000-4000-8000-000000000000';
 const firstHead = 'b'.repeat(40);
@@ -280,9 +285,61 @@ function evidence(): any {
   };
 }
 
+function historicalEvidence(schemaVersion: '2.0' | '3.0'): any {
+  const legacy = structuredClone(evidence());
+  legacy.schemaVersion = schemaVersion;
+  legacy.release.pullRequest = legacy.release.pullRequestNumber;
+  delete legacy.release.pullRequestNumber;
+  legacy.receipts.runtime.forEach((runtime: any) => {
+    runtime.invocations.forEach((invocation: any) => {
+      invocation.invocationId = invocation.invocationRef;
+      delete invocation.invocationRef;
+    });
+  });
+  legacy.receipts.builds.forEach((build: any) => {
+    build.invocationId = build.invocationRef;
+    delete build.invocationRef;
+  });
+  legacy.receipts.reviews.forEach((review: any) => {
+    review.invocationId = review.invocationRef;
+    review.verdict = review.verdict === 'approve' ? 'approved' : 'findings';
+    delete review.invocationRef;
+    delete review.hasFindings;
+  });
+  legacy.receipts.mergeIntent.pullRequest =
+    legacy.receipts.mergeIntent.pullRequestNumber;
+  delete legacy.receipts.mergeIntent.pullRequestNumber;
+  legacy.receipts.merge.pullRequest = legacy.receipts.merge.pullRequestNumber;
+  legacy.receipts.merge.issueState = 'CLOSED';
+  legacy.receipts.merge.issueStateReason = 'COMPLETED';
+  delete legacy.receipts.merge.pullRequestNumber;
+  delete legacy.receipts.merge.sourceIssueClosure;
+  if (schemaVersion === '2.0') {
+    delete legacy.receipts.requirementsAuthority;
+    for (const group of Object.values(legacy.receipts)) {
+      for (const receipt of Array.isArray(group) ? group : [group]) {
+        if (receipt && Array.isArray((receipt as any).causes)) {
+          (receipt as any).causes = (receipt as any).causes.filter(
+            (cause: string) => cause !== requirementsAuthorityId,
+          );
+        }
+      }
+    }
+  }
+  return legacy;
+}
+
 function compiled() {
   const schema = JSON.parse(fs.readFileSync(
     new URL('../../../contracts/live-release-receipt-v4.schema.json', import.meta.url),
+    'utf8',
+  ));
+  return new Ajv2020({ strict: true, allErrors: true }).compile(schema);
+}
+
+function compiledHistorical() {
+  const schema = JSON.parse(fs.readFileSync(
+    new URL('../../../contracts/live-release-receipt.schema.json', import.meta.url),
     'utf8',
   ));
   return new Ajv2020({ strict: true, allErrors: true }).compile(schema);
@@ -308,12 +365,95 @@ describe('release receipt evidence v4', () => {
       requiredGateSignals: [{ source: 'github-check', name: 'ci/custom' }],
     }).success).toBe(true);
 
-    const invalidPublishedEvidence = evidence();
-    invalidPublishedEvidence.policy.requiredGateSignals[0].name = 'contracts';
-    invalidPublishedEvidence.receipts.grades[0].signal.name = 'contracts';
-    expect(LiveReleaseReceiptEvidenceV2Contract.safeParse(invalidPublishedEvidence).success)
-      .toBe(false);
-    expect(compiled()(invalidPublishedEvidence)).toBe(false);
+    const invalidCanonicalGrade = {
+      ...evidence().receipts.grades[0],
+      signal: { source: 'repository-grader', name: 'contracts' },
+    };
+    expect(ReleaseGradeReceiptContract.safeParse(
+      invalidCanonicalGrade,
+    ).success).toBe(false);
+    expect(HistoricalReleaseGradeReceiptContract.safeParse(
+      invalidCanonicalGrade,
+    ).success).toBe(true);
+  });
+
+  it('keeps historical v3 grade aliases decode-only while canonical writers stay strict', () => {
+    const persistedV3 = historicalEvidence('3.0');
+    const historicalGrade = {
+      ...persistedV3.receipts.grades[0],
+      receiptId: historicalGradeId,
+      receiptKey: 'grade:repository:lint',
+      recordedAt: '2026-08-01T00:05:05Z',
+      signal: { source: 'repository-grader', name: 'lint' },
+    };
+    persistedV3.receipts.grades.push(historicalGrade);
+
+    expect(ReleaseGradeReceiptContract.safeParse(historicalGrade).success).toBe(false);
+    expect(HistoricalReleaseGradeReceiptContract.safeParse(historicalGrade).success)
+      .toBe(true);
+    expect(PersistedLiveReleaseReceiptEvidenceContract.safeParse(persistedV3).success)
+      .toBe(true);
+    expect(compiledHistorical()(persistedV3)).toBe(true);
+    expect(liveReleaseReceiptSemanticErrors(persistedV3)).toEqual([]);
+  });
+
+  it('rejects duplicate policy requirements on writes while preserving historical reads', () => {
+    const canonical = {
+      authority: 'human-ready-allowed' as const,
+      requiredGateSignals: [
+        { source: 'repository-grader' as const, name: 'unit_tests' as const },
+        { source: 'repository-grader' as const, name: 'unit_tests' as const },
+      ],
+      requiredReviewPerspectives: ['security' as const, 'codeQuality' as const],
+      minimumHeadEpochs: 1,
+    };
+    expect(ReleasePolicyContract.safeParse(canonical).success).toBe(false);
+
+    const historical = {
+      ...canonical,
+      requiredGateSignals: [
+        { source: 'repository-grader' as const, name: 'contracts' },
+        { source: 'repository-grader' as const, name: 'contracts' },
+      ],
+    };
+    expect(HistoricalReleasePolicyContract.safeParse(historical).success).toBe(true);
+
+    expect(ReleasePolicyContract.safeParse({
+      ...canonical,
+      requiredGateSignals: canonical.requiredGateSignals.slice(0, 1),
+      requiredReviewPerspectives: ['security', 'security'],
+    }).success).toBe(false);
+    expect(HistoricalReleasePolicyContract.safeParse({
+      ...historical,
+      requiredGateSignals: historical.requiredGateSignals.slice(0, 1),
+      requiredReviewPerspectives: ['security', 'security'],
+    }).success).toBe(true);
+
+    expect(ReleasePolicyContract.safeParse({
+      ...canonical,
+      requiredGateSignals: [
+        { source: 'repository-grader', name: 'unit_tests' },
+        { source: 'github-check', name: 'unit_tests' },
+      ],
+    }).success).toBe(true);
+    expect(HistoricalReleasePolicyContract.safeParse({
+      ...historical,
+      requiredGateSignals: [
+        { source: 'repository-grader', name: 'contracts' },
+        { source: 'github-check', name: 'contracts' },
+      ],
+    }).success).toBe(true);
+
+    const persisted = historicalEvidence('3.0');
+    persisted.policy.requiredGateSignals = [
+      { source: 'repository-grader', name: 'unit_tests' },
+      { source: 'repository-grader', name: 'unit_tests' },
+    ];
+    persisted.policy.requiredReviewPerspectives = ['security', 'security'];
+    expect(PersistedLiveReleaseReceiptEvidenceContract.safeParse(persisted).success)
+      .toBe(true);
+    expect(compiledHistorical()(persisted)).toBe(true);
+    expect(liveReleaseReceiptSemanticErrors(persisted)).toEqual([]);
   });
 
   it('accepts only review perspectives the production panel can emit', () => {
@@ -332,7 +472,7 @@ describe('release receipt evidence v4', () => {
     value.receipts.merge.producer = {
       jobId: '90000000-0000-4000-8000-000000000002',
     };
-    expect(LiveReleaseReceiptEvidenceV2Contract.parse(value)).toEqual(value);
+    expect(PersistedLiveReleaseReceiptEvidenceContract.parse(value)).toEqual(value);
     const validate = compiled();
     expect(validate(value), JSON.stringify(validate.errors)).toBe(true);
     expect(liveReleaseReceiptSemanticErrors(value)).toEqual([]);
@@ -354,38 +494,17 @@ describe('release receipt evidence v4', () => {
   });
 
   it('normalizes immutable legacy v3 evidence without inventing invocation keys', () => {
-    const current = evidence();
-    const legacy: any = structuredClone(current);
-    legacy.schemaVersion = '3.0';
-    legacy.release.pullRequest = legacy.release.pullRequestNumber;
-    delete legacy.release.pullRequestNumber;
+    const legacy = historicalEvidence('3.0');
     legacy.receipts.runtime.forEach((runtime: any) => {
       runtime.invocations.forEach((invocation: any) => {
-        invocation.invocationId = invocation.invocationRef;
         delete invocation.invocationKey;
-        delete invocation.invocationRef;
       });
     });
-    legacy.receipts.builds.forEach((build: any) => {
-      build.invocationId = build.invocationRef;
-      delete build.invocationRef;
-    });
-    legacy.receipts.reviews.forEach((review: any) => {
-      review.invocationId = review.invocationRef;
-      review.verdict = review.verdict === 'approve' ? 'approved' : 'findings';
-      delete review.invocationRef;
-      delete review.hasFindings;
-    });
-    legacy.receipts.mergeIntent.pullRequest =
-      legacy.receipts.mergeIntent.pullRequestNumber;
-    delete legacy.receipts.mergeIntent.pullRequestNumber;
-    legacy.receipts.merge.pullRequest = legacy.receipts.merge.pullRequestNumber;
-    legacy.receipts.merge.issueState = 'CLOSED';
-    legacy.receipts.merge.issueStateReason = 'COMPLETED';
-    delete legacy.receipts.merge.pullRequestNumber;
-    delete legacy.receipts.merge.sourceIssueClosure;
+    legacy.policy.requiredGateSignals[0].name = 'contracts';
+    legacy.receipts.grades[0].signal.name = 'contracts';
 
-    const normalized = LiveReleaseReceiptEvidenceV2Contract.parse(legacy);
+    expect(PersistedLiveReleaseReceiptEvidenceContract.parse(legacy)).toEqual(legacy);
+    const normalized = LiveReleaseReceiptEvidenceContract.parse(legacy);
     expect(normalized).toMatchObject({
       schemaVersion: '3.0',
       release: expect.objectContaining({ pullRequestNumber: 12 }),
@@ -419,7 +538,7 @@ describe('release receipt evidence v4', () => {
         }
       }
     }
-    const canonical = LiveReleaseReceiptEvidenceV2Contract.parse(historical);
+    const canonical = LiveReleaseReceiptEvidenceContract.parse(historical);
     const legacy = legacyLiveReleaseReceiptEvidenceWire(canonical) as any;
     const legacySchema = JSON.parse(fs.readFileSync(
       new URL('../../../contracts/live-release-receipt.schema.json', import.meta.url),
@@ -489,7 +608,10 @@ describe('release receipt evidence v4', () => {
 
   it('keeps repository graders and GitHub checks as distinct gate sources', () => {
     const value = evidence();
-    value.receipts.grades[1].signal.source = 'repository-grader';
+    value.receipts.grades[1].signal = {
+      source: 'repository-grader',
+      name: 'unit_tests',
+    };
     expect(liveReleaseReceiptSemanticErrors(value)).toContain(
       'final head is missing required gate signal github-check:contracts',
     );
@@ -548,12 +670,18 @@ describe('release receipt evidence v4', () => {
     expect(liveReleaseReceiptSemanticErrors(value).length).toBeGreaterThan(0);
   });
 
-  it('requires distinct perspectives and the final head to be the latest epoch', () => {
+  it('keeps writer uniqueness while requiring the final head to be the latest epoch', () => {
     const duplicate = evidence();
     duplicate.policy.requiredReviewPerspectives = ['security', 'security'];
-    expect(liveReleaseReceiptSemanticErrors(duplicate)).toContain(
-      'policy.requiredReviewPerspectives must be unique',
-    );
+    expect(ReleasePolicyContract.safeParse(duplicate.policy).success).toBe(false);
+    expect(PersistedLiveReleaseReceiptEvidenceContract.safeParse(duplicate).success)
+      .toBe(false);
+    expect(liveReleaseReceiptSemanticErrors(duplicate).length).toBeGreaterThan(0);
+    const historicalDuplicate = historicalEvidence('3.0');
+    historicalDuplicate.policy.requiredReviewPerspectives = ['security', 'security'];
+    expect(PersistedLiveReleaseReceiptEvidenceContract.safeParse(historicalDuplicate).success)
+      .toBe(true);
+    expect(liveReleaseReceiptSemanticErrors(historicalDuplicate)).toEqual([]);
 
     const staleFinal = evidence();
     staleFinal.receipts.reviews[0].verdict = 'approve';
@@ -572,7 +700,7 @@ describe('release receipt evidence v4', () => {
   it('rejects an unknown model instead of inventing a concrete name', () => {
     const value = evidence();
     value.receipts.runtime[0].invocations[0].model = null;
-    expect(LiveReleaseReceiptEvidenceV2Contract.safeParse(value).success).toBe(false);
+    expect(PersistedLiveReleaseReceiptEvidenceContract.safeParse(value).success).toBe(false);
     expect(compiled()(value)).toBe(false);
   });
 
@@ -609,7 +737,10 @@ describe('release receipt evidence v4', () => {
   });
 
   it('authorizes pre-merge state without requiring a completed merge receipt', () => {
-    const value = LiveReleaseReceiptEvidenceV2Contract.parse(evidence());
+    const value = LiveReleaseReceiptEvidenceContract.parse(evidence());
+    if (value.schemaVersion !== '4.0') {
+      throw new Error('fixture must decode as canonical release evidence v4');
+    }
     const receipts = [
       value.receipts.authority,
       value.receipts.requirementsAuthority!,

@@ -23,6 +23,7 @@ import (
 )
 
 type MonitorStore interface {
+	ManagesComponent(string) bool
 	LifecycleMode(context.Context) (lifecycle.Mode, error)
 	MonitorCursor(context.Context, string, string) (map[string]any, error)
 	SaveMonitorCursor(context.Context, string, string, map[string]any, time.Time) error
@@ -72,12 +73,8 @@ type ProductionRunner struct {
 	TransientRetry time.Duration
 	ForwarderRetry time.Duration
 	HealthInterval time.Duration
-	// SignedWebhookIngressOnly disables the legacy CLI forwarder. The signed
-	// HTTP ingress has no active reachability probe here, so this runner must
-	// neither spawn `gh webhook forward` nor project forwarder health.
-	SignedWebhookIngressOnly bool
-	Command                  CommandFactory
-	Log                      *slog.Logger
+	Command        CommandFactory
+	Log            *slog.Logger
 }
 
 func (runner *ProductionRunner) Run(
@@ -224,7 +221,7 @@ func (runner *ProductionRunner) runForwarder(
 	if len(events) == 0 {
 		return nil
 	}
-	if runner.SignedWebhookIngressOnly {
+	if !runner.Store.ManagesComponent(ComponentForwarder) {
 		<-ctx.Done()
 		return nil
 	}

@@ -140,7 +140,7 @@ function renderHtml(store: Store, m: Metrics): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>AgentOps Dashboard</title>
+<title>Servo Dashboard</title>
 <style>
   :root{
     --bg:#11111b; --panel:#181825; --panel2:#1e1e2e; --text:#cdd6f4; --muted:#9399b2;
@@ -172,7 +172,7 @@ function renderHtml(store: Store, m: Metrics): string {
   .legend{color:var(--muted);font-size:11px;margin-top:6px}
 </style></head>
 <body>
-  <h1>AgentOps — Development & Eval Harness</h1>
+  <h1>Servo — Development & Eval Harness</h1>
   <div class="sub">${r ? esc(r.vision) : 'No roadmap loaded.'} &nbsp;·&nbsp; ${m.totals.evalRuns} eval runs · ${m.totals.samples} samples · ${m.totals.issuesRun}/${m.totals.issues} issues run</div>
 
   <div class="grid">${cards}</div>

@@ -309,8 +309,9 @@ func TestQueuedReadyIssueProjectsBeforeTheFirstWorkerEvent(t *testing.T) {
 		 WHERE singleton`); err != nil {
 		t.Fatal(err)
 	}
-	standardStore := &Store{pool: pool}
-	standardStore.DisableLegacyForwarder()
+	standardStore := &Store{
+		pool: pool, topology: RuntimeTopologySignedWebhookIngress,
+	}
 	projections, err = standardStore.Projections(ctx, time.Minute)
 	if err != nil || len(projections) != 1 ||
 		projections[0].Mode != lifecyclestore.ModeDraining {
@@ -833,6 +834,120 @@ func TestPostgresDirectInsertLifecycleFenceIntegration(t *testing.T) {
 	}
 }
 
+func TestPostgresLegacyWorkItemReplayConvergesOnCanonicalJobs(t *testing.T) {
+	databaseURL := os.Getenv("AGENTOPS_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENTOPS_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	root := testRepositoryRoot(t)
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	resetAndMigrate(t, ctx, pool, root)
+	store, err := OpenStoreWithTopology(
+		ctx,
+		databaseURL,
+		root,
+		RuntimeTopologySignedWebhookIngress,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	registration, duplicate, err := store.CreateRegistration(
+		ctx,
+		CreateRegistration{Repository: "owner/legacy-replay"},
+		"create-legacy-replay-registration",
+		"operator",
+	)
+	if err != nil || duplicate {
+		t.Fatalf("CreateRegistration() = %#v, %v, %v", registration, duplicate, err)
+	}
+	updatedAt := time.Date(2026, 8, 6, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		legacy    WorkItem
+		canonical WorkItem
+	}{
+		{
+			name: "pull request",
+			legacy: WorkItem{
+				Repository: registration.Repository, Kind: "pull_request", Number: 42,
+				UpdatedAt: updatedAt,
+			},
+			canonical: WorkItem{
+				Repository: registration.Repository, Kind: WorkItemKindPullRequest,
+				Number: 42, UpdatedAt: updatedAt,
+			},
+		},
+		{
+			name: "push",
+			legacy: WorkItem{
+				Repository: registration.Repository, Kind: "push", Identity: "head-1",
+				UpdatedAt: updatedAt,
+			},
+			canonical: WorkItem{
+				Repository: registration.Repository, Kind: WorkItemKindRepositoryHead,
+				SourceEvent: "push", Identity: "head-1", UpdatedAt: updatedAt,
+			},
+		},
+		{
+			name: "check run",
+			legacy: WorkItem{
+				Repository: registration.Repository, Kind: "check_run", Identity: "123",
+				UpdatedAt: updatedAt,
+			},
+			canonical: WorkItem{
+				Repository: registration.Repository, Kind: WorkItemKindRepositoryHead,
+				SourceEvent: "check_run", Identity: "123", UpdatedAt: updatedAt,
+			},
+		},
+		{
+			name: "check suite",
+			legacy: WorkItem{
+				Repository: registration.Repository, Kind: "check_suite", Identity: "456",
+				UpdatedAt: updatedAt,
+			},
+			canonical: WorkItem{
+				Repository: registration.Repository, Kind: WorkItemKindRepositoryHead,
+				SourceEvent: "check_suite", Identity: "456", UpdatedAt: updatedAt,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			legacyID, duplicate, err := store.EnqueueWork(
+				ctx, registration, "webhook", "legacy-"+test.name, test.legacy,
+			)
+			if err != nil || duplicate {
+				t.Fatalf("legacy EnqueueWork() = %s, %v, %v", legacyID, duplicate, err)
+			}
+			canonicalID, duplicate, err := store.EnqueueWork(
+				ctx, registration, "poll", "canonical-"+test.name, test.canonical,
+			)
+			if err != nil || !duplicate || canonicalID != legacyID {
+				t.Fatalf(
+					"canonical replay = %s, %v, %v; legacy id = %s",
+					canonicalID,
+					duplicate,
+					err,
+					legacyID,
+				)
+			}
+			if _, err := pool.Exec(ctx, `
+				UPDATE agentops_control.jobs
+				   SET status = 'succeeded', finished_at = clock_timestamp(),
+				       updated_at = clock_timestamp()
+				 WHERE id = $1`, legacyID); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestPostgresRegistrationControlIntegration(t *testing.T) {
 	databaseURL := os.Getenv("AGENTOPS_TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -846,7 +961,7 @@ func TestPostgresRegistrationControlIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 	resetAndMigrate(t, ctx, pool, root)
-	store, err := OpenStore(ctx, databaseURL, root)
+	store, err := OpenLegacyCLIForwarderStore(ctx, databaseURL, root)
 	if err != nil {
 		t.Fatal(err)
 	}

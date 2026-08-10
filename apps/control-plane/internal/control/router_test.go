@@ -182,25 +182,66 @@ func TestRouterLeavesFailedWorkForDurableRetry(t *testing.T) {
 	}
 }
 
-func TestRouterMonitorOnlyNeverCreatesExecutableWork(t *testing.T) {
+func TestRouterPreservesInactiveLifecycleModeWithoutExecutableWork(t *testing.T) {
+	tests := []struct {
+		mode   lifecycle.Mode
+		reason string
+	}{
+		{mode: lifecycle.ModeMonitorOnly, reason: "lifecycle_monitor_only"},
+		{mode: lifecycle.ModeDraining, reason: "lifecycle_draining"},
+		{mode: lifecycle.ModeOff, reason: "lifecycle_off"},
+	}
+	for _, test := range tests {
+		t.Run(string(test.mode), func(t *testing.T) {
+			store := &fakeRouterStore{registration: Registration{
+				ID: "registration-1", Repository: "owner/repo", Enabled: true,
+				IssueMonitorEnabled: true, ExecutionEnabled: true, Version: 1,
+			}, currentMode: test.mode}
+			router := Router{Store: store}
+			claim := ClaimedDelivery{
+				ID: "delivery-1", DeliveryKey: "delivery-key", Token: "token",
+				Repository: "owner/repo", Event: "issues",
+				Payload: issuePayload(1, "2026-07-25T00:00:00Z"),
+			}
+			if err := router.route(context.Background(), claim); err != nil {
+				t.Fatal(err)
+			}
+			if len(store.enqueued) != 0 ||
+				store.bound != 1 ||
+				len(store.finished) != 1 ||
+				store.finished[0] != "ignored:"+test.reason {
+				t.Fatalf(
+					"%s route enqueued=%#v finished=%#v",
+					test.mode,
+					store.enqueued,
+					store.finished,
+				)
+			}
+		})
+	}
+}
+
+func TestRouterFailsClosedWhenLifecycleAuthorityIsUnavailable(t *testing.T) {
 	store := &fakeRouterStore{registration: Registration{
 		ID: "registration-1", Repository: "owner/repo", Enabled: true,
 		IssueMonitorEnabled: true, ExecutionEnabled: true, Version: 1,
-	}, currentMode: lifecycle.ModeMonitorOnly}
+	}, lifecycleErr: ErrStoreUnavailable}
 	router := Router{Store: store}
 	claim := ClaimedDelivery{
 		ID: "delivery-1", DeliveryKey: "delivery-key", Token: "token",
 		Repository: "owner/repo", Event: "issues",
 		Payload: issuePayload(1, "2026-07-25T00:00:00Z"),
 	}
-	if err := router.route(context.Background(), claim); err != nil {
-		t.Fatal(err)
+	if err := router.route(context.Background(), claim); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("route() error = %v, want store unavailable", err)
 	}
-	if len(store.enqueued) != 0 ||
-		store.bound != 1 ||
-		len(store.finished) != 1 ||
-		store.finished[0] != "ignored:monitor_only" {
-		t.Fatalf("monitor-only route enqueued=%#v finished=%#v", store.enqueued, store.finished)
+	if store.bound != 1 || len(store.enqueued) != 0 || len(store.finished) != 0 {
+		t.Fatalf(
+			"unavailable lifecycle bound=%d enqueued=%#v finished=%#v",
+			store.bound,
+			store.enqueued,
+			store.finished,
+		)
 	}
 }
 

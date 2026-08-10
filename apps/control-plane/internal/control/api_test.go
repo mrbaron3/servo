@@ -261,6 +261,63 @@ func TestRegistrationCommandsCarryStrictReleaseEvidenceConfiguration(t *testing.
 	}
 }
 
+func TestRegistrationCommandsRejectExplicitNullConfigurationMembers(t *testing.T) {
+	for _, member := range []string{"releaseEvidence", "gateTimeoutSeconds"} {
+		configuration := `{"` + member + `":null}`
+		t.Run(member+"/create", func(t *testing.T) {
+			store := &fakeAPIStore{}
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/v1/registrations",
+				bytes.NewBufferString(
+					`{"repository":"owner/null-create","configuration":`+configuration+`}`,
+				),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer control-token")
+			request.Header.Set("Idempotency-Key", "registration-null-create-"+member)
+			response := httptest.NewRecorder()
+			testAPI(store).Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest || store.creates != 0 ||
+				!bytes.Contains(response.Body.Bytes(), []byte(`"invalid_registration_input"`)) {
+				t.Fatalf(
+					"explicit null create member %s status=%d creates=%d body=%s",
+					member,
+					response.Code,
+					store.creates,
+					response.Body,
+				)
+			}
+		})
+
+		t.Run(member+"/patch", func(t *testing.T) {
+			store := &fakeAPIStore{}
+			request := httptest.NewRequest(
+				http.MethodPatch,
+				"/v1/registrations/"+testRegistrationID,
+				bytes.NewBufferString(`{"configuration":`+configuration+`}`),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer control-token")
+			request.Header.Set("If-Match", `"1"`)
+			request.Header.Set("Idempotency-Key", "registration-null-patch-"+member)
+			response := httptest.NewRecorder()
+			testAPI(store).Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest ||
+				len(store.updatedPatch.Configuration) != 0 ||
+				!bytes.Contains(response.Body.Bytes(), []byte(`"invalid_registration_patch"`)) {
+				t.Fatalf(
+					"explicit null patch member %s status=%d configuration=%s body=%s",
+					member,
+					response.Code,
+					store.updatedPatch.Configuration,
+					response.Body,
+				)
+			}
+		})
+	}
+}
+
 func TestWebhookPersistsOnlyAfterValidSignatureAndIdentity(t *testing.T) {
 	store := &fakeAPIStore{}
 	handler := testAPI(store).Handler()
@@ -487,6 +544,33 @@ func TestStatusQueryFiltersAndFailsClosedWithLastSuccessfulTime(t *testing.T) {
 	}
 }
 
+func TestStatusProjectionPreservesHistoricalRegistrationConfiguration(t *testing.T) {
+	configuration := json.RawMessage(`{"releaseEvidence":{` +
+		`"authority":"human-ready-allowed",` +
+		`"requiredGateSignals":[{"source":"repository-grader","name":"contracts"},` +
+		`{"source":"repository-grader","name":"contracts"}],` +
+		`"requiredReviewPerspectives":["security","security"],` +
+		`"minimumHeadEpochs":1}}`)
+	store := &fakeAPIStore{projections: []RegistrationProjection{{
+		Registration: Registration{
+			ID:            testRegistrationID,
+			Repository:    "owner/historical",
+			Configuration: configuration,
+			Version:       1,
+		},
+		Mode:       lifecycle.ModeMonitorOnly,
+		Components: map[string]ComponentProjection{},
+	}}}
+	request := httptest.NewRequest(http.MethodGet, "/v1/registrations", nil)
+	request.Header.Set("Authorization", "Bearer control-token")
+	response := httptest.NewRecorder()
+	testAPI(store).Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"name":"contracts"`)) {
+		t.Fatalf("historical Registration response = %d: %s", response.Code, response.Body)
+	}
+}
+
 func TestMonitorOnlyModeDoesNotMaskStaleExecutionEvidence(t *testing.T) {
 	store := &fakeAPIStore{projections: []RegistrationProjection{{
 		Registration: Registration{
@@ -563,6 +647,34 @@ func TestEmptyStatusProjectionStillUsesAuthoritativeLifecycleMode(t *testing.T) 
 	if response.Code != http.StatusOK ||
 		!bytes.Contains(response.Body.Bytes(), []byte(`"mode":"DRAINING"`)) {
 		t.Fatalf("empty lifecycle projection = %d: %s", response.Code, response.Body)
+	}
+}
+
+func TestEmptyStatusProjectionFailsClosedWhenLifecycleAuthorityIsUnavailable(t *testing.T) {
+	store := &fakeAPIStore{lifecycleError: ErrStoreUnavailable}
+	request := httptest.NewRequest(http.MethodGet, "/v1/registrations", nil)
+	request.Header.Set("Authorization", "Bearer control-token")
+	response := httptest.NewRecorder()
+	testAPI(store).Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable ||
+		response.Header().Get("Retry-After") != "2" ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"code":"control_store_unavailable"`)) {
+		t.Fatalf("unavailable lifecycle authority = %d headers=%v body=%s", response.Code, response.Header(), response.Body)
+	}
+}
+
+func TestStatusProjectionRejectsAnItemWithoutLifecycleMode(t *testing.T) {
+	store := &fakeAPIStore{projections: []RegistrationProjection{{
+		Registration: Registration{Repository: "owner/missing-mode"},
+		Components:   map[string]ComponentProjection{},
+	}}}
+	request := httptest.NewRequest(http.MethodGet, "/v1/registrations", nil)
+	request.Header.Set("Authorization", "Bearer control-token")
+	response := httptest.NewRecorder()
+	testAPI(store).Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest ||
+		!bytes.Contains(response.Body.Bytes(), []byte("status projection omitted lifecycle mode")) {
+		t.Fatalf("missing lifecycle mode = %d: %s", response.Code, response.Body)
 	}
 }
 

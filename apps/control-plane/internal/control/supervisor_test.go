@@ -35,6 +35,8 @@ func (store *fakeSupervisionStore) ListRegistrations(context.Context) ([]Registr
 	return append([]Registration(nil), store.registrations...), store.listError
 }
 
+func (store *fakeSupervisionStore) ManagesComponent(string) bool { return true }
+
 func (store *fakeSupervisionStore) UpsertActualState(
 	_ context.Context,
 	registration Registration,
