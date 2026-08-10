@@ -340,6 +340,28 @@ metadata document を書き換えること**だけである。これは特権的
 - **事後は runtime の API で検証する。** 自分が書いた file を読み返しても「writer が自分と一致した」
   ことしか言えない。意味があるのは Apple Container が何を報告するかである。
 
+### backup は credential store である（repository に置かない）
+
+**`containers/<id>/config.json` は `initProcess.environment` を値ごと持つ。** 本 project の topology では
+`POSTGRES_PASSWORD` がここに入る。backup はその document の**逐語コピー**なので、backup directory は
+artifact ではなく **credential store** である。したがって:
+
+- backup root は **`--backup-dir` 省略時 `$XDG_STATE_HOME/agentops/label-metadata-backups`**
+  （無ければ `~/.local/state/...`）。`AGENTOPS_LABEL_BACKUP_ROOT` でも指定できる。
+- **git work tree の中は拒否する。** 祖先を辿って `.git` があれば実行しない（worktree の `.git` file も検出する）。
+  checkout の中から sweep を回した operator が、生きた credential の複製を stage・commit・push できないようにする。
+- **root は 0700 で作り、既存が広ければ絞り直す。** backup file 自体は 0600。
+
+### evidence と rollback plan は別物である
+
+| | 置き場所 | 中身 | commit するか |
+| --- | --- | --- | --- |
+| **evidence** | `--evidence-dir`（既定 `evidence/label-p3a/`） | identity・ownership class・6 つの label key・digest・**appRoot / backup root からの相対 path** | **する** |
+| **rollback plan** | backup root の中（0600） | rollback に必要な**絶対 path** | **しない** |
+
+**sanitize した evidence では rollback できない**（絶対 path を持たないため）。だから 2 つに分ける。
+evidence には host path も document の中身も入らない――`TestCommittedEvidenceCarriesNoHostPath` が回帰を止める。
+
 ### 手順
 
 ```sh
@@ -349,17 +371,18 @@ agentopsctl migrate-label-metadata --stage prepare
 # 2. prepare: legacy-only の volume/network に current pair を足して dual にする。
 agentopsctl migrate-label-metadata --stage prepare --apply \
   --only volume/agentops-postgres-data,network/agentops-internal,... \
-  --backup-dir <dir> --evidence-dir evidence/label-p3a
+  --evidence-dir evidence/label-p3a      # backup は既定の private root へ
 
 # 3. 全 managed resource が dual / current-only になったことを確認する。
 agentopsctl migrate-label-metadata --stage retire
 
 # 4. retire: legacy pair を落として current-only にする。
 agentopsctl migrate-label-metadata --stage retire --apply --only <...> \
-  --backup-dir <dir> --evidence-dir evidence/label-p3a
+  --evidence-dir evidence/label-p3a
 
-# 5. rollback が要るとき（applied-*.json を渡す）
-agentopsctl migrate-label-metadata --rollback evidence/label-p3a/applied-retire-<stamp>.json
+# 5. rollback が要るとき。private backup root の rollback-plan.json を渡す
+#    （commit される evidence ではない。--apply の最後に path が出る）
+agentopsctl migrate-label-metadata --rollback <backup-root>/retire-<stamp>/rollback-plan.json
 ```
 
 **`--stage retire` は、host のどこかに `legacy-only` が残っている限り拒否される。** 対象を絞っても

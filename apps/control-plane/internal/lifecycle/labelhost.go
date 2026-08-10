@@ -21,7 +21,10 @@ var SupportedAppleContainerVersions = []string{"1.1.0"}
 
 // MetadataHost is the verified runtime this migration may operate on.
 type MetadataHost struct {
-	AppRoot          string `json:"appRoot"`
+	// AppRoot is an absolute path under the operator's home directory and is
+	// deliberately not serialised: the evidence this migration writes is
+	// committed to the repository.
+	AppRoot          string `json:"-"`
 	CLIVersion       string `json:"cliVersion"`
 	APIServerVersion string `json:"apiServerVersion"`
 }

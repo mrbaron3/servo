@@ -341,7 +341,7 @@ func TestApplyMetadataStageWritesEveryDocumentAndRollsBackExactly(t *testing.T) 
 		}
 		originals[file.Path] = data
 	}
-	applied, err := applyMetadataStage(target, MetadataStagePrepare, backups)
+	applied, err := applyMetadataStage(target, MetadataStagePrepare, backups, root)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestApplyMetadataStageIsAtomicAcrossDocuments(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(filepath.Dir(second), 0o755)
-	_, err = applyMetadataStage(target, MetadataStagePrepare, backups)
+	_, err = applyMetadataStage(target, MetadataStagePrepare, backups, root)
 	os.Chmod(filepath.Dir(second), 0o755)
 	if err == nil {
 		t.Fatal("expected the stage to fail")
@@ -422,14 +422,14 @@ func TestApplyMetadataStageRefusesToReuseABackupDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := applyMetadataStage(
-		target, MetadataStagePrepare, backups,
+		target, MetadataStagePrepare, backups, root,
 	); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 	// Re-running into the same backup directory would overwrite the only record
 	// of the original bytes.
 	if _, err := applyMetadataStage(
-		target, MetadataStageRetire, backups,
+		target, MetadataStageRetire, backups, root,
 	); err == nil {
 		t.Fatal("expected the second run to refuse the used backup directory")
 	}

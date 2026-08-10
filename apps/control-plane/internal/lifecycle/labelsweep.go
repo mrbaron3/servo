@@ -373,6 +373,7 @@ func applyMetadataStage(
 	target MetadataTarget,
 	stage MetadataStage,
 	backupDirectory string,
+	appRoot string,
 ) (*MetadataApplication, error) {
 	state, err := readMetadataTarget(target)
 	if err != nil {
@@ -400,6 +401,10 @@ func applyMetadataStage(
 			string(target.Kind), target.ID, filepath.Base(file.Ref.Path),
 		)
 		applied, err := applyMetadataFile(file, planned, backupPath)
+		if applied != nil {
+			applied.Document = relativeTo(appRoot, applied.Path)
+			applied.Backup = relativeTo(backupDirectory, applied.BackupPath)
+		}
 		if err != nil {
 			// Unwind in reverse so the resource is left exactly as it was
 			// found. A rollback failure here is reported alongside the original

@@ -65,8 +65,9 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 	)
 	backupDir := flags.String(
 		"backup-dir", "",
-		"where to write the pre-migration copy of every rewritten document; "+
-			"required with --apply",
+		"private directory for the pre-migration copy of every rewritten "+
+			"document; defaults to $XDG_STATE_HOME/agentops/label-metadata-"+
+			"backups and must sit outside every git work tree",
 	)
 	rollback := flags.String(
 		"rollback", "",
@@ -160,11 +161,13 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	if strings.TrimSpace(*backupDir) == "" {
-		return fmt.Errorf(
-			"--apply requires --backup-dir; a migration that cannot record " +
-				"what it is about to overwrite does not start",
-		)
+	// A backup is a verbatim copy of a container's configuration, which carries
+	// initProcess.environment with values. The root is therefore resolved to a
+	// private 0700 directory outside every git work tree, so a copy of a live
+	// credential can never be staged from a checkout the sweep was run in.
+	resolvedBackupRoot, err := lifecycle.ResolveBackupRoot(*backupDir)
+	if err != nil {
+		return err
 	}
 	// A stopped managed container can be rewritten safely because nothing is
 	// reading its configuration. A running one cannot: the runtime holds its
@@ -180,7 +183,9 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 		fmt.Println("\nevery named target already satisfies this stage")
 		return nil
 	}
-	backupRoot := filepath.Join(*backupDir, fmt.Sprintf("%s-%s", *stage, stamp))
+	backupRoot := filepath.Join(
+		resolvedBackupRoot, fmt.Sprintf("%s-%s", *stage, stamp),
+	)
 
 	fmt.Printf("\nstopping Apple Container services\n")
 	if err := runtime.StopSystem(ctx); err != nil {
@@ -242,10 +247,44 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The committed evidence cannot drive a rollback, because rollback needs the
+	// absolute locations the evidence deliberately omits. Those live in a
+	// private plan written inside the backup root, beside the backups it names.
+	rollbackPath, err := writeRollbackPlan(backupRoot, report)
+	if err != nil {
+		return err
+	}
 	printMetadataReport(report)
 	fmt.Printf("\nevidence: %s\n", path)
 	fmt.Printf("backups:  %s\n", backupRoot)
+	fmt.Printf("rollback: agentopsctl migrate-label-metadata --rollback %s\n", rollbackPath)
 	return nil
+}
+
+// writeRollbackPlan records the absolute locations rollback needs. It is written
+// at 0600 inside the 0700 backup root and is never committed: it names paths on
+// the operator's machine, and it points at files that contain container
+// environment values.
+func writeRollbackPlan(
+	backupRoot string,
+	report *lifecycle.MetadataSweepReport,
+) (string, error) {
+	encoded, err := json.MarshalIndent(
+		lifecycle.BuildRollbackPlan(report), "", "  ",
+	)
+	if err != nil {
+		return "", fmt.Errorf("encode rollback plan: %w", err)
+	}
+	path := filepath.Join(backupRoot, "rollback-plan.json")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("write rollback plan: %w", err)
+	}
+	defer file.Close()
+	if _, err := file.Write(append(encoded, '\n')); err != nil {
+		return "", fmt.Errorf("write rollback plan: %w", err)
+	}
+	return path, nil
 }
 
 // runMetadataRollback restores every document a recorded run rewrote.
@@ -258,12 +297,9 @@ func runMetadataRollback(
 	if err != nil {
 		return fmt.Errorf("read report: %w", err)
 	}
-	var evidence metadataEvidence
-	if err := json.Unmarshal(raw, &evidence); err != nil {
-		return fmt.Errorf("parse report: %w", err)
-	}
-	if evidence.Report == nil || len(evidence.Report.Applied) == 0 {
-		return fmt.Errorf("%s records no applied change", reportPath)
+	plan, err := lifecycle.ParseRollbackPlan(raw)
+	if err != nil {
+		return fmt.Errorf("%s: %w", reportPath, err)
 	}
 	fmt.Printf("stopping Apple Container services\n")
 	if err := runtime.StopSystem(ctx); err != nil {
@@ -280,12 +316,17 @@ func runMetadataRollback(
 	if err := runtime.RequireServicesStopped(ctx); err != nil {
 		return err
 	}
-	if err := lifecycle.RollbackMetadataSweep(evidence.Report); err != nil {
+	if err := lifecycle.RollbackMetadataSweep(plan); err != nil {
 		return err
 	}
+	for _, application := range plan.Applied {
+		for _, file := range application.RestoreOutcomes() {
+			fmt.Printf("  %-10s %-46s %s\n", application.Kind, application.ID, file)
+		}
+	}
 	fmt.Printf(
-		"restored %d resource(s) to their pre-migration bytes\n",
-		len(evidence.Report.Applied),
+		"restored %d resource(s) to their pre-migration labels\n",
+		len(plan.Applied),
 	)
 	return nil
 }

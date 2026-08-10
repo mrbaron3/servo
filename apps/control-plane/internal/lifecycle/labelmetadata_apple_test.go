@@ -271,7 +271,9 @@ func TestAppleContainerMetadataStagesMigrateAndRollBack(t *testing.T) {
 
 	// --- rollback to dual, then reapply --------------------------------
 	stopSystemForTest(t, runtime)
-	if err := RollbackMetadataSweep(retired); err != nil {
+	if err := RollbackMetadataSweep(
+		BuildRollbackPlan(retired),
+	); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	startSystemForTest(t, runtime)

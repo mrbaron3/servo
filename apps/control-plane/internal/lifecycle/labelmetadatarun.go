@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -318,14 +319,17 @@ func PlanMetadataSweep(
 
 // MetadataSweepReport is the durable account of one applied stage.
 type MetadataSweepReport struct {
-	Stage         MetadataStage          `json:"stage"`
-	Host          MetadataHost           `json:"host"`
-	Applied       []*MetadataApplication `json:"applied"`
-	Skipped       []MetadataTargetRef    `json:"skipped"`
-	Halted        string                 `json:"halted,omitempty"`
-	RolledBack    bool                   `json:"rolledBack"`
-	BackupRoot    string                 `json:"backupRoot"`
-	VerifiedByAPI bool                   `json:"verifiedByApi"`
+	Stage      MetadataStage          `json:"stage"`
+	Host       MetadataHost           `json:"host"`
+	Applied    []*MetadataApplication `json:"applied"`
+	Skipped    []MetadataTargetRef    `json:"skipped"`
+	Halted     string                 `json:"halted,omitempty"`
+	RolledBack bool                   `json:"rolledBack"`
+	// BackupRoot is absolute and private; the evidence records only its base
+	// name so a reader can find it without the file naming the operator's home.
+	BackupRoot     string `json:"-"`
+	BackupRootName string `json:"backupRootName"`
+	VerifiedByAPI  bool   `json:"verifiedByApi"`
 }
 
 // ApplyMetadataSweep rewrites every planned target while the runtime is down.
@@ -348,6 +352,7 @@ func ApplyMetadataSweep(
 	}
 	report := &MetadataSweepReport{
 		Stage: stage, Host: *host, BackupRoot: backupRoot,
+		BackupRootName: filepath.Base(backupRoot),
 	}
 	for _, reference := range targets {
 		target, err := resolveMetadataTarget(
@@ -374,7 +379,9 @@ func ApplyMetadataSweep(
 			report.Skipped = append(report.Skipped, reference)
 			continue
 		}
-		application, err := applyMetadataStage(target, stage, backupRoot)
+		application, err := applyMetadataStage(
+			target, stage, backupRoot, host.AppRoot,
+		)
 		if err != nil {
 			report.Halted = err.Error()
 			return report, err
@@ -382,22 +389,6 @@ func ApplyMetadataSweep(
 		report.Applied = append(report.Applied, application)
 	}
 	return report, nil
-}
-
-// RollbackMetadataSweep restores every document this run rewrote, newest first.
-func RollbackMetadataSweep(report *MetadataSweepReport) error {
-	for index := len(report.Applied) - 1; index >= 0; index-- {
-		if err := rollbackMetadataApplication(
-			report.Applied[index],
-		); err != nil {
-			return fmt.Errorf(
-				"%s %s: %w",
-				report.Applied[index].Kind, report.Applied[index].ID, err,
-			)
-		}
-	}
-	report.RolledBack = true
-	return nil
 }
 
 // VerifyMetadataSweep re-reads the runtime's own view after a restart and
@@ -456,4 +447,106 @@ func VerifyMetadataSweep(
 	}
 	report.VerifiedByAPI = true
 	return nil
+}
+
+// RollbackPlan is the private companion to the committed evidence. It carries
+// the absolute locations rollback needs, which the evidence deliberately omits,
+// and it lives inside the 0700 backup root beside the backups it names.
+type RollbackPlan struct {
+	Stage   MetadataStage          `json:"stage"`
+	Applied []*MetadataApplication `json:"applied"`
+	// Locations mirrors the absolute paths that MetadataApplication hides from
+	// the committed evidence, indexed the same way as Applied.
+	Locations [][]RollbackLocation `json:"locations"`
+}
+
+// RollbackLocation is one document's absolute pair of locations.
+type RollbackLocation struct {
+	Path       string `json:"path"`
+	BackupPath string `json:"backupPath"`
+}
+
+// BuildRollbackPlan lifts the absolute paths back out of the report so they can
+// be written to the private plan.
+func BuildRollbackPlan(report *MetadataSweepReport) *RollbackPlan {
+	plan := &RollbackPlan{Stage: report.Stage, Applied: report.Applied}
+	for _, application := range report.Applied {
+		locations := make([]RollbackLocation, 0, len(application.Files))
+		for _, file := range application.Files {
+			locations = append(locations, RollbackLocation{
+				Path: file.Path, BackupPath: file.BackupPath,
+			})
+		}
+		plan.Locations = append(plan.Locations, locations)
+	}
+	return plan
+}
+
+// ParseRollbackPlan restores a plan and reattaches the absolute locations to the
+// applications they belong to.
+func ParseRollbackPlan(raw []byte) (*RollbackPlan, error) {
+	var plan RollbackPlan
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		return nil, fmt.Errorf("parse rollback plan: %w", err)
+	}
+	if len(plan.Applied) == 0 {
+		return nil, fmt.Errorf("rollback plan records no applied change")
+	}
+	if len(plan.Locations) != len(plan.Applied) {
+		return nil, fmt.Errorf(
+			"rollback plan records %d resources but %d location sets",
+			len(plan.Applied), len(plan.Locations),
+		)
+	}
+	for index, application := range plan.Applied {
+		locations := plan.Locations[index]
+		if len(locations) != len(application.Files) {
+			return nil, fmt.Errorf(
+				"%s %s records %d documents but %d locations",
+				application.Kind, application.ID,
+				len(application.Files), len(locations),
+			)
+		}
+		for fileIndex, location := range locations {
+			application.Files[fileIndex].Path = location.Path
+			application.Files[fileIndex].BackupPath = location.BackupPath
+		}
+		// Directory and BackupRoot are derived rather than stored twice, so the
+		// plan cannot disagree with itself about where a resource lives.
+		if len(locations) > 0 {
+			application.Directory = filepath.Dir(locations[0].Path)
+			application.BackupRoot = filepath.Dir(
+				filepath.Dir(filepath.Dir(locations[0].BackupPath)),
+			)
+		}
+	}
+	return &plan, nil
+}
+
+// RollbackMetadataSweep restores every document a recorded run rewrote.
+func RollbackMetadataSweep(plan *RollbackPlan) error {
+	for index := len(plan.Applied) - 1; index >= 0; index-- {
+		if err := rollbackMetadataApplication(plan.Applied[index]); err != nil {
+			return fmt.Errorf(
+				"%s %s: %w",
+				plan.Applied[index].Kind, plan.Applied[index].ID, err,
+			)
+		}
+	}
+	return nil
+}
+
+// RestoreOutcomes renders how each of one resource's documents was restored.
+func (application *MetadataApplication) RestoreOutcomes() []string {
+	outcomes := make([]string, 0, len(application.Files))
+	for _, file := range application.Files {
+		outcomes = append(
+			outcomes,
+			fmt.Sprintf("%s: %s", file.Document, file.RestoredAs),
+		)
+	}
+	for _, name := range application.Reconciled {
+		outcomes = append(outcomes, name+": reconciled")
+	}
+	return outcomes
 }

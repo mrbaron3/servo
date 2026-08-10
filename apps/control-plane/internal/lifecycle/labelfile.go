@@ -47,15 +47,20 @@ type metadataFileState struct {
 // carries everything rollback needs, so recovery never has to re-derive what
 // the original looked like.
 type metadataFileApplication struct {
-	Path         string            `json:"path"`
-	LabelPath    []string          `json:"labelPath"`
-	BackupPath   string            `json:"backupPath"`
+	// Path and BackupPath are absolute and therefore never serialised into the
+	// committed evidence. They are carried in the private rollback plan that
+	// lives inside the 0700 backup root, next to the backups they name.
+	Path       string   `json:"-"`
+	LabelPath  []string `json:"labelPath"`
+	BackupPath string   `json:"-"`
+	// Document and Backup are the same two locations rendered relative to the
+	// application root and the backup root, which is what the evidence records.
+	Document     string            `json:"document"`
+	Backup       string            `json:"backup"`
 	BeforeSHA256 string            `json:"beforeSha256"`
 	AfterSHA256  string            `json:"afterSha256"`
 	BackupSHA256 string            `json:"backupSha256"`
 	Mode         os.FileMode       `json:"mode"`
-	UID          int               `json:"-"`
-	GID          int               `json:"-"`
 	BeforeLabels map[string]string `json:"beforeLabels"`
 	AfterLabels  map[string]string `json:"afterLabels"`
 	// RestoredAs records how a rollback returned this document, when one ran.
@@ -272,8 +277,6 @@ func applyMetadataFile(
 		AfterSHA256:  digestOf(updated),
 		BackupSHA256: digestOf(current),
 		Mode:         state.Mode.Perm(),
-		UID:          state.UID,
-		GID:          state.GID,
 		BeforeLabels: state.Labels,
 		AfterLabels:  labels,
 	}, nil
@@ -438,16 +441,22 @@ func restoreMetadataFile(
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", application.Path, err)
 	}
-	if _, _, _, err := statMetadataFile(application.Path); err != nil {
+	// Owner and mode are taken from the file in front of us rather than from the
+	// record. A rollback run from a saved plan has no owner in it — those fields
+	// are absolute-machine detail that the plan deliberately does not serialise —
+	// and the file on disk is in any case the authority for who owns it.
+	// statMetadataFile has already proven it is a regular file this user owns.
+	info, uid, gid, err := statMetadataFile(application.Path)
+	if err != nil {
 		return "", err
 	}
+	mode := info.Mode().Perm()
 	switch digestOf(current) {
 	case application.BeforeSHA256:
 		return RestoreAlreadyBefore, nil
 	case application.AfterSHA256:
 		if err := writeFileAtomically(
-			application.Path, backup, application.Mode,
-			application.UID, application.GID,
+			application.Path, backup, mode, uid, gid,
 		); err != nil {
 			return "", err
 		}
@@ -498,8 +507,7 @@ func restoreMetadataFile(
 		return "", fmt.Errorf("%s: %w", application.Path, err)
 	}
 	if err := writeFileAtomically(
-		application.Path, relabelled, application.Mode,
-		application.UID, application.GID,
+		application.Path, relabelled, mode, uid, gid,
 	); err != nil {
 		return "", err
 	}
