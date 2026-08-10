@@ -18,4 +18,4 @@
 | LANG-registration-control-014 | Recovery State | `none\|scheduled\|in_progress\|blocked\|recovered\|unknown` の明示的な回復進行度。新しいauthoritative snapshot前にrecoveredとしない。 |
 | LANG-registration-control-015 | Browser Operator Session | exact loopback originから一回限りbootstrapで得るserver-side session。browserはHttpOnly cookieとmemory-only CSRF proofだけを持つ。 |
 | LANG-registration-control-016 | Command Outcome | idempotency identity、observed/current fence、`applied\|duplicate\|version_conflict\|rejected\|indeterminate`、recorded timeを持つdurable command結果。 |
-| LANG-registration-control-017 | Cursor Observed At | `LANG-control-store-033` Monitor Cursor Observationのread-only projection。次期API JSON keyは`cursorObservedAt`で、registration-control側では独自に前進させない。現行`lastPoll`は互換名でありpoll attemptを意味しない。 |
+| LANG-registration-control-017 | Cursor Observed At | `LANG-control-store-033` Monitor Cursor Observationのread-only projection。API v1.4の正典JSON keyは`cursorObservedAt`で、registration-control側では独自に前進させない。`lastPoll`は同じmapを返す1版限りのdeprecated aliasで、poll attemptを意味せず次API版で削除する。 |

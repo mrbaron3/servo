@@ -5,9 +5,11 @@ import { INTERVENTION_KINDS } from '../src/domain/schema.js';
 import {
   HistoricalReleaseGradeReceiptContract,
   HistoricalReleasePolicyContract,
+  LiveReleaseReceiptEvidenceContract,
   PersistedLiveReleaseReceiptEvidenceContract,
   ReleaseGradeReceiptContract,
   ReleasePolicyContract,
+  legacyLiveReleaseReceiptEvidenceWire,
   liveReleaseReceiptSemanticErrors,
   releasePreMergeSemanticErrors,
 } from '../src/evidence/release-receipt.js';
@@ -54,12 +56,12 @@ function base(
 
 function evidence(): any {
   return {
-    schemaVersion: '3.0',
+    schemaVersion: '4.0',
     release: {
       id: releaseId,
       repository: 'mrbaron3/designflow',
       issueNumber: 4,
-      pullRequest: 12,
+      pullRequestNumber: 12,
       finalHead,
       mergeSha,
       createdAt: '2026-08-01T00:00:00Z',
@@ -106,7 +108,8 @@ function evidence(): any {
         },
         invocations: [
           {
-            invocationId: 'generator-1',
+            invocationKey: 'generator-key-1',
+            invocationRef: 'generator-1',
             role: 'generator',
             provider: 'codex',
             model: {
@@ -117,21 +120,24 @@ function evidence(): any {
             head: firstHead,
           },
           {
-            invocationId: 'repair-1',
+            invocationKey: 'repair-key-1',
+            invocationRef: 'repair-1',
             role: 'repair',
             provider: 'codex',
             model: { kind: 'explicit', name: 'gpt-5.6-codex' },
             head: finalHead,
           },
-          ...['security-1', 'codeQuality-1'].map((invocationId) => ({
-            invocationId,
+          ...['security-1', 'codeQuality-1'].map((invocationRef) => ({
+            invocationKey: `${invocationRef}-key`,
+            invocationRef,
             role: 'reviewer',
             provider: 'claude',
             model: { kind: 'explicit', name: 'claude-opus' },
             head: firstHead,
           })),
-          ...['security-2', 'codeQuality-2'].map((invocationId) => ({
-            invocationId,
+          ...['security-2', 'codeQuality-2'].map((invocationRef) => ({
+            invocationKey: `${invocationRef}-key`,
+            invocationRef,
             role: 'reviewer',
             provider: 'claude',
             model: { kind: 'explicit', name: 'claude-opus' },
@@ -145,7 +151,7 @@ function evidence(): any {
           kind: 'build',
           head: firstHead,
           parentHead: null,
-          invocationId: 'generator-1',
+          invocationRef: 'generator-1',
           role: 'generator',
         },
         {
@@ -158,7 +164,7 @@ function evidence(): any {
           kind: 'build',
           head: finalHead,
           parentHead: firstHead,
-          invocationId: 'repair-1',
+          invocationRef: 'repair-1',
           role: 'repair',
         },
       ],
@@ -187,8 +193,9 @@ function evidence(): any {
           head: firstHead,
           headEpoch: 1,
           perspective: 'security',
-          invocationId: 'security-1',
-          verdict: 'findings',
+          invocationRef: 'security-1',
+          verdict: 'request_changes',
+          hasFindings: true,
           findings: [{ findingId: 'finding-1', lineage: 'new' }],
         },
         {
@@ -197,8 +204,9 @@ function evidence(): any {
           head: firstHead,
           headEpoch: 1,
           perspective: 'codeQuality',
-          invocationId: 'codeQuality-1',
-          verdict: 'approved',
+          invocationRef: 'codeQuality-1',
+          verdict: 'approve',
+          hasFindings: false,
           findings: [],
         },
         {
@@ -207,8 +215,9 @@ function evidence(): any {
           head: finalHead,
           headEpoch: 2,
           perspective: 'security',
-          invocationId: 'security-2',
-          verdict: 'approved',
+          invocationRef: 'security-2',
+          verdict: 'approve',
+          hasFindings: false,
           findings: [],
         },
         {
@@ -217,8 +226,9 @@ function evidence(): any {
           head: finalHead,
           headEpoch: 2,
           perspective: 'codeQuality',
-          invocationId: 'codeQuality-2',
-          verdict: 'approved',
+          invocationRef: 'codeQuality-2',
+          verdict: 'approve',
+          hasFindings: false,
           findings: [],
         },
       ],
@@ -244,20 +254,19 @@ function evidence(): any {
           resolutionId,
         ]),
         kind: 'merge-intent',
-        pullRequest: 12,
+        pullRequestNumber: 12,
         expectedHead: finalHead,
         observedPrHead: finalHead,
       },
       merge: {
         ...base(mergeId, 'merge:12', '2026-08-01T00:08:00Z', [mergeIntentId]),
         kind: 'merge',
-        pullRequest: 12,
+        pullRequestNumber: 12,
         expectedHead: finalHead,
         observedPrHead: finalHead,
         mergeSha,
         actor: 'workflow-app[bot]',
-        issueState: 'CLOSED',
-        issueStateReason: 'COMPLETED',
+        sourceIssueClosure: 'completed',
         mergeReachableFromDefaultBranch: true,
         mergedAt: '2026-08-01T00:08:00Z',
       },
@@ -276,15 +285,67 @@ function evidence(): any {
   };
 }
 
+function historicalEvidence(schemaVersion: '2.0' | '3.0'): any {
+  const legacy = structuredClone(evidence());
+  legacy.schemaVersion = schemaVersion;
+  legacy.release.pullRequest = legacy.release.pullRequestNumber;
+  delete legacy.release.pullRequestNumber;
+  legacy.receipts.runtime.forEach((runtime: any) => {
+    runtime.invocations.forEach((invocation: any) => {
+      invocation.invocationId = invocation.invocationRef;
+      delete invocation.invocationRef;
+    });
+  });
+  legacy.receipts.builds.forEach((build: any) => {
+    build.invocationId = build.invocationRef;
+    delete build.invocationRef;
+  });
+  legacy.receipts.reviews.forEach((review: any) => {
+    review.invocationId = review.invocationRef;
+    review.verdict = review.verdict === 'approve' ? 'approved' : 'findings';
+    delete review.invocationRef;
+    delete review.hasFindings;
+  });
+  legacy.receipts.mergeIntent.pullRequest =
+    legacy.receipts.mergeIntent.pullRequestNumber;
+  delete legacy.receipts.mergeIntent.pullRequestNumber;
+  legacy.receipts.merge.pullRequest = legacy.receipts.merge.pullRequestNumber;
+  legacy.receipts.merge.issueState = 'CLOSED';
+  legacy.receipts.merge.issueStateReason = 'COMPLETED';
+  delete legacy.receipts.merge.pullRequestNumber;
+  delete legacy.receipts.merge.sourceIssueClosure;
+  if (schemaVersion === '2.0') {
+    delete legacy.receipts.requirementsAuthority;
+    for (const group of Object.values(legacy.receipts)) {
+      for (const receipt of Array.isArray(group) ? group : [group]) {
+        if (receipt && Array.isArray((receipt as any).causes)) {
+          (receipt as any).causes = (receipt as any).causes.filter(
+            (cause: string) => cause !== requirementsAuthorityId,
+          );
+        }
+      }
+    }
+  }
+  return legacy;
+}
+
 function compiled() {
   const schema = JSON.parse(fs.readFileSync(
-    'contracts/live-release-receipt.schema.json',
+    new URL('../../../contracts/live-release-receipt-v4.schema.json', import.meta.url),
     'utf8',
   ));
   return new Ajv2020({ strict: true, allErrors: true }).compile(schema);
 }
 
-describe('release receipt evidence v2', () => {
+function compiledHistorical() {
+  const schema = JSON.parse(fs.readFileSync(
+    new URL('../../../contracts/live-release-receipt.schema.json', import.meta.url),
+    'utf8',
+  ));
+  return new Ajv2020({ strict: true, allErrors: true }).compile(schema);
+}
+
+describe('release receipt evidence v4', () => {
   it('validates gate names according to their source namespace', () => {
     const basePolicy = {
       authority: 'human-ready-allowed' as const,
@@ -317,7 +378,7 @@ describe('release receipt evidence v2', () => {
   });
 
   it('keeps historical v3 grade aliases decode-only while canonical writers stay strict', () => {
-    const persistedV3 = evidence();
+    const persistedV3 = historicalEvidence('3.0');
     const historicalGrade = {
       ...persistedV3.receipts.grades[0],
       receiptId: historicalGradeId,
@@ -332,7 +393,7 @@ describe('release receipt evidence v2', () => {
       .toBe(true);
     expect(PersistedLiveReleaseReceiptEvidenceContract.safeParse(persistedV3).success)
       .toBe(true);
-    expect(compiled()(persistedV3)).toBe(true);
+    expect(compiledHistorical()(persistedV3)).toBe(true);
     expect(liveReleaseReceiptSemanticErrors(persistedV3)).toEqual([]);
   });
 
@@ -383,7 +444,7 @@ describe('release receipt evidence v2', () => {
       ],
     }).success).toBe(true);
 
-    const persisted = evidence();
+    const persisted = historicalEvidence('3.0');
     persisted.policy.requiredGateSignals = [
       { source: 'repository-grader', name: 'unit_tests' },
       { source: 'repository-grader', name: 'unit_tests' },
@@ -391,7 +452,7 @@ describe('release receipt evidence v2', () => {
     persisted.policy.requiredReviewPerspectives = ['security', 'security'];
     expect(PersistedLiveReleaseReceiptEvidenceContract.safeParse(persisted).success)
       .toBe(true);
-    expect(compiled()(persisted)).toBe(true);
+    expect(compiledHistorical()(persisted)).toBe(true);
     expect(liveReleaseReceiptSemanticErrors(persisted)).toEqual([]);
   });
 
@@ -419,36 +480,80 @@ describe('release receipt evidence v2', () => {
 
   it('allows a changes-requested review without findings but keeps approvals empty', () => {
     const emptyRequest = evidence();
-    emptyRequest.receipts.reviews[1].verdict = 'findings';
+    emptyRequest.receipts.reviews[1].verdict = 'request_changes';
     expect(liveReleaseReceiptSemanticErrors(emptyRequest)).toEqual([]);
 
     const invalidApproval = evidence();
+    invalidApproval.receipts.reviews[1].hasFindings = true;
     invalidApproval.receipts.reviews[1].findings = [{
       findingId: 'finding-on-approved-review',
       lineage: 'new',
     }];
-    expect(liveReleaseReceiptSemanticErrors(invalidApproval)).toContain(
-      'review:1:codeQuality.approved verdict cannot contain findings',
-    );
+    expect(liveReleaseReceiptSemanticErrors(invalidApproval).join('; '))
+      .toContain('approve verdict cannot contain findings');
   });
 
-  it('continues to validate immutable legacy v2 evidence without requirements authority', () => {
-    const current = evidence();
-    const { requirementsAuthority, ...legacyReceipts } = current.receipts;
-    void requirementsAuthority;
-    legacyReceipts.mergeIntent.causes = legacyReceipts.mergeIntent.causes
-      .filter((cause: string) => cause !== requirementsAuthorityId);
-    const legacy = {
-      ...current,
-      schemaVersion: '2.0' as const,
-      receipts: legacyReceipts,
-    };
+  it('normalizes immutable legacy v3 evidence without inventing invocation keys', () => {
+    const legacy = historicalEvidence('3.0');
+    legacy.receipts.runtime.forEach((runtime: any) => {
+      runtime.invocations.forEach((invocation: any) => {
+        delete invocation.invocationKey;
+      });
+    });
     legacy.policy.requiredGateSignals[0].name = 'contracts';
     legacy.receipts.grades[0].signal.name = 'contracts';
 
     expect(PersistedLiveReleaseReceiptEvidenceContract.parse(legacy)).toEqual(legacy);
-    const validate = compiled();
+    const normalized = LiveReleaseReceiptEvidenceContract.parse(legacy);
+    expect(normalized).toMatchObject({
+      schemaVersion: '3.0',
+      release: expect.objectContaining({ pullRequestNumber: 12 }),
+      receipts: expect.objectContaining({
+        merge: expect.objectContaining({ sourceIssueClosure: 'completed' }),
+      }),
+    });
+    expect(normalized.receipts.runtime[0]?.invocations[0]).toMatchObject({
+      invocationKey: 'generator-1',
+      invocationRef: 'generator-1',
+    });
+    const legacySchema = JSON.parse(fs.readFileSync(
+      new URL('../../../contracts/live-release-receipt.schema.json', import.meta.url),
+      'utf8',
+    ));
+    const validate = new Ajv2020({ strict: true, allErrors: true }).compile(legacySchema);
     expect(validate(legacy), JSON.stringify(validate.errors)).toBe(true);
+    expect(liveReleaseReceiptSemanticErrors(legacy)).toEqual([]);
+  });
+
+  it('exports pre-requirements releases on the immutable v2 wire', () => {
+    const historical = evidence();
+    historical.schemaVersion = '2.0';
+    delete historical.receipts.requirementsAuthority;
+    for (const group of Object.values(historical.receipts)) {
+      for (const receipt of Array.isArray(group) ? group : [group]) {
+        if (receipt && Array.isArray((receipt as any).causes)) {
+          (receipt as any).causes = (receipt as any).causes.filter(
+            (cause: string) => cause !== requirementsAuthorityId,
+          );
+        }
+      }
+    }
+    const canonical = LiveReleaseReceiptEvidenceContract.parse(historical);
+    const legacy = legacyLiveReleaseReceiptEvidenceWire(canonical) as any;
+    const legacySchema = JSON.parse(fs.readFileSync(
+      new URL('../../../contracts/live-release-receipt.schema.json', import.meta.url),
+      'utf8',
+    ));
+    const validate = new Ajv2020({ strict: true, allErrors: true }).compile(legacySchema);
+
+    expect(validate(legacy), JSON.stringify(validate.errors)).toBe(true);
+    expect(legacy.release).toHaveProperty('pullRequest', 12);
+    expect(legacy.release).not.toHaveProperty('pullRequestNumber');
+    expect(legacy.receipts.runtime[0].invocations[0]).toMatchObject({
+      invocationId: 'generator-1',
+      invocationKey: 'generator-key-1',
+    });
+    expect(legacy.receipts).not.toHaveProperty('requirementsAuthority');
     expect(liveReleaseReceiptSemanticErrors(legacy)).toEqual([]);
   });
 
@@ -471,7 +576,8 @@ describe('release receipt evidence v2', () => {
         digest,
       },
       invocations: [{
-        invocationId: 'planning-reconciliation',
+        invocationKey: 'planning-reconciliation-key',
+        invocationRef: 'planning-reconciliation',
         role: 'planning',
         provider: 'codex',
         model: { kind: 'explicit', name: 'gpt-5.6-codex' },
@@ -489,7 +595,8 @@ describe('release receipt evidence v2', () => {
     );
 
     const duplicateOrigin = evidence();
-    duplicateOrigin.receipts.reviews[1].verdict = 'findings';
+    duplicateOrigin.receipts.reviews[1].verdict = 'request_changes';
+    duplicateOrigin.receipts.reviews[1].hasFindings = true;
     duplicateOrigin.receipts.reviews[1].findings = [{
       findingId: 'finding-1',
       lineage: 'new',
@@ -525,13 +632,14 @@ describe('release receipt evidence v2', () => {
     value.receipts.authority = {
       ...value.receipts.authority,
       route: 'ai-triage-then-human-ready',
-      triageInvocationId: 'triage-1',
+      triageInvocationRef: 'triage-1',
       triageCompletedAt: '2026-08-01T00:00:04Z',
       sourceDigest: '1'.repeat(64),
       decision: { schemaVersion: 1, readiness: 'ready_candidate' },
     };
     value.receipts.runtime[0].invocations.push({
-      invocationId: 'triage-1',
+      invocationKey: 'triage-key-1',
+      invocationRef: 'triage-1',
       role: 'triage',
       provider: 'codex',
       model: { kind: 'explicit', name: 'gpt-5.6-codex' },
@@ -548,7 +656,7 @@ describe('release receipt evidence v2', () => {
     ['another repository', (value: any) => { value.receipts.reviews[0].repository = 'mrbaron3/workflow'; }],
     ['another issue', (value: any) => { value.receipts.builds[0].issueNumber = 44; }],
     ['a stale final review', (value: any) => { value.receipts.reviews[2].head = firstHead; }],
-    ['a mixed build invocation', (value: any) => { value.receipts.builds[1].invocationId = 'generator-1'; }],
+    ['a mixed build invocation', (value: any) => { value.receipts.builds[1].invocationRef = 'generator-1'; }],
     ['an unresolved finding', (value: any) => { value.receipts.findingResolutions = []; }],
     ['a job-counted fake epoch', (value: any) => { value.receipts.reviews[2].headEpoch = 3; value.receipts.reviews[3].headEpoch = 3; }],
     ['a broken causal edge', (value: any) => { value.receipts.merge.causes = [authorityId]; }],
@@ -567,11 +675,17 @@ describe('release receipt evidence v2', () => {
     duplicate.policy.requiredReviewPerspectives = ['security', 'security'];
     expect(ReleasePolicyContract.safeParse(duplicate.policy).success).toBe(false);
     expect(PersistedLiveReleaseReceiptEvidenceContract.safeParse(duplicate).success)
+      .toBe(false);
+    expect(liveReleaseReceiptSemanticErrors(duplicate).length).toBeGreaterThan(0);
+    const historicalDuplicate = historicalEvidence('3.0');
+    historicalDuplicate.policy.requiredReviewPerspectives = ['security', 'security'];
+    expect(PersistedLiveReleaseReceiptEvidenceContract.safeParse(historicalDuplicate).success)
       .toBe(true);
-    expect(liveReleaseReceiptSemanticErrors(duplicate)).toEqual([]);
+    expect(liveReleaseReceiptSemanticErrors(historicalDuplicate)).toEqual([]);
 
     const staleFinal = evidence();
-    staleFinal.receipts.reviews[0].verdict = 'approved';
+    staleFinal.receipts.reviews[0].verdict = 'approve';
+    staleFinal.receipts.reviews[0].hasFindings = false;
     staleFinal.receipts.reviews[0].findings = [];
     staleFinal.receipts.findingResolutions = [];
     staleFinal.receipts.reviews[0].headEpoch = 2;
@@ -615,7 +729,7 @@ describe('release receipt evidence v2', () => {
 
   it('keeps the published intervention vocabulary aligned with the domain', () => {
     const schema = JSON.parse(fs.readFileSync(
-      'contracts/live-release-receipt.schema.json',
+      new URL('../../../contracts/live-release-receipt-v4.schema.json', import.meta.url),
       'utf8',
     ));
     expect(schema.$defs.intervention.allOf[1].properties.interventionKind.enum)
@@ -623,9 +737,9 @@ describe('release receipt evidence v2', () => {
   });
 
   it('authorizes pre-merge state without requiring a completed merge receipt', () => {
-    const value = PersistedLiveReleaseReceiptEvidenceContract.parse(evidence());
-    if (value.schemaVersion !== '3.0') {
-      throw new Error('fixture must decode as canonical release evidence v3');
+    const value = LiveReleaseReceiptEvidenceContract.parse(evidence());
+    if (value.schemaVersion !== '4.0') {
+      throw new Error('fixture must decode as canonical release evidence v4');
     }
     const receipts = [
       value.receipts.authority,
@@ -641,7 +755,7 @@ describe('release receipt evidence v2', () => {
       releaseId,
       repository: value.release.repository,
       issueNumber: value.release.issueNumber,
-      pullRequest: value.release.pullRequest,
+      pullRequestNumber: value.release.pullRequestNumber,
       expectedHead: finalHead,
       policy: value.policy,
       receipts,

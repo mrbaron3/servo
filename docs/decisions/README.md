@@ -41,4 +41,5 @@
 | [ADR-0019](ADR-0019-github-app-credential-broker.md) | GitHub App credential brokerで手動PATと共有`gh` credentialを廃止し、role-scoped短期tokenをprocess内に閉じる | 採択・実装済み |
 | [ADR-0020](ADR-0020-release-receipt-evidence.md) | live release evidenceをjob topologyでなくdurable release identityとhead-bound causal receiptからcertifyする | 採択・production配線済み（external-target live run待ち） |
 | [ADR-0021](ADR-0021-go-typescript-application-boundaries.md) | GoとTypeScriptを別application rootへ分離し、root DB/contractとDB外runtime境界、当面一体のrelease unitを明示する | 採択・吸収・構造反映済み |
-| [ADR-0022](ADR-0022-servo-product-and-agentops-component-naming.md) | 製品名をServo、実行系technical prefixをagentopsに固定し、container label等の互換identifierを段階移行へ分離する | 採択・吸収済み（label/schema ID移行は未実施） |
+| [ADR-0022](ADR-0022-servo-product-and-agentops-component-naming.md) | 製品名をServo、実行系technical prefixをagentopsに固定し、container label等の互換identifierを段階移行へ分離する | 採択・吸収済み（label移行はIssue #123） |
+| [ADR-0023](ADR-0023-retire-legacy-escape-tables.md) | writerのないlegacy escape tableをread-only archiveへretireし、severityを正典へ統一する | 採択・吸収・実装済み |

@@ -987,7 +987,7 @@ export class ExistingAgentOpsRunnerAdapter implements AgentOpsRunnerAdapter {
               release,
               local: store,
               pr,
-              pullRequest: pr.externalRef!.number,
+              pullRequestNumber: pr.externalRef!.number,
               observedPrHead: revision.headSha,
               githubChecks: github.checks,
               githubObservedAt: snapshot.createdAt,
@@ -1031,7 +1031,7 @@ export class ExistingAgentOpsRunnerAdapter implements AgentOpsRunnerAdapter {
                 workerId: input.lease.workerId,
                 releaseId: release.id,
                 pullRequestNumber: pr.pr.externalRef.number,
-                childHeadSha: revision.headSha,
+                headSha: revision.headSha,
                 integratedHeadSha: observation.mergeSha,
               });
             }
@@ -1274,7 +1274,7 @@ export class ExistingAgentOpsRunnerAdapter implements AgentOpsRunnerAdapter {
                   await input.controlStore!.bindReleasePullRequest({
                     jobId: input.lease.job.id,
                     releaseId: release.id,
-                    pullRequest: pr.externalRef.number,
+                    pullRequestNumber: pr.externalRef.number,
                   });
                 },
               }
@@ -1488,7 +1488,7 @@ export class ExistingAgentOpsRunnerAdapter implements AgentOpsRunnerAdapter {
         release,
         local: store,
         pr: matchingPr,
-        pullRequest: matchingPr.externalRef.number,
+        pullRequestNumber: matchingPr.externalRef.number,
         observedPrHead: matchingPr.headSha,
         githubChecks: [],
         githubObservedAt: new Date().toISOString(),

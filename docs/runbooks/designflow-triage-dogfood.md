@@ -216,7 +216,7 @@ Registration-owned configurationとして渡す変更を追跡する。
 
 ## 証拠の形式と検証
 
-実走の結果は`contracts/live-release-evidence.schema.json`へ適合する1つのJSONにまとめ、
+新しい実走の結果は`contracts/live-release-evidence-v2.schema.json`へ適合する1つのJSONにまとめ、
 `evidence/live-release/`へ置く。検証は次で行う。
 
 ```sh
@@ -227,7 +227,9 @@ CISO-07の`ciso-07-release-evidence.schema.json`はPR 41・`mrbaron3/workflow`�
 `const`で固定した**その1回のための**契約であり、Designflow実走は入らない。live release契約は識別子
 （repository、Issue番号、PR番号、SHA、check名）を検証だけして固定せず、**主張したい不変条件のほうを`const`で
 固定する**（`aiAppliedReadyLabel: false`、`promotionAtomic: true`、`round3Created: false`、
-`blockingReviewThreads: 0`、`issueState: CLOSED`など）。したがって2件目以降の外部targetでも同じ契約を使う。
+`blockingReviewThreads: 0`、`sourceIssueClosure: completed`など）。したがって2件目以降の外部targetでも同じ契約を使う。
+version 1 artifactは元の`contracts/live-release-evidence.schema.json`で引き続き検証するが、新しい実走をv1へ
+down-convertしない。
 
 schemaは形状と個別の不変条件だけを見る。**独立に観測した各セクションを1つのrelease revisionへ束縛する**のは
 `apps/agentops/src/evidence/live-release.ts`の意味検証で、別々の実走から集めた断片を合格の証拠へ

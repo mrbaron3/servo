@@ -527,13 +527,12 @@ describe('ISSUE-0024/PR-INTENT durable lifecycle invariants', () => {
     );
 
     expect(observation).toMatchObject({
-      pullRequest: 8,
+      pullRequestNumber: 8,
       expectedHead: SHA_A,
       observedPrHead: SHA_A,
       mergeSha: SHA_B,
       actor: 'merge-bot',
-      issueState: 'CLOSED',
-      issueStateReason: 'COMPLETED',
+      sourceIssueClosure: 'completed',
       mergeReachableFromDefaultBranch: true,
     });
     expect(commands.at(-1)).toContain(`repos/acme/theme/compare/${SHA_B}...main`);

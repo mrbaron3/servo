@@ -72,6 +72,20 @@ type Registration struct {
 	UpdatedAt     time.Time       `json:"updatedAt"`
 }
 
+// MergeMethod returns the Registration-owned integration strategy. Omission
+// preserves the historical squash behavior without making workspace config a
+// second authority for control-plane jobs.
+func (registration Registration) MergeMethod() string {
+	var configuration struct {
+		MergeMethod string `json:"mergeMethod"`
+	}
+	if json.Unmarshal(registration.Configuration, &configuration) != nil ||
+		configuration.MergeMethod == "" {
+		return "squash"
+	}
+	return configuration.MergeMethod
+}
+
 type CreateRegistration struct {
 	Repository          string          `json:"repository"`
 	Enabled             *bool           `json:"enabled,omitempty"`
@@ -200,6 +214,7 @@ func validJSONObject(raw json.RawMessage) bool {
 	type registrationConfiguration struct {
 		ReleaseEvidence    *releasePolicy `json:"releaseEvidence,omitempty"`
 		GateTimeoutSeconds map[string]int `json:"gateTimeoutSeconds,omitempty"`
+		MergeMethod        string         `json:"mergeMethod,omitempty"`
 	}
 	var value registrationConfiguration
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -207,11 +222,15 @@ func validJSONObject(raw json.RawMessage) bool {
 	if decoder.Decode(&value) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return false
 	}
+	if value.MergeMethod != "" && value.MergeMethod != "squash" &&
+		value.MergeMethod != "merge" && value.MergeMethod != "rebase" {
+		return false
+	}
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &members); err != nil {
 		return false
 	}
-	for _, key := range []string{"releaseEvidence", "gateTimeoutSeconds"} {
+	for _, key := range []string{"mergeMethod", "releaseEvidence", "gateTimeoutSeconds"} {
 		member, present := members[key]
 		if present && bytes.Equal(bytes.TrimSpace(member), []byte("null")) {
 			return false
@@ -229,7 +248,8 @@ func validJSONObject(raw json.RawMessage) bool {
 	}
 	policy := value.ReleaseEvidence
 	if policy == nil {
-		return len(value.GateTimeoutSeconds) > 0 || bytes.Equal(bytes.TrimSpace(raw), []byte(`{}`))
+		return value.MergeMethod != "" || len(value.GateTimeoutSeconds) > 0 ||
+			bytes.Equal(bytes.TrimSpace(raw), []byte(`{}`))
 	}
 	if policy.Authority != "human-ready-allowed" &&
 		policy.Authority != "ai-triage-required" {
@@ -311,18 +331,21 @@ type ComponentProjection struct {
 }
 
 type RegistrationProjection struct {
-	Registration                 Registration                   `json:"registration"`
-	Mode                         lifecycle.Mode                 `json:"mode"`
-	Components                   map[string]ComponentProjection `json:"components"`
-	LastPoll                     map[string]*time.Time          `json:"lastPoll"`
-	LastDelivery                 *time.Time                     `json:"lastDelivery"`
-	QueueDepth                   int64                          `json:"queueDepth"`
-	ActiveJobID                  *string                        `json:"activeJobId"`
-	ActiveJobState               *string                        `json:"activeJobState"`
-	ActiveJobRegistrationVersion *int64                         `json:"activeJobRegistrationVersion"`
-	LastJobFailure               *JobFailureProjection          `json:"lastJobFailure"`
-	RecentDeliveryFailures       []DeliveryFailureProjection    `json:"recentDeliveryFailures"`
-	DevelopmentProgress          []DevelopmentIssueProgress     `json:"developmentProgress"`
+	Registration     Registration                   `json:"registration"`
+	Mode             lifecycle.Mode                 `json:"mode"`
+	Components       map[string]ComponentProjection `json:"components"`
+	CursorObservedAt map[string]*time.Time          `json:"cursorObservedAt"`
+	// LastPoll is the one-version deprecated wire alias. It is the cursor
+	// advance time, not an attempted poll or a liveness signal.
+	LastPoll                     map[string]*time.Time       `json:"lastPoll"`
+	LastDelivery                 *time.Time                  `json:"lastDelivery"`
+	QueueDepth                   int64                       `json:"queueDepth"`
+	ActiveJobID                  *string                     `json:"activeJobId"`
+	ActiveJobState               *string                     `json:"activeJobState"`
+	ActiveJobRegistrationVersion *int64                      `json:"activeJobRegistrationVersion"`
+	LastJobFailure               *JobFailureProjection       `json:"lastJobFailure"`
+	RecentDeliveryFailures       []DeliveryFailureProjection `json:"recentDeliveryFailures"`
+	DevelopmentProgress          []DevelopmentIssueProgress  `json:"developmentProgress"`
 	// True when the registration has more Issues with durable progress than
 	// the card shows, so the operator knows to reach for `agentopsctl progress`.
 	DevelopmentProgressTruncated bool `json:"developmentProgressTruncated"`
@@ -592,7 +615,9 @@ func (item WorkItem) TriagePayload() (map[string]any, error) {
 // QueuedJob selects the capability boundary from the observed entity kind.
 // Every Issue is triaged first. Only the triage runner's explicit ready-label
 // promotion can create an agentops.runner development_turn for that Issue.
-func (item WorkItem) QueuedJob(sourceKind string) (string, map[string]any, error) {
+func (item WorkItem) QueuedJob(
+	sourceKind, mergeMethod string,
+) (string, map[string]any, error) {
 	kind, supported := canonicalWorkItemKind(item.Kind)
 	if !supported {
 		return "", nil, fmt.Errorf("unsupported work item kind %q", item.Kind)
@@ -601,14 +626,16 @@ func (item WorkItem) QueuedJob(sourceKind string) (string, map[string]any, error
 		payload, err := item.TriagePayload()
 		return "agentops.triage", payload, err
 	}
-	payload, err := item.RunnerPayload(sourceKind)
+	payload, err := item.RunnerPayload(sourceKind, mergeMethod)
 	return "agentops.runner", payload, err
 }
 
 // RunnerPayload projects control-plane observations into the only executable
 // job contract. It never forwards the webhook body, a command, clone URL,
 // credential, host path, or arbitrary environment to the runner.
-func (item WorkItem) RunnerPayload(sourceKind string) (map[string]any, error) {
+func (item WorkItem) RunnerPayload(
+	sourceKind, mergeMethod string,
+) (map[string]any, error) {
 	canonicalRepository := strings.ToLower(strings.TrimSpace(item.Repository))
 	repository := strings.Split(canonicalRepository, "/")
 	if len(repository) != 2 || canonicalRepository != item.Repository ||
@@ -620,6 +647,9 @@ func (item WorkItem) RunnerPayload(sourceKind string) (map[string]any, error) {
 	kind, supported := canonicalWorkItemKind(item.Kind)
 	if !supported {
 		return nil, fmt.Errorf("unsupported executable work item kind %q", item.Kind)
+	}
+	if mergeMethod != "squash" && mergeMethod != "merge" && mergeMethod != "rebase" {
+		return nil, fmt.Errorf("unsupported integration strategy %q", mergeMethod)
 	}
 	switch kind {
 	case WorkItemKindIssue:
@@ -673,7 +703,7 @@ func (item WorkItem) RunnerPayload(sourceKind string) (map[string]any, error) {
 		"execution": map[string]any{
 			"mode":           mode,
 			"requiredChecks": []string{},
-			"mergeMethod":    "squash",
+			"mergeMethod":    mergeMethod,
 			"readyLabel":     "ready",
 			"claimedLabel":   "agent-claimed",
 		},

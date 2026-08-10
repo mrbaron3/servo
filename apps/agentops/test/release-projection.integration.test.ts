@@ -292,7 +292,7 @@ integration('production release receipt projection', () => {
       release: created.release,
       local,
       pr: currentPr,
-      pullRequest: 51,
+      pullRequestNumber: 51,
       observedPrHead: head,
       githubChecks: [{ name: 'ci', status: 'success' as const }],
       githubObservedAt: at(6),
@@ -314,7 +314,11 @@ integration('production release receipt projection', () => {
     expect((await control.listReleaseReceipts(created.release.id))
       .map((entry) => entry.receipt)
       .find((receipt) => receipt.kind === 'review' && receipt.perspective === 'ux'))
-      .toMatchObject({ verdict: 'findings', findings: [] });
+      .toMatchObject({
+        verdict: 'request_changes',
+        hasFindings: false,
+        findings: [],
+      });
     expect(await control.getRelease(created.release.id)).toMatchObject({
       status: 'collecting',
       pullRequest: 51,
@@ -332,13 +336,12 @@ integration('production release receipt projection', () => {
     });
     const mergeSha = 'd'.repeat(40);
     await projectReleaseMerge(control, created.release, producer, {
-      pullRequest: 51,
+      pullRequestNumber: 51,
       expectedHead: head,
       observedPrHead: head,
       mergeSha,
       actor: 'merge-bot',
-      issueState: 'CLOSED',
-      issueStateReason: 'COMPLETED',
+      sourceIssueClosure: 'completed',
       mergeReachableFromDefaultBranch: true,
       mergedAt: at(8),
     });
@@ -372,8 +375,13 @@ integration('production release receipt projection', () => {
     });
     const evidence = await control.exportReleaseEvidence(created.release.id);
     expect(evidence).toMatchObject({
-      schemaVersion: '3.0',
-      release: { id: created.release.id, finalHead: head, mergeSha },
+      schemaVersion: '4.0',
+      release: {
+        id: created.release.id,
+        pullRequestNumber: 51,
+        finalHead: head,
+        mergeSha,
+      },
       result: 'passed',
     });
     expect(evidence.receipts.runtime[0]?.invocations).toHaveLength(4);

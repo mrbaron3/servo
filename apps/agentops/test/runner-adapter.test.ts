@@ -1028,14 +1028,13 @@ describe('existing AgentOps isolated-runner adapter', () => {
             stateReason: 'completed' as const,
           },
         ],
-        observeRelease: (_cwd, _repository, _issue, pullRequest, expectedHead) => ({
-          pullRequest,
+        observeRelease: (_cwd, _repository, _issue, pullRequestNumber, expectedHead) => ({
+          pullRequestNumber,
           expectedHead,
           observedPrHead: expectedHead,
           mergeSha: 'b'.repeat(40),
           actor: 'merger',
-          issueState: 'CLOSED' as const,
-          issueStateReason: 'COMPLETED' as const,
+          sourceIssueClosure: 'completed' as const,
           mergeReachableFromDefaultBranch: true as const,
           mergedAt: '2026-07-25T00:10:00.000Z',
         }),
@@ -1091,14 +1090,14 @@ describe('existing AgentOps isolated-runner adapter', () => {
     expect(githubSideEffects).toContain('close-issue:1');
     expect(pullRequestBindings).toContainEqual(expect.objectContaining({
       releaseId,
-      pullRequest: 38,
+      pullRequestNumber: 38,
     }));
     expect(authorizationInputs).toEqual([
       expect.objectContaining({
         releaseId,
         intent: expect.objectContaining({
           kind: 'merge-intent',
-          pullRequest: 38,
+          pullRequestNumber: 38,
           expectedHead: headSha,
           observedPrHead: headSha,
         }),
@@ -1109,7 +1108,7 @@ describe('existing AgentOps isolated-runner adapter', () => {
         releaseId,
         receipt: expect.objectContaining({
           kind: 'merge',
-          pullRequest: 38,
+          pullRequestNumber: 38,
           expectedHead: headSha,
           observedPrHead: headSha,
           mergeSha: 'b'.repeat(40),

@@ -27,7 +27,8 @@ function validArtifactPath(uri: unknown): boolean {
 
 function roundHasFindings(round: JsonObject | undefined): boolean {
   return (round?.reviewers ?? []).some(
-    (reviewer: JsonObject) => reviewer?.verdict === 'findings',
+    (reviewer: JsonObject) => reviewer?.hasFindings === true
+      || reviewer?.verdict === 'findings',
   );
 }
 
@@ -91,10 +92,18 @@ export function liveReleaseSemanticErrors(evidence: JsonObject): string[] {
         reviewer?.head,
         round.head,
       );
-      const noFindings = reviewer?.verdict === 'no_findings';
-      if (noFindings !== (reviewer?.findingCount === 0)) {
+      const hasFindings = evidence.schemaVersion === '2.0'
+        ? reviewer?.hasFindings === true
+        : reviewer?.verdict === 'findings';
+      if (hasFindings !== (reviewer?.findingCount > 0)) {
         errors.push(
-          `formalReviews.${name}.reviewers.${index}.verdict must agree with findingCount`,
+          `formalReviews.${name}.reviewers.${index}.hasFindings must agree with findingCount`,
+        );
+      }
+      if (evidence.schemaVersion === '2.0'
+        && reviewer?.verdict === 'approve' && hasFindings) {
+        errors.push(
+          `formalReviews.${name}.reviewers.${index}.approve cannot carry findings`,
         );
       }
     }

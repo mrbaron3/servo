@@ -277,7 +277,7 @@
       : {};
     const lineageChildren = Array.isArray(lineage.children) ? lineage.children : [];
     const lineageEvidence = lineage.nodeId
-      ? `<p>node <code>${escapeHTML(lineage.nodeId)}</code> · ${escapeHTML(lineage.status || 'unknown')}${lineage.parentIssueNumber ? ` · parent #${Number(lineage.parentIssueNumber)} @ <code>${escapeHTML(lineage.parentHeadSha || '—')}</code>` : ''}</p>${lineageChildren.length > 0 ? `<ul>${lineageChildren.map((child) => `<li>#${Number(child.issueNumber)} · ${escapeHTML(child.status || 'unknown')} · parent <code>${escapeHTML(child.parentHeadSha || '—')}</code>${child.pullRequestNumber ? ` · PR #${Number(child.pullRequestNumber)}` : ''}</li>`).join('')}</ul>` : ''}`
+      ? `<p>node <code>${escapeHTML(lineage.nodeId)}</code> · ${escapeHTML(lineage.status || 'unknown')}${lineage.pullRequestNumber ? ` · PR #${Number(lineage.pullRequestNumber)}` : ''}${lineage.headSha ? ` @ <code>${escapeHTML(lineage.headSha)}</code>` : ''}${lineage.parentIssueNumber ? ` · parent #${Number(lineage.parentIssueNumber)} @ <code>${escapeHTML(lineage.parentHeadSha || '—')}</code>` : ''}</p>${lineageChildren.length > 0 ? `<ul>${lineageChildren.map((child) => `<li>#${Number(child.issueNumber)} · ${escapeHTML(child.status || 'unknown')} · parent <code>${escapeHTML(child.parentHeadSha || '—')}</code>${child.pullRequestNumber ? ` · PR #${Number(child.pullRequestNumber)}` : ''}${child.headSha ? ` @ <code>${escapeHTML(child.headSha)}</code>` : ''}</li>`).join('')}</ul>` : ''}`
       : '<p class="quiet">lineage なし</p>';
     const history = [...events].reverse().map((event) =>
       `<li><time>${formatTime(event.occurredAt)}</time><span>${escapeHTML(event.phase)}</span><strong>${escapeHTML(event.state)}</strong><span>${escapeHTML(event.step)}</span></li>`
@@ -369,8 +369,8 @@
       <details class="details">
         <summary>配送・ジョブ詳細</summary>
         <div class="details-grid">
-          <span>Issue cursor advanced<br><strong>${formatTime(item.lastPoll?.issue)}</strong></span>
-          <span>PR cursor advanced<br><strong>${formatTime(item.lastPoll?.pull_request)}</strong></span>
+          <span>Issue cursor advanced<br><strong>${formatTime((item.cursorObservedAt || item.lastPoll)?.issue)}</strong></span>
+          <span>PR cursor advanced<br><strong>${formatTime((item.cursorObservedAt || item.lastPoll)?.pull_request)}</strong></span>
           <span>Last delivery<br><strong>${formatTime(item.lastDelivery)}</strong></span>
           <span>Queue depth<br><strong>${Number(item.queueDepth || 0)}</strong></span>
           <span>Active job<br><strong>${escapeHTML(item.activeJobId || '—')} / ${escapeHTML(item.activeJobState || '—')} / version ${escapeHTML(item.activeJobRegistrationVersion || '—')}</strong></span>

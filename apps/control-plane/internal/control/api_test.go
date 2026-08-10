@@ -196,7 +196,8 @@ func TestRegistrationCommandsCarryStrictReleaseEvidenceConfiguration(t *testing.
 	configuration := `{"releaseEvidence":{"authority":"ai-triage-required",` +
 		`"requiredGateSignals":[{"source":"repository-grader","name":"api_tests"}],` +
 		`"requiredReviewPerspectives":["functionality","security"],` +
-		`"minimumHeadEpochs":1},"gateTimeoutSeconds":{"default":3600,"review":600}}`
+		`"minimumHeadEpochs":1},"gateTimeoutSeconds":{"default":3600,"review":600},` +
+		`"mergeMethod":"rebase"}`
 	store := &fakeAPIStore{}
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -243,6 +244,9 @@ func TestRegistrationCommandsCarryStrictReleaseEvidenceConfiguration(t *testing.
 		`"minimumHeadEpochs":1}}`
 	if validJSONObject(json.RawMessage(invalidRepositoryGrader)) {
 		t.Fatal("unknown repository grader signal passed the control contract")
+	}
+	if validJSONObject(json.RawMessage(`{"mergeMethod":"octopus"}`)) {
+		t.Fatal("unsupported integration strategy passed the control contract")
 	}
 	customGitHubCheck := `{"releaseEvidence":{"authority":"human-ready-allowed",` +
 		`"requiredGateSignals":[{"source":"github-check","name":"ci/custom"}],` +
@@ -598,10 +602,16 @@ func TestMonitorOnlyModeDoesNotMaskStaleExecutionEvidence(t *testing.T) {
 }
 
 func TestStatusProjectionPreservesAuthoritativeLifecycleMode(t *testing.T) {
+	observedAt := time.Date(2026, 8, 6, 1, 2, 3, 0, time.UTC)
+	cursorObservedAt := map[string]*time.Time{
+		"issue": &observedAt, "pull_request": nil,
+	}
 	store := &fakeAPIStore{projections: []RegistrationProjection{{
-		Registration: Registration{Repository: "owner/draining"},
-		Mode:         lifecycle.ModeDraining,
-		Components:   map[string]ComponentProjection{},
+		Registration:     Registration{Repository: "owner/draining"},
+		Mode:             lifecycle.ModeDraining,
+		Components:       map[string]ComponentProjection{},
+		CursorObservedAt: cursorObservedAt,
+		LastPoll:         cursorObservedAt,
 	}}}
 	request := httptest.NewRequest(http.MethodGet, "/v1/registrations", nil)
 	request.Header.Set("Authorization", "Bearer control-token")
@@ -618,7 +628,12 @@ func TestStatusProjectionPreservesAuthoritativeLifecycleMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(page.Items) != 1 || page.Items[0].Mode != lifecycle.ModeDraining ||
-		page.Mode != lifecycle.ModeDraining {
+		page.Mode != lifecycle.ModeDraining ||
+		page.Items[0].CursorObservedAt["issue"] == nil ||
+		page.Items[0].LastPoll["issue"] == nil ||
+		!page.Items[0].CursorObservedAt["issue"].Equal(
+			*page.Items[0].LastPoll["issue"],
+		) {
 		t.Fatalf("lifecycle mode was overwritten: %#v", page.Items)
 	}
 }

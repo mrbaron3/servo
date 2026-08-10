@@ -74,13 +74,12 @@ export interface FetchedPullRequestRevision {
 }
 
 export interface GithubReleaseObservation {
-  pullRequest: number;
+  pullRequestNumber: number;
   expectedHead: string;
   observedPrHead: string;
   mergeSha: string;
   actor: string;
-  issueState: 'CLOSED';
-  issueStateReason: 'COMPLETED';
+  sourceIssueClosure: 'completed';
   mergeReachableFromDefaultBranch: true;
   mergedAt: string;
 }

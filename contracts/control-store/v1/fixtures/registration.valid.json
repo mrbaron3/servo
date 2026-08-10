@@ -5,7 +5,9 @@
   "issueMonitorEnabled": true,
   "prMonitorEnabled": true,
   "executionEnabled": true,
-  "configuration": {},
+  "configuration": {
+    "mergeMethod": "rebase"
+  },
   "version": 1,
   "createdAt": "2026-07-25T00:00:00.000Z",
   "updatedAt": "2026-07-25T00:00:00.000Z"

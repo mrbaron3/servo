@@ -181,7 +181,7 @@ export interface ProjectReleasePreMergeInput {
   release: ReleaseRecord;
   local: Store;
   pr: PR;
-  pullRequest: number;
+  pullRequestNumber: number;
   observedPrHead: string;
   githubChecks: readonly RevisionCheck[];
   githubObservedAt: string;
@@ -197,13 +197,13 @@ async function projectReleaseEvidence(
   const runtime = ReleaseRuntimeConfigurationContract.parse(input.runtime);
   const head = Head.parse(input.observedPrHead.toLowerCase());
   if (input.pr.headSha?.toLowerCase() !== head
-    || input.pr.externalRef?.number !== input.pullRequest) {
+    || input.pr.externalRef?.number !== input.pullRequestNumber) {
     throw new Error('release projection PR/head does not match the observed GitHub revision');
   }
   await input.control.bindReleasePullRequest({
     jobId: input.producer.jobId,
     releaseId: input.release.id,
-    pullRequest: input.pullRequest,
+    pullRequestNumber: input.pullRequestNumber,
   });
   if (input.release.status === 'merge-authorized') {
     if (!authorizeMerge) return;
@@ -213,7 +213,7 @@ async function projectReleaseEvidence(
       (receipt) => receipt.kind === 'merge-intent',
     );
     if (!intent
-      || intent.pullRequest !== input.pullRequest
+      || intent.pullRequestNumber !== input.pullRequestNumber
       || intent.expectedHead !== head
       || intent.observedPrHead !== head) {
       throw new Error('authorized release has no matching durable merge intent');
@@ -237,14 +237,14 @@ async function projectReleaseEvidence(
       role: Exclude<ReturnType<typeof runtimeRole>, null>;
     } => entry.role !== null)
     .sort((left, right) => left.source.createdAt.localeCompare(right.source.createdAt));
-  const invocationId = (key: string): string => (
+  const invocationRef = (key: string): string => (
     `invocation:${deterministicUuid(input.release.id, key)}`
   );
-  const priorInvocationIds = new Set(existing
+  const priorInvocationRefs = new Set(existing
     .filter((receipt) => receipt.kind === 'runtime-provenance')
-    .flatMap((receipt) => receipt.invocations.map((invocation) => invocation.invocationId)));
+    .flatMap((receipt) => receipt.invocations.map((invocation) => invocation.invocationRef)));
   const newInvocations = invocations.filter(
-    ({ source }) => !priorInvocationIds.has(invocationId(source.invocationKey)),
+    ({ source }) => !priorInvocationRefs.has(invocationRef(source.invocationKey)),
   );
   if (newInvocations.length > 0) {
     const key = `runtime:${input.producer.jobId}:${input.producer.attemptId}`;
@@ -269,7 +269,8 @@ async function projectReleaseEvidence(
           throw new Error(`no default-model resolver evidence for provider ${source.provider}`);
         }
         return {
-          invocationId: invocationId(source.invocationKey),
+          invocationKey: source.invocationKey,
+          invocationRef: invocationRef(source.invocationKey),
           role,
           provider: source.provider,
           model: source.model === null
@@ -328,7 +329,7 @@ async function projectReleaseEvidence(
       kind: 'build',
       head: buildHead,
       parentHead,
-      invocationId: invocationId(generated.source.invocationKey),
+      invocationRef: invocationRef(generated.source.invocationKey),
       role: generated.role === 'generator' ? 'generator' : 'repair',
     };
     await input.control.recordReleaseReceipt(receipt);
@@ -400,8 +401,9 @@ async function projectReleaseEvidence(
       head: reviewHead,
       headEpoch: epoch,
       perspective: run.perspective!,
-      invocationId: invocationId(reviewerInvocation.source.invocationKey),
-      verdict: run.verdict === 'approve' ? 'approved' : 'findings',
+      invocationRef: invocationRef(reviewerInvocation.source.invocationKey),
+      verdict: run.verdict,
+      hasFindings: findings.length > 0,
       findings,
     });
     receiptKeys.add(key);
@@ -495,7 +497,7 @@ async function projectReleaseEvidence(
     if (resolved.has(id)) continue;
     const last = latest.get(id)!;
     const approval = reviews.find((review) => review.perspective === origin.perspective
-      && review.headEpoch > last.headEpoch && review.verdict === 'approved');
+      && review.headEpoch > last.headEpoch && review.verdict === 'approve');
     const resolutionBuild = approval ? builds.get(approval.head) : undefined;
     if (!resolutionBuild) continue;
     const key = `finding-resolution:${id}`;
@@ -522,7 +524,7 @@ async function projectReleaseEvidence(
   const preMerge = (await input.control.listReleaseReceipts(input.release.id))
     .map((entry) => entry.receipt)
     .filter((receipt) => receipt.kind !== 'merge-intent' && receipt.kind !== 'merge');
-  const key = `merge-intent:${input.pullRequest}:${head}`;
+  const key = `merge-intent:${input.pullRequestNumber}:${head}`;
   await input.control.authorizeReleaseMerge({
     releaseId: input.release.id,
     intent: {
@@ -535,7 +537,7 @@ async function projectReleaseEvidence(
       causes: preMerge.map((receipt) => receipt.receiptId),
       recordedAt: after(...preMerge.map((receipt) => receipt.recordedAt)),
       kind: 'merge-intent',
-      pullRequest: input.pullRequest,
+      pullRequestNumber: input.pullRequestNumber,
       expectedHead: head,
       observedPrHead: head,
     },
@@ -567,7 +569,7 @@ export async function projectReleaseMerge(
   })).map((entry) => entry.receipt);
   const intent = receipts.find((receipt) => receipt.kind === 'merge-intent');
   if (!intent) throw new Error('release merge observation has no durable merge intent');
-  const key = `merge:${observation.pullRequest}:${observation.mergeSha}`;
+  const key = `merge:${observation.pullRequestNumber}:${observation.mergeSha}`;
   await control.completeReleaseMerge({
     releaseId: release.id,
     receipt: {

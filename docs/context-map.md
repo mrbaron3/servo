@@ -126,9 +126,10 @@ Go application との共有カーネルではない。cross-application の Publ
   registration-controlのStartup Modeは起動時観測に限ってLifecycle Modeを上書きしない。
 - **evaluation ↔ control-store**（Published Language・翻訳）: evaluationのVerdict正典は
   `approve|request_changes|needs_human`。`development_review_perspectives.verdict`は3値を保持する一方、
-  release receiptの現行`approved|findings`は非approveを`findings`へ畳むlossyなlegacy投影で、Verdictでも
-  finding有無のbooleanでもない。
-  特に`needs_human`と`request_changes`を同じ判断と解釈せず、次期wireで`verdict`＋`hasFindings`へ分離する。
+  canonical release receipt v4とexternal evidence v2も`verdict`の3値を保持し、finding有無は`hasFindings`へ
+  分離する。旧receipt v2/v3の`approved|findings`とexternal evidence v1の`no_findings|findings`はimmutableな
+  historical wireだけのlossy投影であり、新規判断へ戻さない。特に`needs_human`と`request_changes`を同じ判断と
+  解釈しない。
 - **runtime integration（別 security/runtime contract）**: GitHub credential broker HTTP＋credential helper、
   CONNECT egress proxy、runner shared volume、`agentopsctl`のactual container操作はPostgreSQLを迂回する意図的な
   point-to-point境界である。business resultをこれらへ永続化せず、volume artifactのURI/digest/receipt linkだけを

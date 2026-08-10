@@ -61,6 +61,27 @@ cleanup failure、artifact欠落がrelease全体の証明を壊す。逆に契�
     headlessで先に行う。完了条件には別repositoryの新規Issueを使うexternal-target live runを一件含め、
     手作業のID付け替えなしにoutboxからevidenceを生成して独立validatorへ通す。
 
+## 2026-08-06 canonical wire amendment
+
+version 2/3 receiptとversion 1 external evidenceはimmutable historical wireとして残す一方、新規出力の曖昧語を
+解消するため次版を追加した。
+
+1. canonical receiptは`contracts/live-release-receipt-v4.schema.json`のversion 4とする。
+   provider callの元identityを`invocationKey`、一方向派生参照を`invocationRef`として併記し、
+   `pullRequestNumber`、3値Verdict＋`hasFindings`、`sourceIssueClosure:'completed'`を使う。
+2. external-target evidenceは`contracts/live-release-evidence-v2.schema.json`のversion 2で同じ
+   `pullRequestNumber`、3値Verdict＋`hasFindings`、Source Issue Closure語彙へ揃える。
+3. legacy schemaは削除・上書きしない。validatorは`receipts`と`formalReviews`のどちらを持つかでartifact familyを
+   先に判別し、family内のschemaVersionを検証する。同じ`2.0`をversionだけで誤dispatchしない。
+4. migration 0026はdurable rowをcanonical fieldへ移すが、未記録の元`invocationKey`や旧`findings`に潰れた
+   `needs_human`を復元したとは主張しない。前者は旧opaque refをfallbackとして保持し、後者は
+   `request_changes`へ保守的に写像する。
+5. requirements authority導入前のcompleted releaseをexportするときだけ、canonical DB rowから旧v2 schemaへ
+   明示的に逆変換する。新旧fieldを同じwireへ混在させない。新規releaseはversion 4だけを生成する。
+
+このamendmentはdecision 8/9のhistorical artifact保持を維持し、新規Published Languageの正本だけをversion 4/2へ
+進める。旧保証を新保証へ自動昇格しない。
+
 ## 帰結
 
 - workflowはjobの増減、順序変更、promotion省略、recovery job追加を行っても、同じrelease/head/causalityへ
@@ -74,7 +95,8 @@ cleanup failure、artifact欠落がrelease全体の証明を壊す。逆に契�
 
 ## 実装状況
 
-version 2 schema／semantic certifier、migration v8、atomic triage promotion、release/head/receipt/artifact persistence、
+version 2/3 legacy schema、canonical receipt v4、external evidence v2、semantic certifier、migration v8/26、
+atomic triage promotion、release/head/receipt/artifact persistence、
 job-local build/review/check/runtime projection、pre-merge certifier、expected-head merge境界、GitHub post-merge観測、
 idempotent recovery、PostgreSQL-only exporterをproduction runnerへ配線済みである。runner DB roleはrelease table DMLを
 持たず、再検証付きSECURITY DEFINER capabilityだけでreceipt／authorization／merge／artifactを更新する。

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Servo Registration Control API
-  version: 1.3.0
+  version: 1.4.0
   description: >-
     mrbaron3/workflow#15 のloopback dashboardとPostgreSQL Registration駆動Control API。
     human-approved workflow-ciso05-dashboard-r02 /
@@ -397,6 +397,10 @@ components:
       type: object
       additionalProperties: false
       properties:
+        mergeMethod:
+          description: Registration-owned integration strategy; omission defaults to squash.
+          enum: [squash, merge, rebase]
+          default: squash
         releaseEvidence:
           $ref: "#/components/schemas/ReleaseEvidencePolicy"
         gateTimeoutSeconds:
@@ -580,6 +584,7 @@ components:
         - registration
         - mode
         - components
+        - cursorObservedAt
         - lastPoll
         - lastDelivery
         - queueDepth
@@ -613,8 +618,24 @@ components:
               $ref: "#/components/schemas/ComponentProjection"
             queue:
               $ref: "#/components/schemas/ComponentProjection"
+        cursorObservedAt:
+          type: object
+          description: Durable monitor cursor advance time; not poll-attempt liveness.
+          properties:
+            issue:
+              type:
+                - string
+                - "null"
+              format: date-time
+            pull_request:
+              type:
+                - string
+                - "null"
+              format: date-time
         lastPoll:
           type: object
+          deprecated: true
+          description: Deprecated v1.3 alias of cursorObservedAt; removed in the next API version.
           properties:
             issue:
               type:

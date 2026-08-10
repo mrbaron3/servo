@@ -131,13 +131,12 @@ export function observeGithubRelease(
     );
   }
   return {
-    pullRequest: prNumber,
+    pullRequestNumber: prNumber,
     expectedHead: parsedHead,
     observedPrHead: pr.headRefOid,
     mergeSha: pr.mergeCommit.oid,
     actor: pr.mergedBy.login,
-    issueState: 'CLOSED',
-    issueStateReason: 'COMPLETED',
+    sourceIssueClosure: 'completed',
     mergeReachableFromDefaultBranch: true,
     mergedAt: pr.mergedAt,
   };

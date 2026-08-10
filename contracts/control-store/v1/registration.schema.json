@@ -58,6 +58,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "mergeMethod": {
+          "enum": ["squash", "merge", "rebase"],
+          "default": "squash"
+        },
         "releaseEvidence": {
           "$ref": "#/$defs/historicalReleaseEvidencePolicy"
         },

@@ -203,10 +203,11 @@ npx tsx apps/agentops/scripts/real-panel-run.ts                    # full 6-pers
 
 `config.gate.backend` (`store` | `github`) chooses local/manual vs PR-native delivery.
 `gate.requiredChecks` names GitHub checks that must be green (empty means all visible checks), and
-`gate.mergeMethod` is `squash`, `merge`, or `rebase` for the legacy TypeScript `github-turn`
-path only. The Go control-plane path currently authorizes `squash` regardless of this workspace
-setting; it does not become authoritative there until Registration gains a versioned integration
-strategy contract. `config.panel.maxConcurrent` bounds the review fan-out. The execution layer's design lives in
+`mergeMethod` is `squash`, `merge`, or `rebase`. For a Registration-driven Go control-plane job,
+`configuration.mergeMethod` is the durable authority and is copied into the versioned runner payload;
+omission defaults to `squash`. Workspace `gate.mergeMethod` is only the fallback for the legacy
+TypeScript `github-turn` path when no Registration exists, and never overrides Registration.
+`config.panel.maxConcurrent` bounds the review fan-out. The execution layer's design lives in
 [ADR-0005](docs/decisions/ADR-0005-execution-layer-tmux-orchestration.md) /
 [ADR-0006](docs/decisions/ADR-0006-evaluator-panel-sessions-and-github-pr-gate.md) and the
 [`_system/execution`](docs/_system/execution/) views.

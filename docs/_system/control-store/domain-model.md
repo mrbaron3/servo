@@ -4,7 +4,8 @@
 - **DOM-control-store-002 Delivery** — transport receiptとconsumer別完了状態。
 - **DOM-control-store-003 Job** — version付きenvelope、source、idempotency identity、queue status。
 - **DOM-control-store-004 Lease / Attempt** — 時限worker所有権と、reclaim後も失われない実行履歴。
-- **DOM-control-store-005 Released Build / Defect** — issue/PR revision/head SHAとreview oracleまたはrelease escapeの1:N link。
+- **DOM-control-store-005 Released Build / Defect（retired）** — production writerを得なかった旧escape実験。
+  migration 0027以降は`retired_*` historical archiveだけを残し、active aggregate／application APIとして扱わない。
 - **DOM-control-store-006 Artifact Link** — artifact本体でなくURI/digest/size/timeだけを指すmetadata。
 - **DOM-control-store-007 Runner Job Contract** — repository/event/ref/gate identityだけを持つversioned executable envelope。
 - **DOM-control-store-008 Execution Guard** — lease/Registrationの現在値をcritical boundaryごとに裁定するtransactional verdict。
@@ -26,7 +27,8 @@
   authorizationなしのGitHub mergeはrelease成功として取り込まない。
 - **DOM-control-store-019 Release Certificate** — outbox receiptとdigest-bound artifactから独立certifierが導出する
   published evidence。複数runtime producer、durable head epoch、artifact receipt bindingをPostgreSQLから再構成し、
-  job topologyやjob-local DBを入力の必須条件にしない。
+  job topologyやjob-local DBを入力の必須条件にしない。新規wireはcanonical v4で、immutable v2/v3 artifactは
+  legacy anti-corruption layerだけが読む。
 
 不変条件: active jobはrepositoryごとに高々1件、active leaseはjobごとに高々1件、stale/disabled Registrationのjobは
 claimしない。artifactはRegistration rootからreal pathで逸脱できず、lease loss後にside effect permitを消費できない。
@@ -35,4 +37,5 @@ jobs／attempts／leases tableでもRLSがjob typeを強制し、両roleは互�
 根拠: [ADR-0013](../../decisions/ADR-0013-postgresql-control-plane-source-of-truth.md)、
 [ADR-0015](../../decisions/ADR-0015-postgresql-fenced-isolated-runner.md)、
 [ADR-0017](../../decisions/ADR-0017-private-repository-monitor-broker.md)、
-[ADR-0020](../../decisions/ADR-0020-release-receipt-evidence.md)
+[ADR-0020](../../decisions/ADR-0020-release-receipt-evidence.md)、
+[ADR-0023](../../decisions/ADR-0023-retire-legacy-escape-tables.md)

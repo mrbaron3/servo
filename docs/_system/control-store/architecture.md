@@ -5,7 +5,8 @@
 - **ARCH-control-store-002 Version Gate** — consumer/runnerは接続後、既知の連番version/name/checksumが完全一致するまで
   起動しない。migrationとverifyは同じadvisory lockで直列化し、migrationは単一transactionでのみ進める。
 - **ARCH-control-store-003 Transactional Repositories** — Registration、cursor、delivery/consumer、job、lease/attempt、
-  audit、artifact metadata、build defectを同じDB transaction境界で操作する。
+  audit、artifact metadata、release receiptを同じDB transaction境界で操作する。旧build defect modelは
+  migration 0027でread-only archiveへretire済みで、production repository APIを持たない。
 - **ARCH-control-store-004 Durable Queue** — registration-scoped idempotency/source unique制約とrepository partial unique
   indexをDB権威とし、runtime rejectionを補助に置く。
 - **ARCH-control-store-005 Lease Competition** — workerは`FOR UPDATE SKIP LOCKED`で1 jobだけをclaimし、heartbeat/expiry/
@@ -31,7 +32,7 @@
   actual containerを照合し、欠損ACTIVEをDRAININGへ寄せてから安全な復旧経路だけを通す。
 - **ARCH-control-store-015 Explicit Owner Migration** — 通常consumerはschema verify-onlyを保ち、短命なowner-only
   admin containerだけがadvisory lock下でcurrent imageが宣言するexact schema
-  （ADR-0021採択時点はversion 21）までのadditive migrationとleast-privilege role bootstrapを行う。
+  （2026-08-06時点はversion 27）までのadditive migrationとleast-privilege role bootstrapを行う。
   commit前failureは旧versionを保持し、commit後はdurable rowを消すdown migrationでなくsafe modeへのcompensationと
   current imageによるforward recoveryを行う。
 - **ARCH-control-store-016 Typed Private Monitor Broker** — credential-free controlはRegistration/version、固定repository、
@@ -50,8 +51,9 @@
 - **ARCH-control-store-019 Pre-merge Certification** — policyが要求するauthority、gate source、review perspective、
   head epoch、finding resolution、runtime provenanceをmerge前に独立certifyし、merge intentとauthorizationを
   atomic commitする。同一expected-head mergeのrecoveryは冪等、未認可または異なるmergeはfail closedである。
-  completed releaseは`evidence:live-release:export`でPostgreSQLだけからv2 certificateへ再構成し、同じsemantic
-  certifierを通過しない出力を公開しない。
+  completed releaseは`evidence:live-release:export`でPostgreSQLだけからcanonical v4 certificateへ再構成し、
+  同じsemantic certifierを通過しない出力を公開しない。requirements authority導入前のreleaseだけは、
+  historical v2 schemaに適合する明示的なlegacy wireへ逆変換し、canonical fieldとの混在を許さない。
 - **ARCH-control-store-020 Cross-application durable coordination** —
   `apps/control-plane`のGo consumerと`apps/agentops`のTypeScript consumerは、root
   `db/control-store/migrations/`と`contracts/`へ順応し、Registration/lifecycle fence/job/lease/result/progress/receipt/
@@ -65,4 +67,5 @@
 [ADR-0015](../../decisions/ADR-0015-postgresql-fenced-isolated-runner.md)、
 [ADR-0017](../../decisions/ADR-0017-private-repository-monitor-broker.md)、
 [ADR-0020](../../decisions/ADR-0020-release-receipt-evidence.md)、
-[ADR-0021](../../decisions/ADR-0021-go-typescript-application-boundaries.md)
+[ADR-0021](../../decisions/ADR-0021-go-typescript-application-boundaries.md)、
+[ADR-0023](../../decisions/ADR-0023-retire-legacy-escape-tables.md)

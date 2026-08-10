@@ -38,7 +38,7 @@ writerとselectorの片側だけを変更すると既存containerが孤児化し
    | 製品・repository | `Servo` / `mrbaron3/servo` | 現在から正典 |
    | component・CLI・env | `agentops*` / `AGENTOPS_*` | technical prefixとして維持 |
    | PostgreSQL schema | `agentops_control` | published DB contractとして維持 |
-   | container label | `com.mrbaron3.workflow.*` | 独立issueで`com.mrbaron3.servo.*`へ3段階移行 |
+   | container label | `com.mrbaron3.workflow.*` | [Issue #123](https://github.com/mrbaron3/servo/issues/123)で`com.mrbaron3.servo.*`へ3段階移行 |
    | JSON Schema `$id` | `https://github.com/mrbaron3/servo/contracts/**` | repository内consumer照合後に旧`workflow`IDから移行済み。値域・schema versionは不変 |
    | schema title・人間向け表示 | `Servo` | legacy `AgentOps` titleから統一済み |
 

@@ -323,6 +323,189 @@ integration('PostgreSQL control store', () => {
     await expect(migrateControlSchema(pool)).rejects.toThrow(/partial control schema/);
   });
 
+  it('migrates Stage 3 legacy rows without inventing lost evidence', async () => {
+    await reset();
+    const migrations = loadControlMigrations();
+    for (const migration of migrations.slice(0, 22)) {
+      await pool.query(migration.sql);
+    }
+    await pool.query(
+      `UPDATE agentops_control.lifecycle_state SET mode = 'ACTIVE'
+        WHERE singleton`,
+    );
+    const registrationRow = await pool.query<{ id: string; version: string }>(
+      `SELECT id, version FROM agentops_control.repository_registrations
+        WHERE repository = 'mrbaron3/servo'`,
+    );
+    const registered = registrationRow.rows[0]!;
+    const jobId = '30000000-0000-4000-8000-000000000001';
+    const attemptId = '30000000-0000-4000-8000-000000000002';
+    const releaseId = '30000000-0000-4000-8000-000000000003';
+    const lineageId = '30000000-0000-4000-8000-000000000004';
+    const buildId = '30000000-0000-4000-8000-000000000005';
+    const head = 'a'.repeat(40);
+    await pool.query(
+      `INSERT INTO agentops_control.jobs(
+         id, registration_id, registration_version, source_kind, source_key,
+         idempotency_key, job_type, payload, status
+       ) VALUES ($1, $2, $3, 'manual', 'stage3-upgrade', 'stage3-upgrade',
+         'agentops.runner', '{}', 'succeeded')`,
+      [jobId, registered.id, Number(registered.version)],
+    );
+    await pool.query(
+      `INSERT INTO agentops_control.job_attempts(
+         id, job_id, attempt_number, worker_id, status
+       ) VALUES ($1, $2, 1, 'stage3-upgrade', 'succeeded')`,
+      [attemptId, jobId],
+    );
+    await pool.query(
+      `INSERT INTO agentops_control.releases(
+         id, registration_id, release_key, repository, issue_number, policy
+       ) VALUES ($1, $2, 'stage3-upgrade', 'mrbaron3/servo', 301,
+         '{
+           "authority":"human-ready-allowed",
+           "requiredGateSignals":[{"source":"repository-grader","name":"build"}],
+           "requiredReviewPerspectives":["security","codeQuality"],
+           "minimumHeadEpochs":1
+         }')`,
+      [releaseId, registered.id],
+    );
+    await pool.query(
+      `INSERT INTO agentops_control.development_review_rounds(
+         registration_id, registration_version, job_id, attempt_id,
+         repository, subject_kind, subject_number, round, head_sha, branch,
+         outcome, started_at, completed_at
+       ) VALUES ($1, $2, $3, $4, 'mrbaron3/servo', 'issue', 301, 1, $5,
+         'agent/stage3-upgrade', 'request-changes', clock_timestamp(),
+         clock_timestamp())`,
+      [registered.id, Number(registered.version), jobId, attemptId, head],
+    );
+    await pool.query(
+      `INSERT INTO agentops_control.development_lineage_nodes(
+         id, registration_id, release_id, repository, issue_number, status,
+         child_pull_request_number, child_head_sha
+       ) VALUES ($1, $2, $3, 'mrbaron3/servo', 301, 'running', 77, $4)`,
+      [lineageId, registered.id, releaseId, head],
+    );
+    await pool.query(
+      `INSERT INTO agentops_control.released_builds(
+         id, registration_id, issue_number, revision_id, head_sha,
+         panel_approved, released_at
+       ) VALUES ($1, $2, 301, 'legacy-revision', $3, true, clock_timestamp())`,
+      [buildId, registered.id, head],
+    );
+    await pool.query(
+      `INSERT INTO agentops_control.build_defects(
+         id, build_id, defect_key, observation_stage, severity, summary,
+         discovered_at
+       ) VALUES ('30000000-0000-4000-8000-000000000006', $1,
+         'legacy-high', 'release_escape', 'high', 'historical escape',
+         clock_timestamp())`,
+      [buildId],
+    );
+    const common = {
+      releaseId,
+      repository: 'mrbaron3/servo',
+      issueNumber: 301,
+      producer: {},
+      causes: [],
+      recordedAt: new Date(Date.now() + 1_000).toISOString(),
+    };
+    const legacyReceipts = [
+      {
+        ...common,
+        receiptId: '30000000-0000-4000-8000-000000000010',
+        receiptKey: 'runtime:legacy',
+        kind: 'runtime-provenance',
+        consumer: { repository: 'mrbaron3/consumer', revision: head },
+        environment: { kind: 'container', reference: 'legacy', digest: `sha256:${'b'.repeat(64)}` },
+        invocations: [{
+          invocationId: 'invocation:legacy', role: 'reviewer', provider: 'codex',
+          model: { kind: 'explicit', name: 'legacy-model' }, head,
+        }],
+      },
+      {
+        ...common,
+        receiptId: '30000000-0000-4000-8000-000000000011',
+        receiptKey: 'review:legacy',
+        kind: 'review', head, headEpoch: 1, perspective: 'security',
+        invocationId: 'invocation:legacy', verdict: 'findings', findings: [],
+      },
+      {
+        ...common,
+        receiptId: '30000000-0000-4000-8000-000000000012',
+        receiptKey: 'merge:legacy',
+        kind: 'merge', pullRequest: 77, expectedHead: head,
+        observedPrHead: head, mergeSha: 'c'.repeat(40), actor: 'legacy',
+        issueState: 'CLOSED', issueStateReason: 'COMPLETED',
+        mergeReachableFromDefaultBranch: true,
+        mergedAt: new Date(Date.now() + 2_000).toISOString(),
+      },
+    ];
+    for (const receipt of legacyReceipts) {
+      await pool.query(
+        `INSERT INTO agentops_control.release_receipt_outbox(
+           receipt_id, release_id, receipt_key, kind, repository, issue_number,
+           head_sha, causes, payload, recorded_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', $8::jsonb,
+           ($8::jsonb->>'recordedAt')::timestamptz)`,
+        [receipt.receiptId, releaseId, receipt.receiptKey, receipt.kind,
+          receipt.repository, receipt.issueNumber,
+          receipt.kind === 'runtime-provenance' ? null : head, receipt],
+      );
+    }
+    for (const migration of migrations.slice(22)) {
+      await pool.query(migration.sql);
+    }
+
+    await expect(pool.query(
+      `SELECT outcome FROM agentops_control.development_review_rounds`,
+    )).resolves.toMatchObject({ rows: [{ outcome: 'request_changes' }] });
+    await expect(pool.query(
+      `SELECT pull_request_number, head_sha
+         FROM agentops_control.development_lineage_nodes`,
+    )).resolves.toMatchObject({
+      rows: [{ pull_request_number: '77', head_sha: head }],
+    });
+    const migratedReceipts = await pool.query<{ kind: string; payload: any }>(
+      `SELECT kind, payload FROM agentops_control.release_receipt_outbox
+        ORDER BY kind`,
+    );
+    expect(migratedReceipts.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'runtime-provenance',
+        payload: expect.objectContaining({
+          invocations: [expect.objectContaining({
+            invocationKey: 'invocation:legacy',
+            invocationRef: 'invocation:legacy',
+          })],
+        }),
+      }),
+      expect.objectContaining({
+        kind: 'review',
+        payload: expect.objectContaining({
+          verdict: 'request_changes', hasFindings: false,
+          invocationRef: 'invocation:legacy',
+        }),
+      }),
+      expect.objectContaining({
+        kind: 'merge',
+        payload: expect.objectContaining({
+          pullRequestNumber: 77, sourceIssueClosure: 'completed',
+        }),
+      }),
+    ]));
+    const retired = await pool.query<{ severity: string }>(
+      `SELECT severity FROM agentops_control.retired_build_defects`,
+    );
+    expect(retired.rows).toEqual([{ severity: 'blocker' }]);
+    const activeTables = await pool.query<{ active: boolean; retired: boolean }>(
+      `SELECT to_regclass('agentops_control.released_builds') IS NOT NULL AS active,
+              to_regclass('agentops_control.retired_released_builds') IS NOT NULL AS retired`,
+    );
+    expect(activeTables.rows).toEqual([{ active: false, retired: true }]);
+  });
+
   it('upgrades the exact deployed version-16 schema without rewriting history', async () => {
     await reset();
     const migrations = loadControlMigrations();
@@ -857,7 +1040,7 @@ integration('PostgreSQL control store', () => {
       issueMonitorEnabled: true,
       prMonitorEnabled: true,
       executionEnabled: true,
-      configuration: {},
+      configuration: { mergeMethod: 'rebase' },
     });
     const queued = await store.enqueueJob({
       registrationId: repo.id,
@@ -937,6 +1120,7 @@ integration('PostgreSQL control store', () => {
         event: { kind: 'issue', number: 27, action: 'recovery' },
         execution: {
           mode: 'development_turn',
+          mergeMethod: 'rebase',
           readyLabel: 'human-approved',
           claimedLabel: 'automation-owned',
         },
@@ -994,6 +1178,40 @@ integration('PostgreSQL control store', () => {
     });
     expect(parentLease?.job.id).toBe(parentJob.job.id);
     const parentHead = 'a'.repeat(40);
+    const invalidLineageReview = (finding: Record<string, unknown>) => ({
+      round: 1,
+      headSha: parentHead,
+      branch: 'agent/issue-71',
+      pullRequestNumber: 81,
+      outcome: 'request_changes',
+      startedAt: '2026-08-04T00:58:00.000Z',
+      completedAt: '2026-08-04T00:59:00.000Z',
+      perspectives: [{
+        perspective: 'security',
+        verdict: 'request_changes',
+        findings: [{
+          criterionId: 'SEC-lineage', severity: 'major',
+          expected: 'lineage reference pairing',
+          observed: 'invalid pair',
+          requiredFix: ['reject invalid pair'],
+          disposition: 'in-change',
+          ...finding,
+        }],
+      }],
+    });
+    await expect(pool.query(
+      `SELECT agentops_control.record_development_review_round($1, $2, $3)`,
+      [parentLease!.token, 'review-dag-parent', invalidLineageReview({
+        lineage: 'persisted',
+      })],
+    )).rejects.toThrow(/development review finding is invalid/);
+    await expect(pool.query(
+      `SELECT agentops_control.record_development_review_round($1, $2, $3)`,
+      [parentLease!.token, 'review-dag-parent', invalidLineageReview({
+        lineage: 'new',
+        lineageRef: `finding-origin-v1:${'f'.repeat(64)}`,
+      })],
+    )).rejects.toThrow(/development review finding is invalid/);
     await store.recordDevelopmentReviewRound({
       token: parentLease!.token,
       workerId: 'review-dag-parent',
@@ -1002,7 +1220,7 @@ integration('PostgreSQL control store', () => {
         headSha: parentHead,
         branch: 'agent/issue-71',
         pullRequestNumber: 81,
-        outcome: 'request-changes',
+        outcome: 'request_changes',
         startedAt: '2026-08-04T01:00:00.000Z',
         completedAt: '2026-08-04T01:01:00.000Z',
         perspectives: [{
@@ -1209,7 +1427,7 @@ integration('PostgreSQL control store', () => {
         headSha: childHead,
         branch: 'agent/issue-72',
         pullRequestNumber: 82,
-        outcome: 'request-changes',
+        outcome: 'request_changes',
         startedAt: '2026-08-04T02:00:00.000Z',
         completedAt: '2026-08-04T02:01:00.000Z',
         perspectives: [{
@@ -1262,7 +1480,7 @@ integration('PostgreSQL control store', () => {
       workerId: 'review-dag-child',
       releaseId: childRelease.id,
       pullRequestNumber: 82,
-      childHeadSha: childHead,
+      headSha: childHead,
       integratedHeadSha: integratedHead,
     })).rejects.toThrow(/integration is invalid/);
     await pool.query(
@@ -1277,7 +1495,7 @@ integration('PostgreSQL control store', () => {
       workerId: 'review-dag-child',
       releaseId: childRelease.id,
       pullRequestNumber: 82,
-      childHeadSha: childHead,
+      headSha: childHead,
       integratedHeadSha: integratedHead,
     })).resolves.toBe(childNodeId);
     await pool.query(
@@ -1316,7 +1534,7 @@ integration('PostgreSQL control store', () => {
       [parentJob.job.id],
     );
     expect(review.rows).toEqual([{
-      outcome: 'request-changes', perspective: 'security', finding_count: 2,
+      outcome: 'request_changes', perspective: 'security', finding_count: 2,
     }]);
   });
 
@@ -2045,91 +2263,6 @@ integration('PostgreSQL control store', () => {
       repository: repo.repository,
       payload: { action: 'opened' },
     });
-  });
-
-  it('persists multiple release escapes and derives build-level false passes', async () => {
-    const store = await migratedStore();
-    const repo = await registration(store);
-    const buildId = await store.recordReleasedBuild({
-      registrationId: repo.id,
-      issueNumber: 12,
-      pullRequestNumber: 35,
-      revisionId: 'PRREV-0058',
-      headSha: '7fa3f65a00000000000000000000000000000000',
-      panelApproved: true,
-      releasedAt: new Date(),
-    });
-    const discoveredAt = new Date('2026-07-25T09:00:00.000Z');
-    const firstDefectId = await store.recordBuildDefect({
-      buildId,
-      defectKey: 'issue-19',
-      observationStage: 'release_escape',
-      severity: 'high',
-      issueUrl: 'https://github.com/mrbaron3/workflow/issues/19',
-      summary: 'forwarder accepted a failed relay',
-      discoveredAt,
-      details: { affectedRelay: 'primary' },
-    });
-    await store.recordBuildDefect({
-      buildId,
-      defectKey: 'issue-19-followup',
-      observationStage: 'release_escape',
-      severity: 'medium',
-      summary: 'second defect associated with the same released build',
-      discoveredAt: new Date('2026-07-25T09:01:00.000Z'),
-    });
-    await expect(store.listBuildDefects({
-      buildId,
-      observationStage: 'release_escape',
-    })).resolves.toEqual([
-      expect.objectContaining({
-        id: firstDefectId,
-        buildId,
-        defectKey: 'issue-19',
-        observationStage: 'release_escape',
-        severity: 'high',
-        issueUrl: 'https://github.com/mrbaron3/workflow/issues/19',
-        summary: 'forwarder accepted a failed relay',
-        discoveredAt: discoveredAt.toISOString(),
-        details: { affectedRelay: 'primary' },
-      }),
-      expect.objectContaining({
-        buildId,
-        defectKey: 'issue-19-followup',
-        observationStage: 'release_escape',
-        severity: 'medium',
-        issueUrl: null,
-      }),
-    ]);
-
-    const nonPanelBuildId = await store.recordReleasedBuild({
-      registrationId: repo.id,
-      issueNumber: 12,
-      revisionId: 'PRREV-NON-PANEL',
-      headSha: '8fa3f65a00000000000000000000000000000000',
-      panelApproved: false,
-      releasedAt: new Date(),
-    });
-    await store.recordBuildDefect({
-      buildId: nonPanelBuildId,
-      defectKey: 'issue-non-panel',
-      observationStage: 'release_escape',
-      severity: 'critical',
-      summary: 'escape remains individually queryable regardless of panel state',
-      discoveredAt: new Date(),
-    });
-    await expect(store.listBuildDefects({
-      buildId: nonPanelBuildId,
-    })).resolves.toEqual([
-      expect.objectContaining({
-        buildId: nonPanelBuildId,
-        defectKey: 'issue-non-panel',
-        severity: 'critical',
-      }),
-    ]);
-    await expect(store.listFalsePassBuilds()).resolves.toEqual([
-      { buildId, gateReturned: false, escapeCount: 2 },
-    ]);
   });
 
   it('audits fail-closed Registration races at claim/provider/push/merge/release', async () => {

@@ -21,11 +21,15 @@ import {
   DurableReleaseReceiptContract,
   HistoricalDurableReleaseReceiptContract,
   HistoricalReleasePolicyContract,
+  LiveReleaseReceiptEvidenceContract,
+  PersistedLiveReleaseReceiptEvidenceContract,
   ReleaseArtifactContract,
+  ReleaseGradeReceiptContract,
   ReleaseMergeIntentReceiptContract,
   ReleaseMergeReceiptContract,
   ReleasePolicyContract,
   assertLiveReleaseReceiptEvidence,
+  legacyLiveReleaseReceiptEvidenceWire,
   releasePreMergeSemanticErrors,
   type DurableReleaseReceipt,
   type HistoricalDurableReleaseReceipt,
@@ -59,7 +63,6 @@ import {
   TriageDecisionV1Contract,
   TriageJobResultV1Contract,
   TriageProviderProvenanceContract,
-  type BuildDefect,
   type EnqueueResult,
   type ExecutionGuardVerdict,
   type JobEnvelope,
@@ -718,19 +721,19 @@ export class PostgresControlStore {
   async bindReleasePullRequest(input: {
     jobId: string;
     releaseId: string;
-    pullRequest: number;
+    pullRequestNumber: number;
   }): Promise<void> {
     const parsed = z.object({
       jobId: z.string().uuid(),
       releaseId: z.string().uuid(),
-      pullRequest: z.number().int().positive().max(2_147_483_647),
+      pullRequestNumber: z.number().int().positive().max(2_147_483_647),
     }).strict().parse(input);
     const result = await this.pool.query<{ pull_request_number: string }>(
       `SELECT agentops_control.bind_release_pull_request($1, $2, $3)
          AS pull_request_number`,
-      [parsed.jobId, parsed.releaseId, parsed.pullRequest],
+      [parsed.jobId, parsed.releaseId, parsed.pullRequestNumber],
     );
-    if (Number(result.rows[0]?.pull_request_number) !== parsed.pullRequest) {
+    if (Number(result.rows[0]?.pull_request_number) !== parsed.pullRequestNumber) {
       throw new ReleaseReceiptConflictError(
         'release pull request binding did not converge',
       );
@@ -870,21 +873,25 @@ export class PostgresControlStore {
       const one = <K extends HistoricalDurableReleaseReceipt['kind']>(kind: K) =>
         receipts.find((receipt) => receipt.kind === kind);
       const requirementsAuthority = one('requirements-authority');
+      const canonicalV4 = requirementsAuthority !== undefined
+        && ReleasePolicyContract.safeParse(release.policy).success
+        && receipts.filter((receipt) => receipt.kind === 'grade')
+          .every((receipt) => ReleaseGradeReceiptContract.safeParse(receipt).success);
       const artifacts = await client.query<ReleaseArtifactRow>(
         `SELECT * FROM agentops_control.release_artifacts
           WHERE release_id = $1 ORDER BY recorded_at, id`,
         [release.id],
       );
-      const evidence: unknown = {
-        // Merged releases from before schema 17 are immutable historical v2
-        // evidence. Export them without inventing a requirements authority;
-        // every new release is required by the DB boundary to export as v3.
-        schemaVersion: requirementsAuthority ? '3.0' : '2.0',
+      const evidence = LiveReleaseReceiptEvidenceContract.parse({
+        // Merged releases from before schema 17 remain historical v2 evidence.
+        // Historical v3 policies/grade aliases stay on their immutable wire;
+        // every canonical release with frozen requirements exports v4.
+        schemaVersion: canonicalV4 ? '4.0' : requirementsAuthority ? '3.0' : '2.0',
         release: {
           id: release.id,
           repository: release.repository,
           issueNumber: release.issueNumber,
-          pullRequest: release.pullRequest,
+          pullRequestNumber: release.pullRequest,
           finalHead: release.finalHead,
           mergeSha: release.mergeSha,
           createdAt: release.createdAt,
@@ -917,9 +924,16 @@ export class PostgresControlStore {
         result: receipts.some((receipt) => receipt.kind === 'intervention')
           ? 'passed-with-interventions'
           : 'passed',
-      };
+      });
       assertLiveReleaseReceiptEvidence(evidence);
-      return evidence;
+      return canonicalV4
+        ? PersistedLiveReleaseReceiptEvidenceContract.parse(evidence)
+        : PersistedLiveReleaseReceiptEvidenceContract.parse(
+          legacyLiveReleaseReceiptEvidenceWire(
+            evidence,
+            requirementsAuthority ? '3.0' : '2.0',
+          ),
+        );
     });
   }
 
@@ -977,7 +991,7 @@ export class PostgresControlStore {
         releaseId: release.id,
         repository: release.repository,
         issueNumber: release.issueNumber,
-        pullRequest: intent.pullRequest,
+        pullRequestNumber: intent.pullRequestNumber,
         expectedHead: intent.expectedHead,
         policy: release.policy,
         receipts: receipts.map((entry) => entry.receipt),
@@ -1042,7 +1056,7 @@ export class PostgresControlStore {
         : null;
       if (
         !intent
-        || intent.pullRequest !== receipt.pullRequest
+        || intent.pullRequestNumber !== receipt.pullRequestNumber
         || intent.expectedHead !== receipt.expectedHead
         || intent.observedPrHead !== receipt.observedPrHead
         || !receipt.causes.includes(intent.receiptId)
@@ -1053,7 +1067,7 @@ export class PostgresControlStore {
       }
       if (release.status === 'merged') {
         if (
-          release.pullRequest !== receipt.pullRequest
+          release.pullRequest !== receipt.pullRequestNumber
           || release.finalHead !== receipt.expectedHead
           || receipt.observedPrHead !== receipt.expectedHead
           || release.mergeSha !== receipt.mergeSha
@@ -1079,7 +1093,7 @@ export class PostgresControlStore {
       }
       if (
         release.status !== 'merge-authorized'
-        || release.pullRequest !== receipt.pullRequest
+        || release.pullRequest !== receipt.pullRequestNumber
         || release.finalHead !== receipt.expectedHead
         || receipt.observedPrHead !== receipt.expectedHead
       ) {
@@ -2105,7 +2119,7 @@ export class PostgresControlStore {
     workerId: string;
     releaseId: string;
     pullRequestNumber: number;
-    childHeadSha: string;
+    headSha: string;
     integratedHeadSha: string;
   }): Promise<string> {
     const parsed = z.object({
@@ -2113,7 +2127,7 @@ export class PostgresControlStore {
       workerId: z.string().trim().min(1).max(256),
       releaseId: z.string().uuid(),
       pullRequestNumber: z.number().int().positive(),
-      childHeadSha: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/),
+      headSha: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/),
       integratedHeadSha: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/),
     }).strict().parse(input);
     const result = await this.pool.query<{ child_id: string }>(
@@ -2125,7 +2139,7 @@ export class PostgresControlStore {
         parsed.workerId,
         parsed.releaseId,
         parsed.pullRequestNumber,
-        parsed.childHeadSha,
+        parsed.headSha,
         parsed.integratedHeadSha,
       ],
     );
@@ -2928,133 +2942,6 @@ export class PostgresControlStore {
       ],
     );
     return id;
-  }
-
-  async recordReleasedBuild(input: {
-    registrationId: string;
-    issueNumber?: number;
-    pullRequestNumber?: number;
-    revisionId: string;
-    headSha: string;
-    panelApproved: boolean;
-    gateReturned?: boolean;
-    releasedAt: Date;
-  }): Promise<string> {
-    const id = randomUUID();
-    await this.pool.query(
-      `INSERT INTO agentops_control.released_builds(
-         id, registration_id, issue_number, pull_request_number, revision_id,
-         head_sha, panel_approved, gate_returned, released_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        id,
-        input.registrationId,
-        input.issueNumber ?? null,
-        input.pullRequestNumber ?? null,
-        input.revisionId,
-        input.headSha,
-        input.panelApproved,
-        input.gateReturned ?? false,
-        input.releasedAt,
-      ],
-    );
-    return id;
-  }
-
-  async recordBuildDefect(input: {
-    buildId: string;
-    defectKey: string;
-    observationStage: 'review_oracle' | 'release_escape';
-    severity: 'low' | 'medium' | 'high' | 'critical';
-    issueUrl?: string;
-    summary: string;
-    discoveredAt: Date;
-    details?: Record<string, unknown>;
-  }): Promise<string> {
-    const id = randomUUID();
-    await this.pool.query(
-      `INSERT INTO agentops_control.build_defects(
-         id, build_id, defect_key, observation_stage, severity, issue_url,
-         summary, discovered_at, details
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        id,
-        input.buildId,
-        input.defectKey,
-        input.observationStage,
-        input.severity,
-        input.issueUrl ?? null,
-        input.summary,
-        input.discoveredAt,
-        input.details ?? {},
-      ],
-    );
-    return id;
-  }
-
-  async listBuildDefects(input: {
-    buildId: string;
-    observationStage?: 'review_oracle' | 'release_escape';
-  }): Promise<BuildDefect[]> {
-    const result = await this.pool.query<{
-      id: string;
-      build_id: string;
-      defect_key: string;
-      observation_stage: BuildDefect['observationStage'];
-      severity: BuildDefect['severity'];
-      issue_url: string | null;
-      summary: string;
-      discovered_at: Date;
-      details: Record<string, unknown>;
-      created_at: Date;
-    }>(
-      `SELECT id, build_id, defect_key, observation_stage, severity, issue_url,
-              summary, discovered_at, details, created_at
-         FROM agentops_control.build_defects
-        WHERE build_id = $1
-          AND ($2::text IS NULL OR observation_stage = $2)
-        ORDER BY discovered_at, id`,
-      [input.buildId, input.observationStage ?? null],
-    );
-    return result.rows.map((row) => ({
-      id: row.id,
-      buildId: row.build_id,
-      defectKey: row.defect_key,
-      observationStage: row.observation_stage,
-      severity: row.severity,
-      issueUrl: row.issue_url,
-      summary: row.summary,
-      discoveredAt: row.discovered_at.toISOString(),
-      details: row.details,
-      createdAt: row.created_at.toISOString(),
-    }));
-  }
-
-  async listFalsePassBuilds(): Promise<Array<{
-    buildId: string;
-    gateReturned: boolean;
-    escapeCount: number;
-  }>> {
-    const result = await this.pool.query<{
-      build_id: string;
-      gate_returned: boolean;
-      escape_count: string;
-    }>(
-      `SELECT b.id AS build_id, b.gate_returned,
-              COUNT(d.id) FILTER (WHERE d.observation_stage = 'release_escape') AS escape_count
-         FROM agentops_control.released_builds b
-         LEFT JOIN agentops_control.build_defects d ON d.build_id = b.id
-        WHERE b.panel_approved
-        GROUP BY b.id, b.gate_returned
-       HAVING b.gate_returned
-           OR COUNT(d.id) FILTER (WHERE d.observation_stage = 'release_escape') > 0
-        ORDER BY b.id`,
-    );
-    return result.rows.map((row) => ({
-      buildId: row.build_id,
-      gateReturned: row.gate_returned,
-      escapeCount: Number(row.escape_count),
-    }));
   }
 
   /** LISTEN is only a low-latency hint; callers must also reconcile periodically. */

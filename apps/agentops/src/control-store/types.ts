@@ -11,7 +11,7 @@ import {
   type HistoricalReleasePolicy,
 } from '../evidence/release-receipt.js';
 
-export const CONTROL_SCHEMA_VERSION = 22;
+export const CONTROL_SCHEMA_VERSION = 27;
 
 const RepositoryOwner = z.string()
   .min(1)
@@ -78,6 +78,7 @@ const RegistrationGateTimeoutSecondsContract = z.object({
 
 /** Canonical create/patch configuration for every new Registration version. */
 export const RepositoryRegistrationConfigurationContract = z.object({
+  mergeMethod: z.enum(['squash', 'merge', 'rebase']).optional(),
   releaseEvidence: ReleasePolicyContract.optional(),
   gateTimeoutSeconds: RegistrationGateTimeoutSecondsContract.optional(),
 }).strict();
@@ -87,6 +88,7 @@ export type RepositoryRegistrationConfiguration = z.infer<
 
 /** Decode-only configuration for immutable versions with historical policy rules. */
 export const HistoricalRepositoryRegistrationConfigurationContract = z.object({
+  mergeMethod: z.enum(['squash', 'merge', 'rebase']).optional(),
   releaseEvidence: HistoricalReleasePolicyContract.optional(),
   gateTimeoutSeconds: RegistrationGateTimeoutSecondsContract.optional(),
 }).strict();
@@ -622,19 +624,6 @@ export interface WebhookClaim {
   token: string;
   expiresAt: string;
   receivedAt: string;
-}
-
-export interface BuildDefect {
-  id: string;
-  buildId: string;
-  defectKey: string;
-  observationStage: 'review_oracle' | 'release_escape';
-  severity: 'low' | 'medium' | 'high' | 'critical';
-  issueUrl: string | null;
-  summary: string;
-  discoveredAt: string;
-  details: Record<string, unknown>;
-  createdAt: string;
 }
 
 export interface ReleaseRecord {

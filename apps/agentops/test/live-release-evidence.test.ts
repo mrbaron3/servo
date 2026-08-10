@@ -28,7 +28,8 @@ const reviewer = (
   head,
   readOnly: true,
   worktreeClean: true,
-  verdict: findingCount === 0 ? 'no_findings' : 'findings',
+  verdict: findingCount === 0 ? 'approve' : 'request_changes',
+  hasFindings: findingCount > 0,
   findingCount,
 });
 
@@ -53,7 +54,7 @@ const artifact = (kind: string, name: string) => ({
 
 function validEvidence(): any {
   return {
-    schemaVersion: '1.0',
+    schemaVersion: '2.0',
     target: {
       repository: 'mrbaron3/designflow',
       issueNumber: 4,
@@ -116,14 +117,13 @@ function validEvidence(): any {
       observedAt: '2026-08-01T00:04:00Z',
       repository: 'mrbaron3/designflow',
       issueNumber: 4,
-      pullRequest: 12,
+      pullRequestNumber: 12,
       finalPrHead: finalHead,
       mergeSha,
       expectedHeadMatchEnforced: true,
       requiredChecks: { contracts: 'SUCCESS' },
       blockingReviewThreads: 0,
-      issueState: 'CLOSED',
-      issueStateReason: 'COMPLETED',
+      sourceIssueClosure: 'completed',
       mergeReachableFromDefaultBranch: true,
     },
     providerInvocations: [
@@ -159,9 +159,14 @@ function validEvidence(): any {
   };
 }
 
-function compiled() {
+function compiled(version: 'v1' | 'v2' = 'v2') {
   const schema = JSON.parse(
-    fs.readFileSync('contracts/live-release-evidence.schema.json', 'utf8'),
+    fs.readFileSync(new URL(
+      version === 'v2'
+        ? '../../../contracts/live-release-evidence-v2.schema.json'
+        : '../../../contracts/live-release-evidence.schema.json',
+      import.meta.url,
+    ), 'utf8'),
   ) as object;
   return new Ajv2020({ strict: true, allErrors: true }).compile(schema);
 }
@@ -173,7 +178,10 @@ function compiled() {
  */
 describe('live release evidence vocabularies track the code', () => {
   const schema = JSON.parse(
-    fs.readFileSync('contracts/live-release-evidence.schema.json', 'utf8'),
+    fs.readFileSync(new URL(
+      '../../../contracts/live-release-evidence-v2.schema.json',
+      import.meta.url,
+    ), 'utf8'),
   ) as any;
 
   it('enumerates exactly the attested intervention kinds', () => {
@@ -208,7 +216,10 @@ describe('grader commands are expressible exactly when the runner emits them', (
   });
 
   const schema = JSON.parse(
-    fs.readFileSync('contracts/live-release-evidence.schema.json', 'utf8'),
+    fs.readFileSync(new URL(
+      '../../../contracts/live-release-evidence-v2.schema.json',
+      import.meta.url,
+    ), 'utf8'),
   ) as any;
   const validateCommand = new Ajv2020({ strict: true, allErrors: true })
     .compile(schema.$defs.graderCommand);
@@ -267,6 +278,28 @@ describe('live release evidence contract', () => {
     expect(liveReleaseSemanticErrors(evidence)).toEqual([]);
   });
 
+  it('keeps immutable external evidence v1 valid under its original schema', () => {
+    const legacy = structuredClone(validEvidence());
+    legacy.schemaVersion = '1.0';
+    for (const round of [legacy.formalReviews.round1, legacy.formalReviews.round2]) {
+      for (const recordedReview of round.reviewers) {
+        recordedReview.verdict = recordedReview.findingCount === 0
+          ? 'no_findings'
+          : 'findings';
+        delete recordedReview.hasFindings;
+      }
+    }
+    legacy.github.pullRequest = legacy.github.pullRequestNumber;
+    legacy.github.issueState = 'CLOSED';
+    legacy.github.issueStateReason = 'COMPLETED';
+    delete legacy.github.pullRequestNumber;
+    delete legacy.github.sourceIssueClosure;
+
+    const validate = compiled('v1');
+    expect(validate(legacy), JSON.stringify(validate.errors)).toBe(true);
+    expect(liveReleaseSemanticErrors(legacy)).toEqual([]);
+  });
+
   it('accepts a headless target that states why no design bundle applies', () => {
     const validate = compiled();
     const evidence = validEvidence();
@@ -315,7 +348,7 @@ describe('live release evidence contract', () => {
         section.issueNumber = 999;
       }
     }],
-    ['pull request number pinned', (v: any) => { v.github.pullRequest = 999; }],
+    ['pull request number pinned', (v: any) => { v.github.pullRequestNumber = 999; }],
     ['check name pinned', (v: any) => { v.github.requiredChecks = { 'some-other-check': 'SUCCESS' }; }],
   ])('stays reusable when the run differs by %s', (_name, mutate) => {
     const validate = compiled();
@@ -345,7 +378,7 @@ describe('live release evidence contract', () => {
     ['merge fence on an earlier head', (v: any) => { v.execution.expectedHead = round1Head; }],
     ['review of a stale head', (v: any) => { v.formalReviews.round2.head = round1Head; }],
     ['reviewer reading a different head', (v: any) => { v.formalReviews.round2.reviewers[0].head = round1Head; }],
-    ['verdict disagreeing with finding count', (v: any) => { v.formalReviews.round2.reviewers[0].verdict = 'findings'; }],
+    ['finding flag disagreeing with finding count', (v: any) => { v.formalReviews.round2.reviewers[0].hasFindings = true; }],
     ['the same agent reviewing twice', (v: any) => { v.formalReviews.round2.reviewers[1].agent = 'codex'; }],
     ['findings answered by no new commit', (v: any) => { v.formalReviews.round1.head = finalHead; v.formalReviews.round1.reviewers.forEach((r: any) => { r.head = finalHead; }); }],
     ['a ready label the automation also claims with', (v: any) => { v.triage.claimedLabel = 'ready'; }],
@@ -377,7 +410,7 @@ describe('live release evidence contract', () => {
     ['a failing required check', (v: any) => { v.github.requiredChecks.contracts = 'FAILURE'; }],
     ['no required check at all', (v: any) => { v.github.requiredChecks = {}; }],
     ['an unresolved review thread', (v: any) => { v.github.blockingReviewThreads = 1; }],
-    ['an issue left open', (v: any) => { v.github.issueState = 'OPEN'; }],
+    ['an issue left open', (v: any) => { v.github.sourceIssueClosure = 'open'; }],
     ['a single monitored repository', (v: any) => { v.target.monitoredRepositories = ['mrbaron3/designflow']; }],
     ['a triage decision with no issue coordinate', (v: any) => { delete v.triage.issueNumber; }],
     ['an execution with no repository coordinate', (v: any) => { delete v.execution.repository; }],

@@ -31,6 +31,13 @@ describe('language-neutral control-store contract', () => {
     expect(migrations[11]?.sql).toContain("'type-design'");
     expect(migrations[21]?.sql).toContain("finding->>'lineage' NOT IN ('new', 'persisted')");
     expect(migrations[21]?.sql).toContain("^finding-origin-v1:[0-9a-f]{64}$");
+    expect(migrations[22]?.sql).toContain("'mergeMethod', current_merge_method");
+    expect(migrations[23]?.sql).toContain("SET outcome = 'request_changes'");
+    expect(migrations[23]?.sql).toContain("finding->>'lineage' = 'persisted'");
+    expect(migrations[23]?.sql).toContain("finding->>'lineage' IS DISTINCT FROM 'persisted'");
+    expect(migrations[24]?.sql).toContain('RENAME COLUMN child_head_sha TO head_sha');
+    expect(migrations[25]?.sql).toContain("'sourceIssueClosure', 'completed'");
+    expect(migrations[26]?.sql).toContain('RENAME TO retired_build_defects');
     expect(fs.readFileSync(
       agentopsPackagePath('src', 'control-store', 'store.ts'),
       'utf8',
@@ -113,6 +120,23 @@ describe('language-neutral control-store contract', () => {
     });
     expect(validate({ ...fixture, version: 0 })).toBe(false);
     expect(validate({ ...fixture, repository: 'UNKNOWN/Repo' })).toBe(false);
+    const completeConfiguration = {
+      ...fixture,
+      configuration: {
+        mergeMethod: 'merge',
+        gateTimeoutSeconds: { default: 3_600, review: 7_200 },
+        releaseEvidence: {
+          authority: 'human-ready-allowed',
+          requiredGateSignals: [{ source: 'repository-grader', name: 'unit_tests' }],
+          requiredReviewPerspectives: ['security', 'codeQuality'],
+          minimumHeadEpochs: 1,
+        },
+      },
+    };
+    expect(validate(completeConfiguration), JSON.stringify(validate.errors)).toBe(true);
+    expect(RepositoryRegistrationInput.parse(completeConfiguration).configuration)
+      .toEqual(completeConfiguration.configuration);
+    expect(validate({ ...fixture, configuration: { mergeMethod: 'octopus' } })).toBe(false);
     const historical = {
       ...fixture,
       configuration: {

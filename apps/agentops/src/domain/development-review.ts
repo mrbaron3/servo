@@ -34,6 +34,20 @@ export const DevelopmentReviewFinding = z.object({
       message: 'in-change finding cannot carry a separation reason',
     });
   }
+  if (finding.lineage === 'persisted' && !finding.lineageRef) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lineageRef'],
+      message: 'persisted finding requires a lineage reference',
+    });
+  }
+  if (finding.lineage !== 'persisted' && finding.lineageRef) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lineageRef'],
+      message: 'only persisted finding can carry a lineage reference',
+    });
+  }
 });
 export type DevelopmentReviewFinding = z.infer<typeof DevelopmentReviewFinding>;
 
@@ -47,7 +61,7 @@ export const DevelopmentReviewRound = z.object({
   headSha: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/),
   branch: z.string().trim().min(1).max(500),
   pullRequestNumber: z.number().int().positive().nullable(),
-  outcome: z.enum(['running', 'approve', 'request-changes', 'escalated']),
+  outcome: z.enum(['running', 'approve', 'request_changes', 'escalated']),
   startedAt: z.string().datetime({ offset: true }),
   completedAt: z.string().datetime({ offset: true }).nullable(),
   perspectives: z.array(z.object({

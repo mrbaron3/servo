@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	ControlSchemaVersion = 22
+	ControlSchemaVersion = 27
 	migrationLockKey     = int64(0x4349534f02)
 )
 
@@ -1008,7 +1008,7 @@ func (store *Store) EnqueueWork(
 	if !registration.Enabled || !registration.ExecutionEnabled {
 		return "", false, ErrStaleRegistration
 	}
-	jobType, payload, err := item.QueuedJob(sourceKind)
+	jobType, payload, err := item.QueuedJob(sourceKind, registration.MergeMethod())
 	if err != nil {
 		return "", false, err
 	}
@@ -2125,8 +2125,8 @@ const developmentProgressSelect = `SELECT
 	         'parentIssueNumber', parent.issue_number,
 	         'parentBranch', node.parent_branch,
 	         'parentHeadSha', node.parent_head_sha,
-	         'childPullRequestNumber', node.child_pull_request_number,
-	         'childHeadSha', node.child_head_sha,
+	         'pullRequestNumber', node.pull_request_number,
+	         'headSha', node.head_sha,
 	         'integratedHeadSha', node.integrated_head_sha,
 	         'children', COALESCE((
 	           SELECT jsonb_agg(
@@ -2135,8 +2135,8 @@ const developmentProgressSelect = `SELECT
 	               'issueNumber', child.issue_number,
 	               'status', child.status,
 	               'parentHeadSha', child.parent_head_sha,
-	               'pullRequestNumber', child.child_pull_request_number,
-	               'headSha', child.child_head_sha,
+	               'pullRequestNumber', child.pull_request_number,
+	               'headSha', child.head_sha,
 	               'integratedHeadSha', child.integrated_head_sha
 	             ) ORDER BY child.created_at, child.id
 	           )
@@ -2734,11 +2734,13 @@ func (store *Store) Projections(
 	}
 	projections := make([]RegistrationProjection, 0, len(registrations))
 	for _, registration := range registrations {
+		cursorObservedAt := map[string]*time.Time{"issue": nil, "pull_request": nil}
 		projection := RegistrationProjection{
 			Registration:           registration,
 			Mode:                   lifecycleMode,
 			Components:             make(map[string]ComponentProjection),
-			LastPoll:               map[string]*time.Time{"issue": nil, "pull_request": nil},
+			CursorObservedAt:       cursorObservedAt,
+			LastPoll:               cursorObservedAt,
 			RecentDeliveryFailures: make([]DeliveryFailureProjection, 0),
 			DevelopmentProgress:    make([]DevelopmentIssueProgress, 0),
 		}
@@ -2795,7 +2797,7 @@ func (store *Store) Projections(
 				kind,
 			).Scan(&observed)
 			if err == nil {
-				projection.LastPoll[kind] = &observed
+				projection.CursorObservedAt[kind] = &observed
 			} else if !errors.Is(err, pgx.ErrNoRows) {
 				return nil, unavailable(err)
 			}

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -38,6 +38,18 @@ function frozenSourceIssue(
     capturedAt: at,
   };
   return { ...source, digest: releaseSourceIssueSnapshotDigest(source) };
+}
+
+function deterministicInvocationRef(releaseId: string, invocationKey: string): string {
+  const bytes = createHash('sha256')
+    .update(`${releaseId}\0${invocationKey}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `invocation:${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-`
+    + `${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 const databaseUrl = process.env.AGENTOPS_TEST_DATABASE_URL;
@@ -204,7 +216,7 @@ integration('PostgreSQL release receipt outbox', () => {
         kind: 'build',
         head,
         parentHead: null,
-        invocationId: 'generator-1',
+        invocationRef: 'generator-1',
         role: 'generator',
       },
       {
@@ -229,8 +241,9 @@ integration('PostgreSQL release receipt outbox', () => {
         head,
         headEpoch: 1,
         perspective: 'security',
-        invocationId: 'review-security',
-        verdict: 'approved',
+        invocationRef: 'review-security',
+        verdict: 'approve',
+        hasFindings: false,
         findings: [],
       },
       {
@@ -239,8 +252,9 @@ integration('PostgreSQL release receipt outbox', () => {
         head,
         headEpoch: 1,
         perspective: 'codeQuality',
-        invocationId: 'review-codeQuality',
-        verdict: 'approved',
+        invocationRef: 'review-codeQuality',
+        verdict: 'approve',
+        hasFindings: false,
         findings: [],
       },
       {
@@ -257,7 +271,8 @@ integration('PostgreSQL release receipt outbox', () => {
         },
         invocations: [
           {
-            invocationId: 'generator-1',
+            invocationKey: 'generator-key-1',
+            invocationRef: 'generator-1',
             role: 'generator',
             provider: 'codex',
             model: {
@@ -268,7 +283,8 @@ integration('PostgreSQL release receipt outbox', () => {
             head,
           },
           ...['security', 'codeQuality'].map((perspective) => ({
-            invocationId: `review-${perspective}`,
+            invocationKey: `review-${perspective}-key`,
+            invocationRef: `review-${perspective}`,
             role: 'reviewer' as const,
             provider: 'claude',
             model: { kind: 'explicit' as const, name: 'claude-fixture' },
@@ -307,7 +323,7 @@ integration('PostgreSQL release receipt outbox', () => {
     const intent = {
       ...common(randomUUID(), 'merge-intent:21', at(8), receipts.map((receipt) => receipt.receiptId), jobIds[1]!),
       kind: 'merge-intent' as const,
-      pullRequest: 21,
+      pullRequestNumber: 21,
       expectedHead: head,
       observedPrHead: head,
     };
@@ -322,13 +338,12 @@ integration('PostgreSQL release receipt outbox', () => {
     const merge = {
       ...common(randomUUID(), 'merge:21', at(9), [intent.receiptId], jobIds[1]!),
       kind: 'merge' as const,
-      pullRequest: 21,
+      pullRequestNumber: 21,
       expectedHead: head,
       observedPrHead: head,
       mergeSha: 'd'.repeat(40),
       actor: 'workflow-app[bot]',
-      issueState: 'CLOSED' as const,
-      issueStateReason: 'COMPLETED' as const,
+      sourceIssueClosure: 'completed' as const,
       mergeReachableFromDefaultBranch: true as const,
       mergedAt: at(9),
     };
@@ -381,8 +396,13 @@ integration('PostgreSQL release receipt outbox', () => {
       [authorityId],
     )).rejects.toThrow(/immutable/);
     await expect(store.exportReleaseEvidence(releaseId)).resolves.toMatchObject({
-      schemaVersion: '3.0',
-      release: { id: releaseId, finalHead: head, mergeSha: 'd'.repeat(40) },
+      schemaVersion: '4.0',
+      release: {
+        id: releaseId,
+        pullRequestNumber: 21,
+        finalHead: head,
+        mergeSha: 'd'.repeat(40),
+      },
       receipts: {
         mergeIntent: { receiptId: intent.receiptId },
         merge: { receiptId: merge.receiptId },
@@ -668,7 +688,7 @@ integration('PostgreSQL release receipt outbox', () => {
         codeQualityReviewId,
       ]),
       kind: 'merge-intent' as const,
-      pullRequest: 70,
+      pullRequestNumber: 70,
       expectedHead: head,
       observedPrHead: head,
     };
@@ -683,13 +703,12 @@ integration('PostgreSQL release receipt outbox', () => {
     const merge = {
       ...common(randomUUID(), 'merge:70:historical', at(8), [intentId]),
       kind: 'merge' as const,
-      pullRequest: 70,
+      pullRequestNumber: 70,
       expectedHead: head,
       observedPrHead: head,
       mergeSha,
       actor: 'workflow-app[bot]',
-      issueState: 'CLOSED' as const,
-      issueStateReason: 'COMPLETED' as const,
+      sourceIssueClosure: 'completed' as const,
       mergeReachableFromDefaultBranch: true as const,
       mergedAt: at(8),
     };
@@ -927,7 +946,7 @@ integration('PostgreSQL release receipt outbox', () => {
         codeQualityReviewId,
       ]),
       kind: 'merge-intent' as const,
-      pullRequest: 71,
+      pullRequestNumber: 71,
       expectedHead: head,
       observedPrHead: head,
     };
@@ -940,13 +959,12 @@ integration('PostgreSQL release receipt outbox', () => {
     const merge = {
       ...common(randomUUID(), 'merge:71:historical-v3', at(9), [intent.receiptId]),
       kind: 'merge' as const,
-      pullRequest: 71,
+      pullRequestNumber: 71,
       expectedHead: head,
       observedPrHead: head,
       mergeSha,
       actor: 'workflow-app[bot]',
-      issueState: 'CLOSED' as const,
-      issueStateReason: 'COMPLETED' as const,
+      sourceIssueClosure: 'completed' as const,
       mergeReachableFromDefaultBranch: true as const,
       mergedAt: at(9),
     };
@@ -1036,7 +1054,7 @@ integration('PostgreSQL release receipt outbox', () => {
           causes: [authority.receiptId],
           recordedAt: strictAt(2),
           kind: 'merge-intent',
-          pullRequest: 22,
+          pullRequestNumber: 22,
           expectedHead: 'e'.repeat(40),
           observedPrHead: 'e'.repeat(40),
         }],
@@ -1063,7 +1081,7 @@ integration('PostgreSQL release receipt outbox', () => {
         causes: [authority.receiptId],
         recordedAt: strictAt(2),
         kind: 'merge-intent',
-        pullRequest: 22,
+        pullRequestNumber: 22,
         expectedHead: 'e'.repeat(40),
         observedPrHead: 'e'.repeat(40),
       },
@@ -1840,13 +1858,33 @@ integration('PostgreSQL release receipt outbox', () => {
       `SELECT release_id FROM agentops_control.jobs WHERE id = $1`,
       [promotedJobId],
     );
-    const receipt = (await store.listReleaseReceipts(
-      promoted.rows[0]!.release_id,
-    ))[0]!.receipt;
+    const releaseId = promoted.rows[0]!.release_id;
+    const invocationKey = `triage-job:${queued.job.id}`;
+    const invocationRef = deterministicInvocationRef(releaseId, invocationKey);
+    const rawReceipts = await pool.query<{ kind: string; payload: any }>(
+      `SELECT kind, payload
+         FROM agentops_control.release_receipt_outbox
+        WHERE release_id = $1
+        ORDER BY recorded_at, receipt_id`,
+      [releaseId],
+    );
+    const rawAuthority = rawReceipts.rows.find(({ kind }) => kind === 'authority')!.payload;
+    const rawRuntime = rawReceipts.rows.find(
+      ({ kind }) => kind === 'runtime-provenance',
+    )!.payload;
+    expect(rawAuthority).toMatchObject({ triageInvocationRef: invocationRef });
+    expect(rawAuthority).not.toHaveProperty('triageInvocationId');
+    expect(rawRuntime.invocations).toEqual([
+      expect.objectContaining({ invocationKey, invocationRef }),
+    ]);
+    expect(rawRuntime.invocations[0]).not.toHaveProperty('invocationId');
+
+    const receipt = (await store.listReleaseReceipts(releaseId))
+      .find((entry) => entry.receipt.kind === 'authority')!.receipt;
     expect(receipt).toMatchObject({
       kind: 'authority',
       route: 'ai-triage-then-human-ready',
-      triageInvocationId: `triage-job:${queued.job.id}`,
+      triageInvocationRef: invocationRef,
       triageCompletedAt: '2026-08-01T00:00:20.000000Z',
       sourceDigest: 'f'.repeat(64),
     });

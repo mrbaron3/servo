@@ -538,7 +538,7 @@ export async function runLiveSample(
         ? 'approve'
         : panel.verdict === 'needs_human'
           ? 'escalated'
-          : 'request-changes',
+          : 'request_changes',
       startedAt: reviewStartedAt,
       completedAt,
       perspectives: panel.runs.map((run) => ({

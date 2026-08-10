@@ -1,0 +1,467 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mrbaron3/servo/contracts/live-release-evidence-v2.schema.json",
+  "title": "Live external-target release evidence v2",
+  "description": "One live GitHub round trip against an external target repository: triage decision, human ready promotion, claim, PR, two current-head review rounds, required checks, expected-head merge, Issue close. Identity (repository, Issue, PR, SHA) is validated but never pinned, so the same contract accepts any target. Only the invariants being asserted are pinned with const.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "target",
+    "consumer",
+    "triage",
+    "execution",
+    "formalReviews",
+    "github",
+    "providerInvocations",
+    "designBundle",
+    "releaseLineage",
+    "howInterventions",
+    "artifacts",
+    "result"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "2.0" },
+    "target": { "$ref": "#/$defs/target" },
+    "consumer": { "$ref": "#/$defs/consumer" },
+    "triage": { "$ref": "#/$defs/triage" },
+    "execution": { "$ref": "#/$defs/execution" },
+    "formalReviews": { "$ref": "#/$defs/reviews" },
+    "github": { "$ref": "#/$defs/github" },
+    "providerInvocations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/providerInvocation" }
+    },
+    "designBundle": { "$ref": "#/$defs/designBundle" },
+    "releaseLineage": { "$ref": "#/$defs/releaseLineage" },
+    "howInterventions": { "$ref": "#/$defs/howInterventions" },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/artifact" },
+      "allOf": [
+        { "contains": { "type": "object", "properties": { "kind": { "const": "github-current-state" } }, "required": ["kind"] } },
+        { "contains": { "type": "object", "properties": { "kind": { "const": "audit-export" } }, "required": ["kind"] } }
+      ]
+    },
+    "result": { "enum": ["passed", "passed-with-interventions"] }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?/(?!\\.{1,2}$)[a-z0-9_.-]{1,100}$"
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/ -]{0,49}$"
+    },
+    "githubNumber": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+
+    "graderCommand": {
+      "oneOf": [
+        {
+          "description": "Vendored toolchain profile. These are fixed strings the runner emits for a repository carrying both typescript and vitest; pinning them stops an injected absolute path from posing as the vendored profile.",
+          "type": "string",
+          "enum": [
+            "node /app/node_modules/typescript/bin/tsc",
+            "node /app/node_modules/typescript/bin/tsc --noEmit",
+            "node /app/node_modules/vitest/vitest.mjs run --configLoader runner"
+          ]
+        },
+        {
+          "description": "Direct Node contract checker declared by the repository. Mirrors the runtime's path rules: relative only, and no empty, `.` or `..` segment, so a checker resolving outside the checkout cannot be certified as having passed.",
+          "type": "string",
+          "pattern": "^node (?!\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._-]+)*\\.(?:mjs|cjs|js)$"
+        }
+      ]
+    },
+
+    "target": {
+      "description": "The external repository this run developed. `monitoredRepositories` must hold at least two canonical repositories so the artifact also witnesses that the broker observed more than one target without confusing them.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "issueNumber", "monitoredRepositories", "registrationVersion"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/repository" },
+        "issueNumber": { "$ref": "#/$defs/githubNumber" },
+        "monitoredRepositories": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/repository" }
+        },
+        "registrationVersion": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "consumer": {
+      "description": "The harness revision that drove the run. Distinct from the target: a cutover that bootstrapped itself is not an external-target proof, so the consumer repository must differ from the target repository (enforced by the semantic validator).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "head", "observedAt"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/repository" },
+        "head": { "$ref": "#/$defs/sha" },
+        "observedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+
+    "triage": {
+      "description": "AI classification and the human ready gate. Carries the repository/issue coordinate the promoted triage job was recorded against; the semantic validator binds it to `target`, so a decision taken for one issue cannot certify another. `aiAppliedReadyLabel` is pinned false: the decision vocabulary has no `ready` value, so a true here means the run violated the authority boundary.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "observedAt",
+        "repository",
+        "issueNumber",
+        "decisionSchemaVersion",
+        "readiness",
+        "managedLabelsApplied",
+        "aiAppliedReadyLabel",
+        "humanReadyLabel",
+        "humanReadyAppliedAt",
+        "claimedLabel",
+        "promotionJobId",
+        "promotionAtomic",
+        "sourceDigest"
+      ],
+      "properties": {
+        "passed": { "const": true },
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "issueNumber": { "$ref": "#/$defs/githubNumber" },
+        "decisionSchemaVersion": { "const": 1 },
+        "readiness": { "enum": ["ready_candidate", "blocked", "needs_info"] },
+        "managedLabelsApplied": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/label" }
+        },
+        "aiAppliedReadyLabel": { "const": false },
+        "humanReadyLabel": { "$ref": "#/$defs/label" },
+        "humanReadyAppliedAt": { "$ref": "#/$defs/timestamp" },
+        "claimedLabel": { "$ref": "#/$defs/label" },
+        "promotionJobId": { "$ref": "#/$defs/uuid" },
+        "promotionAtomic": { "const": true },
+        "sourceDigest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+
+    "execution": {
+      "description": "The development job observation. Carries the repository/issue coordinate the job served; the semantic validator binds it to `target`, so an execution record from another run cannot be presented as this release's development.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "observedAt",
+        "repository",
+        "issueNumber",
+        "mode",
+        "jobId",
+        "attemptId",
+        "leaseId",
+        "expectedHead",
+        "finalHead",
+        "graderProfileSource",
+        "graderCommands",
+        "auditSha256"
+      ],
+      "properties": {
+        "passed": { "const": true },
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "issueNumber": { "$ref": "#/$defs/githubNumber" },
+        "mode": { "const": "ACTIVE" },
+        "jobId": { "$ref": "#/$defs/uuid" },
+        "attemptId": { "$ref": "#/$defs/uuid" },
+        "leaseId": { "$ref": "#/$defs/uuid" },
+        "expectedHead": { "$ref": "#/$defs/sha" },
+        "finalHead": { "$ref": "#/$defs/sha" },
+        "graderProfileSource": { "const": "repository-metadata" },
+        "graderCommands": {
+          "description": "Grader commands as inferred from the checked-out repository metadata, in the two forms the runner can emit. Anything else — a shell operator, a package install, a job-supplied command, or a checker outside the checkout — is not expressible.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/graderCommand" }
+        },
+        "auditSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "head", "readOnly", "worktreeClean", "verdict", "hasFindings", "findingCount"],
+      "properties": {
+        "agent": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "head": { "$ref": "#/$defs/sha" },
+        "readOnly": { "const": true },
+        "worktreeClean": { "const": true },
+        "verdict": { "enum": ["approve", "request_changes", "needs_human"] },
+        "hasFindings": { "type": "boolean" },
+        "findingCount": { "type": "integer", "minimum": 0, "maximum": 1024 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "hasFindings": { "const": true } },
+            "required": ["hasFindings"]
+          },
+          "then": {
+            "properties": { "findingCount": { "type": "integer", "minimum": 1 } }
+          },
+          "else": {
+            "properties": { "findingCount": { "type": "integer", "maximum": 0 } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "verdict": { "const": "approve" } },
+            "required": ["verdict"]
+          },
+          "then": { "properties": { "hasFindings": { "const": false } } }
+        }
+      ]
+    },
+
+    "round": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "head", "reviewers", "allConfirmedFindingsResolved"],
+      "properties": {
+        "passed": { "const": true },
+        "head": { "$ref": "#/$defs/sha" },
+        "reviewers": {
+          "description": "At least two independent reviewers. Agent names are free text so the panel is not pinned to a provider pair.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/reviewer" }
+        },
+        "allConfirmedFindingsResolved": { "const": true }
+      }
+    },
+
+    "reviews": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["roundCount", "round1", "round2", "round3Created"],
+      "properties": {
+        "roundCount": { "const": 2 },
+        "round1": { "$ref": "#/$defs/round" },
+        "round2": { "$ref": "#/$defs/round" },
+        "round3Created": { "const": false }
+      }
+    },
+
+    "github": {
+      "description": "Observed GitHub state after the merge. Carries the repository/issue coordinate the observation was taken from; the semantic validator binds it to `target`, so a closed issue observed in one repository cannot certify another. `requiredChecks` is an open map so check names are not pinned, but every entry must be SUCCESS and at least one must exist.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observedAt",
+        "repository",
+        "issueNumber",
+        "pullRequestNumber",
+        "finalPrHead",
+        "mergeSha",
+        "expectedHeadMatchEnforced",
+        "requiredChecks",
+        "blockingReviewThreads",
+        "sourceIssueClosure",
+        "mergeReachableFromDefaultBranch"
+      ],
+      "properties": {
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "issueNumber": { "$ref": "#/$defs/githubNumber" },
+        "pullRequestNumber": { "$ref": "#/$defs/githubNumber" },
+        "finalPrHead": { "$ref": "#/$defs/sha" },
+        "mergeSha": { "$ref": "#/$defs/sha" },
+        "expectedHeadMatchEnforced": { "const": true },
+        "requiredChecks": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 32,
+          "propertyNames": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/ -]{0,63}$" },
+          "additionalProperties": { "const": "SUCCESS" }
+        },
+        "blockingReviewThreads": { "const": 0 },
+        "sourceIssueClosure": { "const": "completed" },
+        "mergeReachableFromDefaultBranch": { "const": true }
+      }
+    },
+
+    "providerInvocation": {
+      "description": "One recorded model invocation. `jobId` is the run coordinate: the semantic validator binds triage invocations to the promoted triage job and every other role to the development job, so calls belonging to another issue or run cannot be presented as this release's provenance. A triage invocation carries no `head` because the triage container has no checkout — recording one would be a fiction.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "provider", "model", "invocationKey", "jobId", "observedAt"],
+      "properties": {
+        "role": { "enum": ["planning", "generator", "uiDesign", "reviewer", "triage"] },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "invocationKey": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "jobId": { "$ref": "#/$defs/uuid" },
+        "head": { "$ref": "#/$defs/sha" },
+        "observedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "if": {
+        "type": "object",
+        "properties": { "role": { "const": "triage" } },
+        "required": ["role"]
+      },
+      "then": { "properties": { "head": false } },
+      "else": { "required": ["head"] }
+    },
+
+    "designBundle": {
+      "description": "The approved design revision this release is bound to. A headless target may legitimately have none, but absence must be stated with a reason rather than left out — a silently missing bundle is indistinguishable from a lost one.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["applicable", "reason"],
+          "properties": {
+            "applicable": { "const": false },
+            "reason": { "type": "string", "minLength": 1, "maxLength": 500 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["applicable", "bundleDigest", "revisionId", "approvedAt"],
+          "properties": {
+            "applicable": { "const": true },
+            "bundleDigest": { "$ref": "#/$defs/digest" },
+            "revisionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "approvedAt": { "$ref": "#/$defs/timestamp" }
+          }
+        }
+      ]
+    },
+
+    "releaseLineage": {
+      "description": "Verified Designflow release lineage, when the run consumed a design contract. `reasons` is pinned empty because a verified lineage carries no reason codes; an unverified lineage is not release evidence.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["applicable", "reason"],
+          "properties": {
+            "applicable": { "const": false },
+            "reason": { "type": "string", "minLength": 1, "maxLength": 500 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "applicable",
+            "status",
+            "intakeKey",
+            "candidateKey",
+            "revisionId",
+            "bundleDigest",
+            "issueId",
+            "prId",
+            "headSha",
+            "reasons"
+          ],
+          "properties": {
+            "applicable": { "const": true },
+            "status": { "const": "verified" },
+            "intakeKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "candidateKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "revisionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "bundleDigest": { "$ref": "#/$defs/digest" },
+            "issueId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "prId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "headSha": { "$ref": "#/$defs/sha" },
+            "reasons": { "type": "array", "maxItems": 0 }
+          }
+        }
+      ]
+    },
+
+    "howInterventions": {
+      "description": "Attested human HOW-interventions during the run. The kind vocabulary excludes human judgment points (adopt / assign / sign / decide / label) by construction, so applying the ready label is never counted here. The count drives `result`: zero means the North Star bar was met, non-zero still produces valid evidence so the number can be tracked down across runs.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "records"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0, "maximum": 1024 },
+        "records": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "reason", "issueId", "createdAt"],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "conditional-approval-implementation",
+                  "workspace-hand-edit",
+                  "repair-brief-hand-edit",
+                  "manual-evidence-collection"
+                ]
+              },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "issueId": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "createdAt": { "$ref": "#/$defs/timestamp" }
+            }
+          }
+        }
+      }
+    },
+
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "uri", "sha256", "sizeBytes", "sourceHead", "observedAt"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "runtime-status",
+            "container-inspect",
+            "audit-export",
+            "job-artifact",
+            "triage-decision",
+            "provider-invocation",
+            "validation-report",
+            "github-current-state"
+          ]
+        },
+        "uri": {
+          "type": "string",
+          "pattern": "^(?:evidence/live-release/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*|volume://registrations/[0-9a-f-]+/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*)$"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "sizeBytes": { "type": "integer", "minimum": 1 },
+        "sourceHead": { "$ref": "#/$defs/sha" },
+        "observedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    }
+  }
+}
