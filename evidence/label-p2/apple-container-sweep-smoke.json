@@ -1,0 +1,188 @@
+{
+  "schemaVersion": "1.0",
+  "issue": "mrbaron3/servo#123",
+  "phase": "LABEL-P2",
+  "baseCommit": "4dd2c3cd8128474fb351580dd52ee27fcfbd2653",
+  "recordedAt": "2026-08-10T05:20:29Z",
+  "host": {
+    "architecture": "arm64",
+    "runtime": "Apple Container",
+    "runtimeVersion": "container CLI version 1.1.0 (build: release, commit: unspeci)",
+    "installationAction": "none",
+    "systemStart": "apiserver was already running; no system start was needed"
+  },
+  "scope": {
+    "proves": [
+      "a real legacy-only container is drained, deleted, and recreated carrying both ownership namespaces",
+      "the named volume it held is proven released before the replacement attaches it, and is re-attached to the replacement at the same destination",
+      "data written inside that named volume survives the container being deleted and recreated, and survives a subsequent restart",
+      "the migrated container is still discoverable by the pre-migration reader predicate (rollback contract)",
+      "a container an operator left stopped is replaced stopped; a running one is stopped gracefully and replaced running",
+      "a conflicting container anywhere on the host stops the sweep with zero mutations, and the probe survives the refusal with its volume attached",
+      "a migrated container is skipped by a second sweep rather than migrated twice",
+      "containers outside the named target set do not change ownership class"
+    ],
+    "doesNotProve": [
+      "migration of named volumes or networks; those remain legacy-only after Phase 2 by design, because relabelling a volume would mean destroying its data (see the P3 entry gate in the runbook)",
+      "behaviour of a container whose entrypoint is a relative image default and whose arguments were overridden at creation; that shape is blocked by the equivalence gate rather than migrated",
+      "Phase 3 removal of legacy writes or reads"
+    ]
+  },
+  "automatedGroundedRun": {
+    "command": "AGENTOPS_TEST_APPLE_CONTAINER=1 AGENTOPS_TEST_APPLE_IMAGE=agentops-postgres:ciso07-078330f go test ./apps/control-plane/internal/lifecycle/ -run AppleContainerSweep -v -count=1",
+    "result": "ok github.com/mrbaron3/servo/apps/control-plane/internal/lifecycle 56.169s",
+    "cases": [
+      {
+        "name": "TestAppleContainerSweepMigratesLegacyOnlyContainerAndPreservesVolumeData",
+        "outcome": "PASS",
+        "durationSeconds": 43.37,
+        "detail": {
+          "image": "agentops-postgres:ciso07-078330f",
+          "probeShape": "legacy-only container seeded with the raw CLI, running, holding one legacy-only named volume at /data",
+          "stagesObserved": [
+            "re-inspect",
+            "stop",
+            "delete",
+            "volume-release",
+            "recreate",
+            "verify"
+          ],
+          "sentinel": "written into the named volume before the sweep, read back unchanged after the replacement and again after a stop/start cycle",
+          "scoping": "the sweep was restricted with Only to the probe identity, so the five old-only managed containers on the same host were not targets"
+        }
+      },
+      {
+        "name": "TestAppleContainerSweepRefusesToMutateWhileAConflictExists",
+        "outcome": "PASS",
+        "durationSeconds": 12.62,
+        "detail": {
+          "seeded": "a second container carrying com.mrbaron3.workflow.agentopsctl=v1 and com.mrbaron3.servo.agentopsctl=v2",
+          "observed": "Apply returned an error, report.Applied was false, and the probe remained legacy-only with its named volume still attached and still present"
+        }
+      }
+    ],
+    "optInGate": {
+      "check": "AGENTOPS_TEST_APPLE_CONTAINER unset",
+      "observed": "both cases SKIP, which is why an opted-in run with a missing prerequisite fails instead of skipping"
+    }
+  },
+  "probeCleanup": {
+    "policy": "every probe resource carries a prefix unique to the process; cleanup deletes those exact identities and never selects by label",
+    "verifiedResidue": {
+      "containers": 0,
+      "volumes": 0,
+      "networks": 0
+    },
+    "verificationCommand": "container list --all --format json / container volume list --format json / container network list --format json filtered for the labelp2 prefix"
+  },
+  "hostMigration": {
+    "targetSelection": "exact identities passed to --only; --apply refuses an empty or duplicated set",
+    "runs": [
+      {
+        "targets": ["agentops-control"],
+        "preMutationSnapshot": "evidence/label-p2/pre-mutation-20260810T051226Z.json",
+        "sweepReport": "evidence/label-p2/sweep-20260810T051226Z.json",
+        "outcome": "migrated; remained stopped"
+      },
+      {
+        "targets": [
+          "agentops-github-broker",
+          "agentops-triage",
+          "agentops-postgres",
+          "agentops-runner"
+        ],
+        "preMutationSnapshot": "evidence/label-p2/pre-mutation-20260810T051635Z.json",
+        "sweepReport": "evidence/label-p2/sweep-20260810T051635Z.json",
+        "outcome": "all four migrated; all remained stopped; 24 of 24 stages ok"
+      }
+    ],
+    "guardProbes": {
+      "note": "these runs are recorded because they exercise the fail-closed guards on the real host, not because they migrated anything",
+      "broadApply": "agentopsctl migrate-labels --apply (no --only) exited 1 without contacting a single container",
+      "duplicateApply": "agentopsctl migrate-labels --apply --only agentops-runner,agentops-runner exited 1; its halted sweep record is evidence/label-p2/sweep-20260810T051624Z.json"
+    },
+    "inventory": {
+      "beforeAnyMigration": {
+        "legacy-only": 5,
+        "missing-label": 2,
+        "conflicting": 0
+      },
+      "afterAllMigrations": {
+        "dual": 5,
+        "missing-label": 2,
+        "pending": 0,
+        "conflicting": 0,
+        "blocked": 0
+      }
+    },
+    "volumePreservation": {
+      "deleted": 0,
+      "observed": "all 23 named volumes present before and after; the five volumes attached to migrated containers were re-attached at the same destinations with the same read-only flags"
+    },
+    "restartReconciliation": {
+      "container": "agentops-postgres",
+      "observed": "started after migration, reported dual ownership and role labels, re-attached agentops-postgres-data at /var/lib/postgresql, and its PostgreSQL 18 data cluster (PG_VERSION=18) was intact; returned to stopped"
+    },
+    "observationWindow": {
+      "requirement": "at least 20 minutes and at least three samples: immediately after migration, after restart/reconcile, and at window close",
+      "startedAt": "2026-08-10T05:17:00Z",
+      "closedAt": "2026-08-10T05:49:37Z",
+      "durationMinutes": 32.6,
+      "samples": [
+        {
+          "at": "2026-08-10T05:17:00Z",
+          "kind": "immediately after migration",
+          "file": "evidence/label-p2/inventory-20260810T051700Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        },
+        {
+          "at": "2026-08-10T05:18:11Z",
+          "kind": "after restart/reconcile of agentops-postgres",
+          "file": "evidence/label-p2/inventory-20260810T051811Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        },
+        {
+          "at": "2026-08-10T05:31:37Z",
+          "kind": "intermediate",
+          "file": "evidence/label-p2/inventory-20260810T053137Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        },
+        {
+          "at": "2026-08-10T05:35:31Z",
+          "kind": "intermediate",
+          "file": "evidence/label-p2/inventory-20260810T053531Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        },
+        {
+          "at": "2026-08-10T05:49:37Z",
+          "kind": "window close",
+          "file": "evidence/label-p2/inventory-20260810T054937Z.json",
+          "totals": { "skipped": 7, "pending": 0, "conflicting": 0, "blocked": 0 }
+        }
+      ],
+      "regressions": {
+        "ownership": 0,
+        "attachment": 0,
+        "lifecycleState": 0,
+        "detail": "all five managed containers reported dual ownership at every sample, each with the same named volumes at the same destinations and the same read-only flags, and all remained stopped"
+      }
+    }
+  },
+  "knownEvidenceLimitations": [
+    "The retained pre-mutation and sweep files were produced by the implementation as it stood before review rounds 1 and 2, so they contain no plannedSpecs[] and no migrated[]. The rollback the runbook documents was therefore NOT performable from the artifacts of the migration that actually ran; it is proven by the headless tests and by the grounded suite against the hardened code, not by those historical files. They are retained unedited because they are the true record of what happened.",
+    "The five host containers were already dual by the time the hardening landed, so they are no longer migration targets and the hardened sweep could not be re-run against them. Re-proving on the real host would require seeding a fresh legacy-only container, which the grounded suite does with disposable probe resources instead.",
+    "The five observation samples are identical in every field the window watches, so the 05:18:11Z sample is not distinguishable from the others by its file contents alone. The restart it follows is recorded separately under hostMigration.restartReconciliation (agentops-postgres started, reported dual labels and its re-attached volume, PG_VERSION=18 read back, returned to stopped); the sample's value is that nothing regressed across that restart, not that the file looks different."
+  ],
+  "postReviewHardening": {
+    "note": "review rounds 1 and 2 (fresh Codex + fresh Claude each, read-only, separate terminals) found defects in the implementation that produced the migration above. The confirmed ones were fixed and the grounded suite was re-run against the hardened code; the already-migrated containers were not re-swept, because they are dual and no longer migration targets.",
+    "groundedRerun": {
+      "command": "AGENTOPS_TEST_APPLE_CONTAINER=1 AGENTOPS_TEST_APPLE_IMAGE=agentops-postgres:ciso07-078330f go test ./apps/control-plane/internal/lifecycle/ -run AppleContainerSweep -v -count=1",
+      "result": "ok github.com/mrbaron3/servo/apps/control-plane/internal/lifecycle 52.856s",
+      "residueAfterRerun": { "containers": 0, "volumes": 0, "networks": 0 }
+    }
+  },
+  "rollback": {
+    "predicate": "every migrated container still carries com.mrbaron3.workflow.agentopsctl=v1 plus its legacy role and spec-sha256, so the pre-migration binary continues to discover it",
+    "perStage": "documented in docs/runbooks/container-label-migration.md; the only window in which a container does not exist is between delete and recreate, and the named volume and its data are untouched throughout"
+  }
+}

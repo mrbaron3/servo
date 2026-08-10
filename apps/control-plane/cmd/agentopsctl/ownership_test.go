@@ -24,9 +24,9 @@ func legacyOwnedActual(name, role string) *lifecycle.ContainerActual {
 		"com.mrbaron3.workflow.agentopsctl": "v1",
 		"com.mrbaron3.workflow.role":        role,
 	}
-	actual.Configuration.Networks = []struct {
-		Network string `json:"network"`
-	}{{Network: "agentops-internal"}}
+	actual.Configuration.Networks = []lifecycle.ContainerNetworkAttachment{
+		{Network: "agentops-internal"},
+	}
 	actual.Configuration.Image.Reference = "runner:test"
 	return actual
 }

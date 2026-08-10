@@ -1,0 +1,915 @@
+{
+  "generatedAt": "20260810T051635Z",
+  "mode": "apply",
+  "appleContainerVersion": "container CLI version 1.1.0 (build: release, commit: unspeci)",
+  "plan": {
+    "phase": "pre-migration",
+    "totals": {
+      "pending": 4,
+      "skipped": 3
+    },
+    "records": [
+      {
+        "id": "agentops-github-broker",
+        "state": "stopped",
+        "image": "agentops-github-broker:dev",
+        "imageDigest": "sha256:1193aa647c9871703a48dce54ccaae457e078cef2e4b9fed27528ce6c389bcd5",
+        "ownership": "legacy-only",
+        "role": "github-broker",
+        "roleAgreement": "legacy-only",
+        "specDigest": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66",
+        "specAgreement": "legacy-only",
+        "ownershipLabels": {
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "github-broker",
+          "com.mrbaron3.workflow.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66"
+        },
+        "namedVolumes": [
+          {
+            "name": "agentops-github-app-key",
+            "destination": "/run/agentops-github-app",
+            "readOnly": true
+          }
+        ],
+        "tmpfsMounts": [
+          "/tmp"
+        ],
+        "networks": [
+          "default",
+          "agentops-internal"
+        ],
+        "disposition": "pending",
+        "reason": "legacy-only; a faithful dual-labeled replacement can be rebuilt"
+      },
+      {
+        "id": "agentops-ciso06-hardening-probe",
+        "state": "stopped",
+        "image": "agentops-control:dev",
+        "imageDigest": "sha256:458f42a5f3f6ac5d87bd0cd12ceb0f6d989b8d6ec20c67f4fe72fa96c1b3a0a7",
+        "ownership": "missing-label",
+        "role": "",
+        "roleAgreement": "absent",
+        "specDigest": "",
+        "specAgreement": "absent",
+        "ownershipLabels": {},
+        "namedVolumes": [],
+        "tmpfsMounts": [],
+        "networks": [
+          "default"
+        ],
+        "disposition": "skipped",
+        "reason": "no ownership label; not managed by agentopsctl"
+      },
+      {
+        "id": "agentops-triage",
+        "state": "stopped",
+        "image": "agentops-triage:dev",
+        "imageDigest": "sha256:df6cfb5c0cd7f47908da9b5c1af8faaf8d2ac870925e78ea008ee4fdf70a6712",
+        "ownership": "legacy-only",
+        "role": "triage",
+        "roleAgreement": "legacy-only",
+        "specDigest": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c",
+        "specAgreement": "legacy-only",
+        "ownershipLabels": {
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "triage",
+          "com.mrbaron3.workflow.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c"
+        },
+        "namedVolumes": [
+          {
+            "name": "agentops-triage-credentials",
+            "destination": "/run/agentops-credentials",
+            "readOnly": true
+          }
+        ],
+        "tmpfsMounts": [
+          "/tmp",
+          "/home/agentops"
+        ],
+        "networks": [
+          "agentops-internal"
+        ],
+        "disposition": "pending",
+        "reason": "legacy-only; a faithful dual-labeled replacement can be rebuilt"
+      },
+      {
+        "id": "agentops-postgres",
+        "state": "stopped",
+        "image": "agentops-postgres:dev",
+        "imageDigest": "sha256:fa625a68f58db2509e21d658e357797c46dd7f21925bdf514dec2d0c3c2b1d18",
+        "ownership": "legacy-only",
+        "role": "postgres",
+        "roleAgreement": "legacy-only",
+        "specDigest": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6",
+        "specAgreement": "legacy-only",
+        "ownershipLabels": {
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "postgres",
+          "com.mrbaron3.workflow.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+        },
+        "namedVolumes": [
+          {
+            "name": "agentops-postgres-data",
+            "destination": "/var/lib/postgresql",
+            "readOnly": false
+          }
+        ],
+        "tmpfsMounts": [
+          "/tmp",
+          "/run/postgresql"
+        ],
+        "networks": [
+          "agentops-internal"
+        ],
+        "disposition": "pending",
+        "reason": "legacy-only; a faithful dual-labeled replacement can be rebuilt"
+      },
+      {
+        "id": "agentops-runner",
+        "state": "stopped",
+        "image": "agentops-runner:dev",
+        "imageDigest": "sha256:45e76658c8dd708a9f31b9ef06b42e3bfb896091bbebc4958a5c154639a7ba0e",
+        "ownership": "legacy-only",
+        "role": "runner",
+        "roleAgreement": "legacy-only",
+        "specDigest": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c",
+        "specAgreement": "legacy-only",
+        "ownershipLabels": {
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "runner",
+          "com.mrbaron3.workflow.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
+        },
+        "namedVolumes": [
+          {
+            "name": "agentops-runner-workspace",
+            "destination": "/workspace",
+            "readOnly": false
+          },
+          {
+            "name": "agentops-runner-credentials",
+            "destination": "/run/agentops-credentials",
+            "readOnly": true
+          }
+        ],
+        "tmpfsMounts": [
+          "/tmp",
+          "/home/agentops"
+        ],
+        "networks": [
+          "agentops-internal"
+        ],
+        "disposition": "pending",
+        "reason": "legacy-only; a faithful dual-labeled replacement can be rebuilt"
+      },
+      {
+        "id": "buildkit",
+        "state": "stopped",
+        "image": "ghcr.io/apple/container-builder-shim/builder:0.12.0",
+        "imageDigest": "sha256:edf820e05c3374485390e7fe3669f1b6b429eda502a6d174a456647fb9ed26fe",
+        "ownership": "missing-label",
+        "role": "",
+        "roleAgreement": "absent",
+        "specDigest": "",
+        "specAgreement": "absent",
+        "ownershipLabels": {},
+        "namedVolumes": [],
+        "tmpfsMounts": [
+          "/run"
+        ],
+        "networks": [
+          "default"
+        ],
+        "disposition": "skipped",
+        "reason": "no ownership label; not managed by agentopsctl"
+      },
+      {
+        "id": "agentops-control",
+        "state": "stopped",
+        "image": "agentops-control:dev",
+        "imageDigest": "sha256:4c2040b94e544420c2973c290f32183e7f0e80a4c3ad59cd51e991c7895f2e50",
+        "ownership": "dual",
+        "role": "control",
+        "roleAgreement": "dual",
+        "specDigest": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba",
+        "specAgreement": "dual",
+        "ownershipLabels": {
+          "com.mrbaron3.servo.agentopsctl": "v1",
+          "com.mrbaron3.servo.role": "control",
+          "com.mrbaron3.servo.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba",
+          "com.mrbaron3.workflow.agentopsctl": "v1",
+          "com.mrbaron3.workflow.role": "control",
+          "com.mrbaron3.workflow.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba"
+        },
+        "namedVolumes": [],
+        "tmpfsMounts": [
+          "/tmp"
+        ],
+        "networks": [
+          "default",
+          "agentops-internal"
+        ],
+        "disposition": "skipped",
+        "reason": "already carries both ownership namespaces"
+      }
+    ]
+  },
+  "sweep": {
+    "applied": true,
+    "before": {
+      "phase": "pre-migration",
+      "totals": {
+        "pending": 4,
+        "skipped": 3
+      },
+      "records": [
+        {
+          "id": "agentops-github-broker",
+          "state": "stopped",
+          "image": "agentops-github-broker:dev",
+          "imageDigest": "sha256:1193aa647c9871703a48dce54ccaae457e078cef2e4b9fed27528ce6c389bcd5",
+          "ownership": "legacy-only",
+          "role": "github-broker",
+          "roleAgreement": "legacy-only",
+          "specDigest": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66",
+          "specAgreement": "legacy-only",
+          "ownershipLabels": {
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "github-broker",
+            "com.mrbaron3.workflow.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66"
+          },
+          "namedVolumes": [
+            {
+              "name": "agentops-github-app-key",
+              "destination": "/run/agentops-github-app",
+              "readOnly": true
+            }
+          ],
+          "tmpfsMounts": [
+            "/tmp"
+          ],
+          "networks": [
+            "default",
+            "agentops-internal"
+          ],
+          "disposition": "pending",
+          "reason": "legacy-only; a faithful dual-labeled replacement can be rebuilt"
+        },
+        {
+          "id": "agentops-ciso06-hardening-probe",
+          "state": "stopped",
+          "image": "agentops-control:dev",
+          "imageDigest": "sha256:458f42a5f3f6ac5d87bd0cd12ceb0f6d989b8d6ec20c67f4fe72fa96c1b3a0a7",
+          "ownership": "missing-label",
+          "role": "",
+          "roleAgreement": "absent",
+          "specDigest": "",
+          "specAgreement": "absent",
+          "ownershipLabels": {},
+          "namedVolumes": [],
+          "tmpfsMounts": [],
+          "networks": [
+            "default"
+          ],
+          "disposition": "skipped",
+          "reason": "no ownership label; not managed by agentopsctl"
+        },
+        {
+          "id": "agentops-triage",
+          "state": "stopped",
+          "image": "agentops-triage:dev",
+          "imageDigest": "sha256:df6cfb5c0cd7f47908da9b5c1af8faaf8d2ac870925e78ea008ee4fdf70a6712",
+          "ownership": "legacy-only",
+          "role": "triage",
+          "roleAgreement": "legacy-only",
+          "specDigest": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c",
+          "specAgreement": "legacy-only",
+          "ownershipLabels": {
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "triage",
+            "com.mrbaron3.workflow.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c"
+          },
+          "namedVolumes": [
+            {
+              "name": "agentops-triage-credentials",
+              "destination": "/run/agentops-credentials",
+              "readOnly": true
+            }
+          ],
+          "tmpfsMounts": [
+            "/tmp",
+            "/home/agentops"
+          ],
+          "networks": [
+            "agentops-internal"
+          ],
+          "disposition": "pending",
+          "reason": "legacy-only; a faithful dual-labeled replacement can be rebuilt"
+        },
+        {
+          "id": "agentops-postgres",
+          "state": "stopped",
+          "image": "agentops-postgres:dev",
+          "imageDigest": "sha256:fa625a68f58db2509e21d658e357797c46dd7f21925bdf514dec2d0c3c2b1d18",
+          "ownership": "legacy-only",
+          "role": "postgres",
+          "roleAgreement": "legacy-only",
+          "specDigest": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6",
+          "specAgreement": "legacy-only",
+          "ownershipLabels": {
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "postgres",
+            "com.mrbaron3.workflow.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+          },
+          "namedVolumes": [
+            {
+              "name": "agentops-postgres-data",
+              "destination": "/var/lib/postgresql",
+              "readOnly": false
+            }
+          ],
+          "tmpfsMounts": [
+            "/tmp",
+            "/run/postgresql"
+          ],
+          "networks": [
+            "agentops-internal"
+          ],
+          "disposition": "pending",
+          "reason": "legacy-only; a faithful dual-labeled replacement can be rebuilt"
+        },
+        {
+          "id": "agentops-runner",
+          "state": "stopped",
+          "image": "agentops-runner:dev",
+          "imageDigest": "sha256:45e76658c8dd708a9f31b9ef06b42e3bfb896091bbebc4958a5c154639a7ba0e",
+          "ownership": "legacy-only",
+          "role": "runner",
+          "roleAgreement": "legacy-only",
+          "specDigest": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c",
+          "specAgreement": "legacy-only",
+          "ownershipLabels": {
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "runner",
+            "com.mrbaron3.workflow.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
+          },
+          "namedVolumes": [
+            {
+              "name": "agentops-runner-workspace",
+              "destination": "/workspace",
+              "readOnly": false
+            },
+            {
+              "name": "agentops-runner-credentials",
+              "destination": "/run/agentops-credentials",
+              "readOnly": true
+            }
+          ],
+          "tmpfsMounts": [
+            "/tmp",
+            "/home/agentops"
+          ],
+          "networks": [
+            "agentops-internal"
+          ],
+          "disposition": "pending",
+          "reason": "legacy-only; a faithful dual-labeled replacement can be rebuilt"
+        },
+        {
+          "id": "buildkit",
+          "state": "stopped",
+          "image": "ghcr.io/apple/container-builder-shim/builder:0.12.0",
+          "imageDigest": "sha256:edf820e05c3374485390e7fe3669f1b6b429eda502a6d174a456647fb9ed26fe",
+          "ownership": "missing-label",
+          "role": "",
+          "roleAgreement": "absent",
+          "specDigest": "",
+          "specAgreement": "absent",
+          "ownershipLabels": {},
+          "namedVolumes": [],
+          "tmpfsMounts": [
+            "/run"
+          ],
+          "networks": [
+            "default"
+          ],
+          "disposition": "skipped",
+          "reason": "no ownership label; not managed by agentopsctl"
+        },
+        {
+          "id": "agentops-control",
+          "state": "stopped",
+          "image": "agentops-control:dev",
+          "imageDigest": "sha256:4c2040b94e544420c2973c290f32183e7f0e80a4c3ad59cd51e991c7895f2e50",
+          "ownership": "dual",
+          "role": "control",
+          "roleAgreement": "dual",
+          "specDigest": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba",
+          "specAgreement": "dual",
+          "ownershipLabels": {
+            "com.mrbaron3.servo.agentopsctl": "v1",
+            "com.mrbaron3.servo.role": "control",
+            "com.mrbaron3.servo.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba",
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "control",
+            "com.mrbaron3.workflow.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba"
+          },
+          "namedVolumes": [],
+          "tmpfsMounts": [
+            "/tmp"
+          ],
+          "networks": [
+            "default",
+            "agentops-internal"
+          ],
+          "disposition": "skipped",
+          "reason": "already carries both ownership namespaces"
+        }
+      ]
+    },
+    "after": {
+      "phase": "post-migration",
+      "totals": {
+        "skipped": 7
+      },
+      "records": [
+        {
+          "id": "agentops-github-broker",
+          "state": "stopped",
+          "image": "agentops-github-broker:dev",
+          "imageDigest": "sha256:1193aa647c9871703a48dce54ccaae457e078cef2e4b9fed27528ce6c389bcd5",
+          "ownership": "dual",
+          "role": "github-broker",
+          "roleAgreement": "dual",
+          "specDigest": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66",
+          "specAgreement": "dual",
+          "ownershipLabels": {
+            "com.mrbaron3.servo.agentopsctl": "v1",
+            "com.mrbaron3.servo.role": "github-broker",
+            "com.mrbaron3.servo.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66",
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "github-broker",
+            "com.mrbaron3.workflow.spec-sha256": "c2f732d27b67a0e13c3a69e5a44164fd4e9cd5974da98cd74f6ba5d50ba8fe66"
+          },
+          "namedVolumes": [
+            {
+              "name": "agentops-github-app-key",
+              "destination": "/run/agentops-github-app",
+              "readOnly": true
+            }
+          ],
+          "tmpfsMounts": [
+            "/tmp"
+          ],
+          "networks": [
+            "default",
+            "agentops-internal"
+          ],
+          "disposition": "skipped",
+          "reason": "already carries both ownership namespaces"
+        },
+        {
+          "id": "agentops-ciso06-hardening-probe",
+          "state": "stopped",
+          "image": "agentops-control:dev",
+          "imageDigest": "sha256:458f42a5f3f6ac5d87bd0cd12ceb0f6d989b8d6ec20c67f4fe72fa96c1b3a0a7",
+          "ownership": "missing-label",
+          "role": "",
+          "roleAgreement": "absent",
+          "specDigest": "",
+          "specAgreement": "absent",
+          "ownershipLabels": {},
+          "namedVolumes": [],
+          "tmpfsMounts": [],
+          "networks": [
+            "default"
+          ],
+          "disposition": "skipped",
+          "reason": "no ownership label; not managed by agentopsctl"
+        },
+        {
+          "id": "agentops-triage",
+          "state": "stopped",
+          "image": "agentops-triage:dev",
+          "imageDigest": "sha256:df6cfb5c0cd7f47908da9b5c1af8faaf8d2ac870925e78ea008ee4fdf70a6712",
+          "ownership": "dual",
+          "role": "triage",
+          "roleAgreement": "dual",
+          "specDigest": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c",
+          "specAgreement": "dual",
+          "ownershipLabels": {
+            "com.mrbaron3.servo.agentopsctl": "v1",
+            "com.mrbaron3.servo.role": "triage",
+            "com.mrbaron3.servo.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c",
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "triage",
+            "com.mrbaron3.workflow.spec-sha256": "e32cd594f5046d507077c917b1658fe2aea80a7cbcd8a7614e9fab1e43312b1c"
+          },
+          "namedVolumes": [
+            {
+              "name": "agentops-triage-credentials",
+              "destination": "/run/agentops-credentials",
+              "readOnly": true
+            }
+          ],
+          "tmpfsMounts": [
+            "/tmp",
+            "/home/agentops"
+          ],
+          "networks": [
+            "agentops-internal"
+          ],
+          "disposition": "skipped",
+          "reason": "already carries both ownership namespaces"
+        },
+        {
+          "id": "agentops-postgres",
+          "state": "stopped",
+          "image": "agentops-postgres:dev",
+          "imageDigest": "sha256:fa625a68f58db2509e21d658e357797c46dd7f21925bdf514dec2d0c3c2b1d18",
+          "ownership": "dual",
+          "role": "postgres",
+          "roleAgreement": "dual",
+          "specDigest": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6",
+          "specAgreement": "dual",
+          "ownershipLabels": {
+            "com.mrbaron3.servo.agentopsctl": "v1",
+            "com.mrbaron3.servo.role": "postgres",
+            "com.mrbaron3.servo.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6",
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "postgres",
+            "com.mrbaron3.workflow.spec-sha256": "bcd9dd29fe2d322cbd8cf717eb9fc60b56236a96b50a5e045b2ce3aed5af6bb6"
+          },
+          "namedVolumes": [
+            {
+              "name": "agentops-postgres-data",
+              "destination": "/var/lib/postgresql",
+              "readOnly": false
+            }
+          ],
+          "tmpfsMounts": [
+            "/tmp",
+            "/run/postgresql"
+          ],
+          "networks": [
+            "agentops-internal"
+          ],
+          "disposition": "skipped",
+          "reason": "already carries both ownership namespaces"
+        },
+        {
+          "id": "agentops-runner",
+          "state": "stopped",
+          "image": "agentops-runner:dev",
+          "imageDigest": "sha256:45e76658c8dd708a9f31b9ef06b42e3bfb896091bbebc4958a5c154639a7ba0e",
+          "ownership": "dual",
+          "role": "runner",
+          "roleAgreement": "dual",
+          "specDigest": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c",
+          "specAgreement": "dual",
+          "ownershipLabels": {
+            "com.mrbaron3.servo.agentopsctl": "v1",
+            "com.mrbaron3.servo.role": "runner",
+            "com.mrbaron3.servo.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c",
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "runner",
+            "com.mrbaron3.workflow.spec-sha256": "05876d07396f2dbc15ab09108cdd4e69aa6d98cc4411c51289b1eba98eff7c8c"
+          },
+          "namedVolumes": [
+            {
+              "name": "agentops-runner-workspace",
+              "destination": "/workspace",
+              "readOnly": false
+            },
+            {
+              "name": "agentops-runner-credentials",
+              "destination": "/run/agentops-credentials",
+              "readOnly": true
+            }
+          ],
+          "tmpfsMounts": [
+            "/tmp",
+            "/home/agentops"
+          ],
+          "networks": [
+            "agentops-internal"
+          ],
+          "disposition": "skipped",
+          "reason": "already carries both ownership namespaces"
+        },
+        {
+          "id": "buildkit",
+          "state": "stopped",
+          "image": "ghcr.io/apple/container-builder-shim/builder:0.12.0",
+          "imageDigest": "sha256:edf820e05c3374485390e7fe3669f1b6b429eda502a6d174a456647fb9ed26fe",
+          "ownership": "missing-label",
+          "role": "",
+          "roleAgreement": "absent",
+          "specDigest": "",
+          "specAgreement": "absent",
+          "ownershipLabels": {},
+          "namedVolumes": [],
+          "tmpfsMounts": [
+            "/run"
+          ],
+          "networks": [
+            "default"
+          ],
+          "disposition": "skipped",
+          "reason": "no ownership label; not managed by agentopsctl"
+        },
+        {
+          "id": "agentops-control",
+          "state": "stopped",
+          "image": "agentops-control:dev",
+          "imageDigest": "sha256:4c2040b94e544420c2973c290f32183e7f0e80a4c3ad59cd51e991c7895f2e50",
+          "ownership": "dual",
+          "role": "control",
+          "roleAgreement": "dual",
+          "specDigest": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba",
+          "specAgreement": "dual",
+          "ownershipLabels": {
+            "com.mrbaron3.servo.agentopsctl": "v1",
+            "com.mrbaron3.servo.role": "control",
+            "com.mrbaron3.servo.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba",
+            "com.mrbaron3.workflow.agentopsctl": "v1",
+            "com.mrbaron3.workflow.role": "control",
+            "com.mrbaron3.workflow.spec-sha256": "454ce28db05412eefa1c8c7576191bb8ea40cfd5edeb7024453a00ea68eec3ba"
+          },
+          "namedVolumes": [],
+          "tmpfsMounts": [
+            "/tmp"
+          ],
+          "networks": [
+            "default",
+            "agentops-internal"
+          ],
+          "disposition": "skipped",
+          "reason": "already carries both ownership namespaces"
+        }
+      ]
+    },
+    "steps": [
+      {
+        "container": "agentops-github-broker",
+        "stage": "re-inspect",
+        "outcome": "ok",
+        "detail": "legacy-only, state=stopped, named volumes=1"
+      },
+      {
+        "container": "agentops-github-broker",
+        "stage": "stop",
+        "outcome": "ok",
+        "detail": "already stopped; not started"
+      },
+      {
+        "container": "agentops-github-broker",
+        "stage": "delete",
+        "outcome": "ok",
+        "detail": "exact container deleted; named volumes untouched"
+      },
+      {
+        "container": "agentops-github-broker",
+        "stage": "volume-release",
+        "outcome": "ok",
+        "detail": "1 named volume(s) released and still present"
+      },
+      {
+        "container": "agentops-github-broker",
+        "stage": "recreate",
+        "outcome": "ok",
+        "detail": "replacement materialized with both ownership namespaces (running=false)"
+      },
+      {
+        "container": "agentops-github-broker",
+        "stage": "verify",
+        "outcome": "ok",
+        "detail": "replacement is equivalent and dual-labeled"
+      },
+      {
+        "container": "agentops-triage",
+        "stage": "re-inspect",
+        "outcome": "ok",
+        "detail": "legacy-only, state=stopped, named volumes=1"
+      },
+      {
+        "container": "agentops-triage",
+        "stage": "stop",
+        "outcome": "ok",
+        "detail": "already stopped; not started"
+      },
+      {
+        "container": "agentops-triage",
+        "stage": "delete",
+        "outcome": "ok",
+        "detail": "exact container deleted; named volumes untouched"
+      },
+      {
+        "container": "agentops-triage",
+        "stage": "volume-release",
+        "outcome": "ok",
+        "detail": "1 named volume(s) released and still present"
+      },
+      {
+        "container": "agentops-triage",
+        "stage": "recreate",
+        "outcome": "ok",
+        "detail": "replacement materialized with both ownership namespaces (running=false)"
+      },
+      {
+        "container": "agentops-triage",
+        "stage": "verify",
+        "outcome": "ok",
+        "detail": "replacement is equivalent and dual-labeled"
+      },
+      {
+        "container": "agentops-postgres",
+        "stage": "re-inspect",
+        "outcome": "ok",
+        "detail": "legacy-only, state=stopped, named volumes=1"
+      },
+      {
+        "container": "agentops-postgres",
+        "stage": "stop",
+        "outcome": "ok",
+        "detail": "already stopped; not started"
+      },
+      {
+        "container": "agentops-postgres",
+        "stage": "delete",
+        "outcome": "ok",
+        "detail": "exact container deleted; named volumes untouched"
+      },
+      {
+        "container": "agentops-postgres",
+        "stage": "volume-release",
+        "outcome": "ok",
+        "detail": "1 named volume(s) released and still present"
+      },
+      {
+        "container": "agentops-postgres",
+        "stage": "recreate",
+        "outcome": "ok",
+        "detail": "replacement materialized with both ownership namespaces (running=false)"
+      },
+      {
+        "container": "agentops-postgres",
+        "stage": "verify",
+        "outcome": "ok",
+        "detail": "replacement is equivalent and dual-labeled"
+      },
+      {
+        "container": "agentops-runner",
+        "stage": "re-inspect",
+        "outcome": "ok",
+        "detail": "legacy-only, state=stopped, named volumes=2"
+      },
+      {
+        "container": "agentops-runner",
+        "stage": "stop",
+        "outcome": "ok",
+        "detail": "already stopped; not started"
+      },
+      {
+        "container": "agentops-runner",
+        "stage": "delete",
+        "outcome": "ok",
+        "detail": "exact container deleted; named volumes untouched"
+      },
+      {
+        "container": "agentops-runner",
+        "stage": "volume-release",
+        "outcome": "ok",
+        "detail": "2 named volume(s) released and still present"
+      },
+      {
+        "container": "agentops-runner",
+        "stage": "recreate",
+        "outcome": "ok",
+        "detail": "replacement materialized with both ownership namespaces (running=false)"
+      },
+      {
+        "container": "agentops-runner",
+        "stage": "verify",
+        "outcome": "ok",
+        "detail": "replacement is equivalent and dual-labeled"
+      }
+    ],
+    "volumes": [
+      {
+        "name": "agentops-ciso06-comp-postgres-data",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-ciso06-comp-runner-workspace",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-ciso06-final-postgres-data",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-ciso06-final-runner-workspace",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-ciso06-smoke-postgres-data",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-ciso06-smoke-runner-workspace",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-ciso07-dogfood-postgres-data",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-ciso07-dogfood-runner-credentials",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-ciso07-dogfood-runner-workspace",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-ciso07-trivy-cache",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-github-app-key",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-postgres-data",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-postgres16-backup-20260805",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-postgres18-restore-20260805",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-runner-credentials",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-runner-workspace",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "agentops-triage-credentials",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "servo-pipeline-latest-smoke-20260804-github-app-key",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "servo-pipeline-latest-smoke-20260804-postgres-data",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "servo-pipeline-latest-smoke-20260804-runner-workspace",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "servo-pipeline-smoke-20260804-github-app-key",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "servo-pipeline-smoke-20260804-postgres-data",
+        "presentBefore": true,
+        "presentAfter": true
+      },
+      {
+        "name": "servo-pipeline-smoke-20260804-runner-workspace",
+        "presentBefore": true,
+        "presentAfter": true
+      }
+    ]
+  }
+}

@@ -27,16 +27,23 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return usageError()
 	}
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
 		syscall.SIGTERM,
 	)
 	defer stop()
+	// migrate-labels is dispatched before loadConfig deliberately. Loading the
+	// configuration resolves broker capabilities and persists them, so going
+	// through it would make a command whose default is a read-only inventory
+	// create state on the host merely by being invoked — including for -h.
+	if args[0] == "migrate-labels" {
+		return runMigrateLabels(ctx, args[1:])
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
 	manager := newManager(cfg, lifecycle.NewAppleRuntime())
 	switch args[0] {
 	case "deploy":
@@ -226,6 +233,6 @@ func parseProgressTarget(value string) (string, int64, error) {
 
 func usageError() error {
 	return fmt.Errorf(
-		"usage: agentopsctl deploy|start|drain|stop|rotate-postgres-admin|status|progress|worktree|logs|open (use -h after a command)",
+		"usage: agentopsctl deploy|start|drain|stop|rotate-postgres-admin|migrate-labels|status|progress|worktree|logs|open (use -h after a command)",
 	)
 }
