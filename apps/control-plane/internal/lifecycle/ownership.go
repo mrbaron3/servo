@@ -1,6 +1,9 @@
 package lifecycle
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Container ownership labels are compatibility identifiers, not display names.
 // ADR-0022 and Issue #123 migrate them from the legacy `com.mrbaron3.workflow`
@@ -160,6 +163,15 @@ func ClassifyOwnership(labels map[string]string) OwnershipClass {
 	}
 }
 
+// ErrConflictingLabels marks every failure caused by a resource whose two label
+// namespaces disagree. Callers match it with errors.Is so a partial migration is
+// never reported through a remediation that assumes ordinary drift — telling an
+// operator to stop and recreate a container is the opposite of what a partially
+// migrated one needs.
+var ErrConflictingLabels = errors.New(
+	"partial container label migration; resolve it before continuing",
+)
+
 // RequireOwned returns nil when either namespace proves this binary owns the
 // resource. A partially migrated resource is reported as a conflict rather than
 // as a foreign one, so no caller can mistake it for a name owned elsewhere.
@@ -169,25 +181,62 @@ func RequireOwned(subject string, labels map[string]string) error {
 		return nil
 	}
 	if class == OwnershipConflicting {
-		return ConflictingLabelError(subject, "ownership",
-			LegacyManagedLabelKey, CurrentManagedLabelKey, labels)
+		return conflictingLabelError(
+			subject, "ownership",
+			LegacyManagedLabelKey, CurrentManagedLabelKey,
+		)
 	}
 	return fmt.Errorf("%s is not owned by agentopsctl", subject)
 }
 
-// ConflictingLabelError renders the fail-closed reason a partially migrated
-// resource stops the caller. It names both keys and both values because the
-// operator has to see which side is stale to resolve it.
-func ConflictingLabelError(
-	subject, kind, legacyKey, currentKey string,
-	labels map[string]string,
-) error {
+// RequireRole returns nil when both namespaces agree the resource carries the
+// wanted runtime role. Like RequireOwned it keeps the key pair inside this file
+// so Phase 3 can drop the legacy namespace without editing any caller.
+func RequireRole(subject, want string, labels map[string]string) error {
+	role, agreement := ReadRoleLabel(labels)
+	if agreement == LabelConflicting {
+		return conflictingLabelError(
+			subject, "role",
+			LegacyRoleLabelKey, CurrentRoleLabelKey,
+		)
+	}
+	if !agreement.Agreed() || role != want {
+		return fmt.Errorf("%s ownership or role label does not match", subject)
+	}
+	return nil
+}
+
+// RequireSpecDigest returns nil when both namespaces agree the resource was
+// sealed with the wanted specification digest. A disagreement between the two
+// namespaces is a partial migration, not image or runtime drift, and the two
+// have opposite remediations.
+func RequireSpecDigest(subject, want string, labels map[string]string) error {
+	sealed, agreement := ReadSpecLabel(labels)
+	if agreement == LabelConflicting {
+		return conflictingLabelError(
+			subject, "specification digest",
+			LegacySpecLabelKey, CurrentSpecLabelKey,
+		)
+	}
+	if !agreement.Agreed() || sealed != want {
+		return fmt.Errorf(
+			"%s immutable image or runtime specification drifted",
+			subject,
+		)
+	}
+	return nil
+}
+
+// conflictingLabelError renders the fail-closed reason a partially migrated
+// resource stops the caller. It names the two keys but never echoes their
+// values: a label value is attacker- or accident-supplied text that reaches
+// operator output and the durable lifecycle failure record, and that record
+// only redacts credentials it already knows. The operator resolves the conflict
+// with `container inspect`, which the runbook prescribes.
+func conflictingLabelError(subject, kind, legacyKey, currentKey string) error {
 	return fmt.Errorf(
-		"%s carries conflicting %s labels (%s=%q, %s=%q); "+
-			"resolve the partial container label migration before continuing",
-		subject, kind,
-		legacyKey, labels[legacyKey],
-		currentKey, labels[currentKey],
+		"%s carries conflicting %s labels: %s and %s disagree; %w",
+		subject, kind, legacyKey, currentKey, ErrConflictingLabels,
 	)
 }
 

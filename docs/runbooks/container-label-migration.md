@@ -74,7 +74,12 @@ print("---", dict(counts))
 読み方:
 
 - `conflicting` が 1 件でもあれば、**そこで止める**。`agentopsctl` はその resource に触れる操作を
-  fail-closed で拒否する。どちらの値が古いかを `container inspect` で確認し、手で解消してから続行する。
+  fail-closed で拒否する。error は**食い違っている 2 つの key 名だけ**を出し、label の値そのものは出さない
+  （label 値は事故や外部由来の任意文字列で、durable な lifecycle failure record にも残るため）。
+  どちらの値が古いかは `container inspect <name>` で確認し、手で解消してから続行する。
+- `conflicting` の error は drift の error と区別される。「DRAINING して stop して restart」を促す文言が
+  出たらそれは drift であって部分移行ではない。**部分移行に対して drift の手順を実行しない**
+  （排他 attach 中の named volume を持つ container を削除・再作成することになる）。
 - `legacy-only` が残っている限り P3 の gate は満たさない。
 - `unmanaged` / `missing-label` は移行対象ではない。数を減らそうとしない。
 
@@ -94,6 +99,21 @@ P1 の writer は新旧**両方**の label を書く。旧 binary は旧 namespa
 戻せない状況が 1 つだけある: 手動または外部 tool で**新旧の値を食い違わせた**場合
 （`conflicting`）。これは P1 の binary でも旧 binary でも安全に扱えないので、
 label を手で揃えてから rollback する。
+
+## grounded 検証の実行
+
+実機 Apple Container 上で label の round-trip と 6 分類、rollback predicate を接地する:
+
+```sh
+AGENTOPS_TEST_APPLE_CONTAINER=1 \
+AGENTOPS_TEST_APPLE_IMAGE=<手元にある image reference> \
+go test ./apps/control-plane/internal/lifecycle/ -run AppleContainer -v -count=1
+```
+
+環境変数が無ければ suite ごと skip する。**opt-in したのに前提が欠けている場合は skip ではなく fail する**
+（skip は exit 0 なので、gate が「証明が無い」を「証明した」と読んでしまう）。
+検証用 resource は固有 prefix 付きで作られ、label selector による一括削除は行わず、実行後に自動削除される。
+稼働中の managed topology には触れない。
 
 ## 保全する evidence
 

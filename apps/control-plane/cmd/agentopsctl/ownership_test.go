@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -67,15 +69,15 @@ func TestManagedDashboardControlRequiresOwnershipAndControlRole(t *testing.T) {
 		"count":         float64(1),
 		"proto":         "tcp",
 	}}
-	if !managedDashboardControl(actual, cfg) {
-		t.Fatal("a legacy-owned control container was not recognised")
+	if err := managedDashboardControl(actual, cfg); err != nil {
+		t.Fatalf("a legacy-owned control container was not recognised: %v", err)
 	}
 
 	unowned := *actual
 	unowned.Configuration.Labels = map[string]string{
 		"com.mrbaron3.workflow.role": "control",
 	}
-	if managedDashboardControl(&unowned, cfg) {
+	if err := managedDashboardControl(&unowned, cfg); err == nil {
 		t.Fatal("an unowned control container name was recognised")
 	}
 }
@@ -179,9 +181,18 @@ func assertOwnershipRejection(t *testing.T, err error, conflict bool) {
 	}
 }
 
+// withRole adds the role label to the same namespaces the ownership marker
+// occupies. A `current-only` container must carry a `current-only` role too —
+// that is the shape Phase 3 leaves behind, and pinning it here is what keeps the
+// current-namespace role reader covered on the reconciliation side.
 func withRole(labels map[string]string, role string) map[string]string {
-	merged := map[string]string{lifecycle.LegacyRoleLabelKey: role}
-	if _, current := labels[lifecycle.CurrentManagedLabelKey]; current {
+	_, legacy := labels[lifecycle.LegacyManagedLabelKey]
+	_, current := labels[lifecycle.CurrentManagedLabelKey]
+	merged := make(map[string]string, len(labels)+2)
+	if legacy || !current {
+		merged[lifecycle.LegacyRoleLabelKey] = role
+	}
+	if current {
 		merged[lifecycle.CurrentRoleLabelKey] = role
 	}
 	for key, value := range labels {
@@ -311,9 +322,14 @@ func TestManagedDashboardControlAcceptsEitherNamespaceAndRejectsConflict(t *test
 				"count":         float64(1),
 				"proto":         "tcp",
 			}}
-			if managedDashboardControl(actual, cfg) != testCase.owned {
-				t.Fatalf("dashboard control verdict is wrong for %q", testCase.name)
+			err := managedDashboardControl(actual, cfg)
+			if testCase.owned {
+				if err != nil {
+					t.Fatalf("an owned control container was rejected: %v", err)
+				}
+				return
 			}
+			assertOwnershipRejection(t, err, testCase.conflict)
 		})
 	}
 
@@ -331,8 +347,15 @@ func TestManagedDashboardControlAcceptsEitherNamespaceAndRejectsConflict(t *test
 		"count":         float64(1),
 		"proto":         "tcp",
 	}}
-	if managedDashboardControl(conflictingRole, cfg) {
+	err := managedDashboardControl(conflictingRole, cfg)
+	if err == nil {
 		t.Fatal("a container with conflicting role labels was opened as the dashboard")
+	}
+	// A partially migrated control container is reachable and healthy. Reporting
+	// it as "not running" would send the operator hunting for a crash.
+	if !errors.Is(err, lifecycle.ErrConflictingLabels) ||
+		strings.Contains(err.Error(), "is not running") {
+		t.Fatalf("a partial migration was diagnosed as a dead Control API: %v", err)
 	}
 }
 
@@ -425,5 +448,162 @@ func TestEnsurePostgresRefusesConflictingAndForeignOwnershipBeforeMutating(t *te
 				}
 			}
 		})
+	}
+}
+
+// The cases below are regressions for the Phase 1 review. Each one failed
+// before its fix, so each pins one way a partially migrated container could
+// still have been mutated or misdiagnosed.
+
+func TestDrainNeverSignalsUnownedOrConflictingWorkers(t *testing.T) {
+	cfg := testManagerConfig()
+	for _, testCase := range ownershipLabelCases {
+		if testCase.owned {
+			continue
+		}
+		t.Run(testCase.name, func(t *testing.T) {
+			workers, err := json.Marshal(withRole(testCase.labels, "triage"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			listing := `[{"id":"` + cfg.PostgresContainer + `","configuration":{"labels":` +
+				`{"` + lifecycle.LegacyManagedLabelKey + `":"v1"}},"status":{"state":"running",` +
+				`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}},` +
+				`{"id":"` + cfg.TriageContainer + `","configuration":{"labels":` +
+				string(workers) + `},"status":{"state":"running"}}]`
+			status := `{"state":{"mode":"ACTIVE","generation":1,` +
+				`"updatedAt":"2026-08-10T00:00:00Z"},` +
+				`"databaseTime":"2026-08-10T00:00:00Z"}`
+			drained := `{"state":{"mode":"DRAINING","generation":2,` +
+				`"drainDeadlineAt":"2026-08-10T00:10:00Z",` +
+				`"updatedAt":"2026-08-10T00:00:01Z"}}`
+			fake := &managerRuntimeRunner{results: []lifecycle.CommandResult{
+				{Status: 0, Stdout: "container 1.1.0"}, // Capability --version
+				{Status: 0},                            // system status
+				{Status: 0, Stdout: listing},           // databaseHost -> list
+				{Status: 0, Stdout: status},            // admin: lifecycle status
+				{Status: 0, Stdout: listing},           // databaseHost -> list
+				{Status: 0, Stdout: drained},           // admin: lifecycle transition
+				{Status: 0, Stdout: listing},           // triage worker lookup
+			}}
+			subject := newManager(cfg, lifecycle.NewAppleRuntimeForTest(fake))
+
+			err = subject.Drain(context.Background(), time.Minute, "drain-request-001")
+			assertOwnershipRejection(t, err, testCase.conflict)
+			for _, args := range fake.args {
+				if len(args) != 0 && (args[0] == "kill" || args[0] == "stop" ||
+					args[0] == "delete") {
+					t.Fatalf(
+						"a worker this binary does not own reached %q: %#v",
+						args[0], fake.args,
+					)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsurePostgresDoesNotOfferDriftRemediationForAPartialMigration(t *testing.T) {
+	cfg := testManagerConfig()
+	subject := newManager(cfg, nil)
+	spec := subject.postgresSpec()
+	image := "sha256:" + strings.Repeat("c", 64)
+	digest, err := lifecycle.SpecDigest(spec, image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.SpecDigest = digest
+	actual := &lifecycle.ContainerActual{}
+	actual.ID = cfg.PostgresContainer
+	actual.Status.State = "running"
+	actual.Configuration.Image.Descriptor.Digest = image
+	actual.Configuration.Labels = map[string]string{
+		lifecycle.LegacyManagedLabelKey:  "v1",
+		lifecycle.CurrentManagedLabelKey: "v1",
+		lifecycle.LegacyRoleLabelKey:     "postgres",
+		lifecycle.CurrentRoleLabelKey:    "postgres",
+		lifecycle.LegacySpecLabelKey:     digest,
+		lifecycle.CurrentSpecLabelKey:    strings.Repeat("d", 64),
+	}
+	err = validateSpecActual(actual, spec)
+	if !errors.Is(err, lifecycle.ErrConflictingLabels) {
+		t.Fatalf("a conflicting digest was not marked as a partial migration: %v", err)
+	}
+	// The drift remediation is drain, stop, and volume-preserving restart. A
+	// partially migrated container is not drifting, and following that advice
+	// deletes and recreates a container whose named volume is still attached.
+	wrapped := fmt.Errorf(
+		"PostgreSQL image/spec drift requires DRAINING, stop, and volume-preserving restart: %w",
+		err,
+	)
+	if !errors.Is(wrapped, lifecycle.ErrConflictingLabels) {
+		t.Fatal("errors.Is cannot see the conflict through the drift wrapper")
+	}
+	if strings.Contains(err.Error(), "DRAINING") ||
+		strings.Contains(err.Error(), "drifted") {
+		t.Fatalf("a partial migration was reported as drift: %v", err)
+	}
+}
+
+func TestConflictErrorsNeverEchoLabelValues(t *testing.T) {
+	// A label value is accident- or attacker-supplied text that reaches operator
+	// output and the durable lifecycle failure record, which only redacts
+	// credentials it already knows about.
+	secret := "/Users/operator/.config/agentops/auth.json"
+	for name, err := range map[string]error{
+		"ownership": lifecycle.RequireOwned("container agentops-runner", map[string]string{
+			lifecycle.LegacyManagedLabelKey:  "v1",
+			lifecycle.CurrentManagedLabelKey: secret,
+		}),
+		"role": lifecycle.RequireRole("agentops-runner", "runner", map[string]string{
+			lifecycle.LegacyRoleLabelKey:  "runner",
+			lifecycle.CurrentRoleLabelKey: secret,
+		}),
+		"specification digest": lifecycle.RequireSpecDigest(
+			"agentops-runner",
+			strings.Repeat("a", 64),
+			map[string]string{
+				lifecycle.LegacySpecLabelKey:  strings.Repeat("a", 64),
+				lifecycle.CurrentSpecLabelKey: secret,
+			},
+		),
+	} {
+		if err == nil {
+			t.Fatalf("%s conflict was accepted", name)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("%s conflict leaked a label value: %v", name, err)
+		}
+		if !errors.Is(err, lifecycle.ErrConflictingLabels) {
+			t.Fatalf("%s conflict is not marked as a partial migration: %v", name, err)
+		}
+		if !strings.Contains(err.Error(), "conflicting") {
+			t.Fatalf("%s conflict does not name the problem: %v", name, err)
+		}
+	}
+}
+
+func TestReconciliationReadsRoleFromTheCurrentNamespaceAlone(t *testing.T) {
+	// Phase 3 leaves containers carrying only `com.mrbaron3.servo.*`. The
+	// reconciliation table has to exercise that shape, not a legacy role label
+	// riding along with a current ownership marker.
+	labels := withRole(
+		map[string]string{lifecycle.CurrentManagedLabelKey: "v1"},
+		"runner",
+	)
+	if _, legacy := labels[lifecycle.LegacyRoleLabelKey]; legacy {
+		t.Fatalf("the current-only case still carries a legacy role label: %v", labels)
+	}
+	role, agreement := lifecycle.ReadRoleLabel(labels)
+	if agreement != lifecycle.LabelCurrentOnly || role != "runner" {
+		t.Fatalf("current-only role = %q, %q", role, agreement)
+	}
+	actual := legacyOwnedActual("agentops-runner", "runner")
+	actual.Configuration.Labels = labels
+	if err := validateManagedActual(
+		actual, "agentops-runner", "runner", "runner:test",
+		[]string{"agentops-internal"}, false,
+	); err != nil {
+		t.Fatalf("a current-only container was rejected: %v", err)
 	}
 }

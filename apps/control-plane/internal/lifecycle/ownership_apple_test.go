@@ -28,18 +28,31 @@ import (
 // prefix. It never lists-and-deletes by label, so a real managed topology on
 // the same host is untouched.
 
-const appleContainerTestEnv = "AGENTOPS_TEST_APPLE_CONTAINER"
+const (
+	appleContainerTestEnv  = "AGENTOPS_TEST_APPLE_CONTAINER"
+	appleContainerImageEnv = "AGENTOPS_TEST_APPLE_IMAGE"
+)
 
 func appleContainerRuntime(t *testing.T) (*AppleRuntime, string) {
 	t.Helper()
 	if os.Getenv(appleContainerTestEnv) != "1" {
 		t.Skipf("%s is not set", appleContainerTestEnv)
 	}
+	// Once the grounded boundary is opted into, every missing prerequisite is a
+	// failure rather than a skip. A skipped case still exits 0, so a gate that
+	// runs this suite would otherwise read "no proof" as "proved".
+	if strings.TrimSpace(os.Getenv(appleContainerImageEnv)) == "" {
+		t.Fatalf(
+			"%s=1 requires %s: the live-container round trip is the proof the "+
+				"rollback contract rests on",
+			appleContainerTestEnv,
+			appleContainerImageEnv,
+		)
+	}
 	runtime := NewAppleRuntime()
 	capability := runtime.Capability(context.Background())
 	if !capability.Available || !capability.ServiceRunning {
-		// Fail rather than skip: the environment asked for the grounded
-		// boundary, so an unavailable runtime is a missing proof, not a pass.
+		// Fail rather than skip, for the same reason.
 		t.Fatalf(
 			"%s=1 but Apple Container is unusable: %#v",
 			appleContainerTestEnv,
@@ -232,10 +245,7 @@ func TestAppleContainerReadsEveryOwnershipMigrationStateFromRealVolumes(t *testi
 
 func TestAppleContainerDualLabelsSurviveOnALiveContainerAndRollbackReader(t *testing.T) {
 	runtime, prefix := appleContainerRuntime(t)
-	image := strings.TrimSpace(os.Getenv("AGENTOPS_TEST_APPLE_IMAGE"))
-	if image == "" {
-		t.Skip("AGENTOPS_TEST_APPLE_IMAGE is not set")
-	}
+	image := strings.TrimSpace(os.Getenv(appleContainerImageEnv))
 	ctx := context.Background()
 	raw := func(args ...string) CommandResult {
 		return runtime.runner.Run(ctx, args)

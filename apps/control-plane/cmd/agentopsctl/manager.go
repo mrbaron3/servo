@@ -605,6 +605,16 @@ func (manager *manager) Drain(
 			return err
 		}
 		if worker != nil && worker.Status.State == "running" {
+			// Drain reaches a worker by configured name, so ownership has to be
+			// proven here too. Signalling a foreign or partially migrated
+			// container would stop somebody else's process, or half-migrate our
+			// own while its named volume is still exclusively attached.
+			if err := lifecycle.RequireOwned(
+				"container "+name,
+				worker.Configuration.Labels,
+			); err != nil {
+				return err
+			}
 			if err := manager.runtime.SignalTerm(ctx, name); err != nil {
 				return err
 			}
@@ -1290,10 +1300,11 @@ func (manager *manager) Open(ctx context.Context) error {
 		ctx,
 		manager.config.ControlContainer,
 	)
-	if err != nil || !managedDashboardControl(control, manager.config) {
-		return fmt.Errorf(
-			"managed Control API is not running on the expected loopback publication",
-		)
+	if err != nil {
+		return err
+	}
+	if err := managedDashboardControl(control, manager.config); err != nil {
+		return err
 	}
 	if !manager.dashboardReachable(
 		"127.0.0.1",
@@ -1323,19 +1334,39 @@ func (manager *manager) Open(ctx context.Context) error {
 	return nil
 }
 
+// managedDashboardControl reports why the running Control API cannot be opened.
+// It returns the ownership failure rather than a bare bool: a partially
+// migrated control container is reachable and healthy, and reporting it as "not
+// running" sends the operator looking for a crash instead of at the labels.
 func managedDashboardControl(
 	actual *lifecycle.ContainerActual,
 	config config,
-) bool {
+) error {
+	notRunning := fmt.Errorf(
+		"managed Control API is not running on the expected loopback publication",
+	)
 	if actual == nil ||
 		actual.ID != config.ControlContainer ||
-		actual.Status.State != "running" ||
-		!lifecycle.ClassifyOwnership(actual.Configuration.Labels).Owned() {
-		return false
+		actual.Status.State != "running" {
+		return notRunning
 	}
-	role, agreement := lifecycle.ReadRoleLabel(actual.Configuration.Labels)
-	return agreement.Agreed() && role == "control" &&
-		exactLoopbackPublication(actual, config.ControlHostPort)
+	if err := lifecycle.RequireOwned(
+		"control container "+config.ControlContainer,
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
+	}
+	if err := lifecycle.RequireRole(
+		"control container "+config.ControlContainer,
+		"control",
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
+	}
+	if !exactLoopbackPublication(actual, config.ControlHostPort) {
+		return notRunning
+	}
+	return nil
 }
 
 func latestDashboardBootstrapURL(logOutput string, port int) (string, error) {
@@ -1454,6 +1485,13 @@ func (manager *manager) ensurePostgres(ctx context.Context) (bool, error) {
 				return false, err
 			}
 			if err := validateSpecActual(actual, spec); err != nil {
+				// Drift is resolved by draining, stopping, and restarting onto
+				// the preserved volume. A partial label migration is resolved by
+				// fixing the labels — following the drift remediation would
+				// delete and recreate a container that is not drifting at all.
+				if errors.Is(err, lifecycle.ErrConflictingLabels) {
+					return false, err
+				}
 				return false, fmt.Errorf(
 					"PostgreSQL image/spec drift requires DRAINING, stop, and volume-preserving restart: %w",
 					err,
@@ -3093,16 +3131,12 @@ func validateSpecActual(
 	if expected.SpecDigest != expectedDigest {
 		return fmt.Errorf("%s desired specification digest is inconsistent", expected.Name)
 	}
-	sealed, agreement := lifecycle.ReadSpecLabel(actual.Configuration.Labels)
-	if agreement == lifecycle.LabelConflicting {
-		return lifecycle.ConflictingLabelError(
-			expected.Name, "specification digest",
-			lifecycle.LegacySpecLabelKey, lifecycle.CurrentSpecLabelKey,
-			actual.Configuration.Labels,
-		)
-	}
-	if !agreement.Agreed() || sealed != expected.SpecDigest {
-		return fmt.Errorf("%s immutable image or runtime specification drifted", expected.Name)
+	if err := lifecycle.RequireSpecDigest(
+		expected.Name,
+		expected.SpecDigest,
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
 	}
 	actualEnvironment := make(map[string]string)
 	for _, entry := range actual.Configuration.InitProcess.Environment {
@@ -3388,16 +3422,8 @@ func validateManagedActual(
 	if err := lifecycle.RequireOwned(name, actual.Configuration.Labels); err != nil {
 		return err
 	}
-	actualRole, agreement := lifecycle.ReadRoleLabel(actual.Configuration.Labels)
-	if agreement == lifecycle.LabelConflicting {
-		return lifecycle.ConflictingLabelError(
-			name, "role",
-			lifecycle.LegacyRoleLabelKey, lifecycle.CurrentRoleLabelKey,
-			actual.Configuration.Labels,
-		)
-	}
-	if !agreement.Agreed() || actualRole != role {
-		return fmt.Errorf("%s ownership or role label does not match", name)
+	if err := lifecycle.RequireRole(name, role, actual.Configuration.Labels); err != nil {
+		return err
 	}
 	if !imageReferenceMatches(actual.Configuration.Image.Reference, image) {
 		return fmt.Errorf("%s image does not match %s", name, image)
