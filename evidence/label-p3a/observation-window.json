@@ -1,0 +1,136 @@
+{
+  "phase": "LABEL-P3A",
+  "issue": "https://github.com/mrbaron3/servo/issues/123",
+  "window": {
+    "openedAt": "2026-08-10T09:16:19Z",
+    "closedAt": "2026-08-10T09:37:36Z",
+    "durationSeconds": 1277,
+    "requirement": ">=20 minutes, >=3 samples: immediate, restart/reconcile, final",
+    "regressions": 0
+  },
+  "binary": {
+    "head": "b265bad075b84c804856c7984de846af101ed144",
+    "sha256": "9dcb48cbda8c3998bffb0146269b2015f0cbbd02f3fd882ef30daa3485e000c8",
+    "note": "built with -trimpath, digest re-verified immediately before every invocation"
+  },
+  "stages": [
+    {
+      "stage": "prepare",
+      "appliedAt": "20260810T091437Z",
+      "targets": 27,
+      "kinds": {
+        "volume": 20,
+        "network": 7
+      },
+      "transition": "legacy-only -> dual",
+      "changedKeys": [
+        "com.mrbaron3.servo.agentopsctl"
+      ],
+      "runtimeVerified": true
+    },
+    {
+      "stage": "retire",
+      "appliedAt": "20260810T091556Z",
+      "targets": 32,
+      "kinds": {
+        "volume": 20,
+        "network": 7,
+        "container": 5
+      },
+      "transition": "dual -> current-only",
+      "changedKeys": [
+        "com.mrbaron3.workflow.agentopsctl",
+        "com.mrbaron3.workflow.role",
+        "com.mrbaron3.workflow.spec-sha256"
+      ],
+      "runtimeVerified": true
+    }
+  ],
+  "samples": [
+    {
+      "name": "immediate",
+      "at": "2026-08-10T09:16:19Z",
+      "containers": 7,
+      "volumes": 23,
+      "networks": 8,
+      "classes": {
+        "current-only": 32,
+        "missing-label": 6
+      },
+      "legacyOnly": 0,
+      "dual": 0,
+      "conflicting": 0,
+      "runningManagedContainers": 0,
+      "onDiskLegacyDocuments": 0
+    },
+    {
+      "name": "restart-reconcile",
+      "at": "2026-08-10T09:16:50Z",
+      "containers": 7,
+      "volumes": 23,
+      "networks": 8,
+      "classes": {
+        "current-only": 32,
+        "missing-label": 6
+      },
+      "legacyOnly": 0,
+      "dual": 0,
+      "conflicting": 0,
+      "namedVolumeAttachments": 5,
+      "onDiskLegacyDocuments": 0,
+      "note": "container system stop then start; the runtime re-serialises volumes/*/entity.json on start, so this proves it adopted the offline edit rather than tolerating it"
+    },
+    {
+      "name": "final",
+      "at": "2026-08-10T09:37:36Z",
+      "containers": 7,
+      "volumes": 23,
+      "networks": 8,
+      "classes": {
+        "current-only": 32,
+        "missing-label": 6
+      },
+      "legacyOnly": 0,
+      "dual": 0,
+      "conflicting": 0,
+      "containerStates": {
+        "stopped": 7
+      },
+      "namedVolumeAttachments": 5,
+      "onDiskLegacyDocuments": 0
+    }
+  ],
+  "preservation": {
+    "containerCount": 7,
+    "volumeCount": 23,
+    "networkCount": 8,
+    "volumeImageFiles": 23,
+    "volumeImageTotalBytes": 12644383719424,
+    "namedVolumeAttachments": [
+      "agentops-github-broker:agentops-github-app-key->/run/agentops-github-app",
+      "agentops-postgres:agentops-postgres-data->/var/lib/postgresql",
+      "agentops-runner:agentops-runner-credentials->/run/agentops-credentials",
+      "agentops-runner:agentops-runner-workspace->/workspace",
+      "agentops-triage:agentops-triage-credentials->/run/agentops-credentials"
+    ],
+    "attachmentsMatchPhase2Evidence": true,
+    "resourcesCreated": 0,
+    "resourcesDeleted": 0,
+    "resourcesRecreated": 0
+  },
+  "rollbackPredicate": {
+    "planLocation": "private 0700 backup root, written per resource as it landed",
+    "modes": [
+      "bytes",
+      "relabelled",
+      "already-before"
+    ],
+    "note": "plans and backups are deliberately NOT committed: a backup is a verbatim copy of container configuration, which carries initProcess.environment with values"
+  },
+  "sanitization": {
+    "hostPaths": 0,
+    "backupPaths": 0,
+    "documentContents": 0,
+    "note": "verified by scanning every committed evidence file"
+  }
+}
