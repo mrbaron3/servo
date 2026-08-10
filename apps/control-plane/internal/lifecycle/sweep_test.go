@@ -441,6 +441,53 @@ func TestSweepAbortsWhenTheTargetChangedSincePlanning(t *testing.T) {
 	}
 }
 
+// Narrowing the sweep must actually narrow it. This is what lets an operator
+// migrate one container at a time on a live host.
+func TestSweepOnlyTouchesTheNamedIdentities(t *testing.T) {
+	runtime := newFakeSweepRuntime(
+		containerFixture(t, "agentops-runner", "stopped",
+			legacyOnlyLabels("runner", fixtureSpecDigest), ""),
+		containerFixture(t, "agentops-triage", "stopped",
+			legacyOnlyLabels("triage", fixtureSpecDigest),
+			distinctVolume("agentops-triage-credentials")),
+	)
+	sweeper := testSweeper(runtime)
+	sweeper.Only = []string{"agentops-triage"}
+	if _, err := sweeper.Apply(context.Background()); err != nil {
+		t.Fatalf("scoped sweep failed: %v", err)
+	}
+	if len(runtime.deleted) != 1 || runtime.deleted[0] != "agentops-triage" {
+		t.Fatalf("scoped sweep touched the wrong containers: %v",
+			runtime.deleted)
+	}
+	if len(runtime.createdSpec) != 1 ||
+		runtime.createdSpec[0].Name != "agentops-triage" {
+		t.Fatalf("scoped sweep recreated the wrong container: %#v",
+			runtime.createdSpec)
+	}
+}
+
+// Naming a container that is not a pending target must fail rather than
+// quietly do nothing, which would read as a successful migration.
+func TestSweepRejectsAnOnlyIdentityThatIsNotPending(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		dualLabels("runner", fixtureSpecDigest), "",
+	))
+	sweeper := testSweeper(runtime)
+	sweeper.Only = []string{"agentops-runner"}
+	report, err := sweeper.Apply(context.Background())
+	if err == nil {
+		t.Fatal("a non-target identity was silently accepted")
+	}
+	if report.Applied {
+		t.Fatal("report claims a sweep happened")
+	}
+	if len(runtime.deleted) != 0 {
+		t.Fatal("the sweep mutated despite an invalid selection")
+	}
+}
+
 // A delete failure must stop the sweep at the delete stage, before anything
 // tries to re-attach a volume.
 func TestSweepStopsAtDeleteFailure(t *testing.T) {

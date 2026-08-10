@@ -88,6 +88,21 @@ type LabelSweeper struct {
 	StopTimeoutSeconds  int
 	ReleasePollInterval time.Duration
 	ReleaseTimeout      time.Duration
+	// SnapshotBeforeMutation receives the exact pre-mutation audit the sweep is
+	// about to act on. Issue #123 requires that snapshot to be durable before
+	// the first mutation, so returning an error here aborts the sweep with
+	// nothing changed: a migration whose evidence cannot be written is a
+	// migration nobody can audit or roll back.
+	SnapshotBeforeMutation func(MigrationAudit) error
+	// Only narrows the sweep to these exact container identities. It can only
+	// ever remove work: an identity listed here that is not a pending target is
+	// an error rather than a silent no-op, and an identity absent from here is
+	// never touched. Empty means every pending target.
+	//
+	// This is what lets an operator migrate one container at a time, and what
+	// lets the grounded suite exercise the real runtime without going anywhere
+	// near a live managed topology on the same host.
+	Only []string
 }
 
 // NewLabelSweeper returns a sweeper with timings suited to Apple Container's
@@ -129,11 +144,28 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 			"resolve the partial migration before sweeping"
 		return report, fmt.Errorf("%s", report.Halted)
 	}
+	// Target selection is validated before the snapshot is written, so a
+	// mistyped identity fails without leaving a stray evidence file behind.
+	targets, err := sweeper.selectedTargets(before)
+	if err != nil {
+		report.Applied = false
+		report.Halted = err.Error()
+		return report, err
+	}
+	if sweeper.SnapshotBeforeMutation != nil {
+		if err := sweeper.SnapshotBeforeMutation(before); err != nil {
+			report.Applied = false
+			report.Halted = "pre-mutation snapshot could not be recorded"
+			return report, fmt.Errorf(
+				"refusing to sweep without durable evidence: %w", err,
+			)
+		}
+	}
 	volumesBefore, err := sweeper.volumeNames(ctx)
 	if err != nil {
 		return report, err
 	}
-	for _, target := range before.MigrationTargets() {
+	for _, target := range targets {
 		if stepErr := sweeper.migrateOne(ctx, target, &report); stepErr != nil {
 			report.Halted = fmt.Sprintf(
 				"halted at container %s: %v", target.ID, stepErr,
@@ -149,6 +181,35 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 	}
 	report.After = after
 	return report, nil
+}
+
+// selectedTargets applies Only to the planned targets. A requested identity
+// that is not a pending target fails the sweep rather than being dropped: an
+// operator who named a container expects it migrated, and silently doing
+// nothing would read as success.
+func (sweeper *LabelSweeper) selectedTargets(
+	audit MigrationAudit,
+) ([]ContainerInventoryRecord, error) {
+	targets := audit.MigrationTargets()
+	if len(sweeper.Only) == 0 {
+		return targets, nil
+	}
+	byID := make(map[string]ContainerInventoryRecord, len(targets))
+	for _, target := range targets {
+		byID[target.ID] = target
+	}
+	selected := make([]ContainerInventoryRecord, 0, len(sweeper.Only))
+	for _, id := range sweeper.Only {
+		target, pending := byID[id]
+		if !pending {
+			return nil, fmt.Errorf(
+				"container %s was requested but is not a pending migration "+
+					"target", id,
+			)
+		}
+		selected = append(selected, target)
+	}
+	return selected, nil
 }
 
 // migrateOne walks a single container through the state machine.

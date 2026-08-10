@@ -35,6 +35,18 @@ const (
 
 func appleContainerRuntime(t *testing.T) (*AppleRuntime, string) {
 	t.Helper()
+	return appleContainerRuntimeForPhase(t, "labelp1")
+}
+
+// appleContainerRuntimeForPhase gates the grounded boundary and hands back a
+// prefix unique to this process and phase. Every resource a grounded test
+// creates carries that prefix, which is how the suite can run on a host with a
+// live managed topology without ever selecting one of its resources.
+func appleContainerRuntimeForPhase(
+	t *testing.T,
+	phase string,
+) (*AppleRuntime, string) {
+	t.Helper()
 	if os.Getenv(appleContainerTestEnv) != "1" {
 		t.Skipf("%s is not set", appleContainerTestEnv)
 	}
@@ -59,7 +71,7 @@ func appleContainerRuntime(t *testing.T) (*AppleRuntime, string) {
 			capability,
 		)
 	}
-	prefix := "agentops-labelp1-" + strconv.Itoa(os.Getpid()) +
+	prefix := "agentops-" + phase + "-" + strconv.Itoa(os.Getpid()) +
 		"-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	return runtime, prefix
 }

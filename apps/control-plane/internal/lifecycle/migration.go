@@ -256,6 +256,23 @@ func RebuildMigratedSpec(actual ContainerActual) (ContainerSpec, error) {
 			"container %s has no image reference", actual.ID,
 		)
 	}
+	// Apple Container reports the *effective* entrypoint without saying whether
+	// it came from the image or from an override at creation. An absolute one
+	// is reproduced explicitly, which is behaviourally identical in both cases.
+	// A relative executable ("node") is necessarily an image default, because
+	// the specification only accepts an absolute entrypoint, so it is left to
+	// the image rather than guessed at. Either way the replacement's effective
+	// entrypoint is proven by VerifyMigrationEquivalence, so a container whose
+	// entrypoint could not be reproduced is caught rather than accepted.
+	executable := strings.TrimSpace(
+		actual.Configuration.InitProcess.Executable,
+	)
+	if strings.HasPrefix(executable, "/") {
+		spec.Entrypoint = executable
+		spec.Command = append(
+			[]string(nil), actual.Configuration.InitProcess.Arguments...,
+		)
+	}
 	for _, attachment := range NamedVolumeAttachments(actual) {
 		spec.Mounts = append(spec.Mounts, Mount{
 			Volume:   attachment.Name,

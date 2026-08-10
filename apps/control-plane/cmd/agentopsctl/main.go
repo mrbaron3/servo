@@ -108,6 +108,35 @@ func run(args []string) error {
 			ctx,
 			commandID("rotate-postgres-admin", *requestID),
 		)
+	case "migrate-labels":
+		flags := flag.NewFlagSet("migrate-labels", flag.ContinueOnError)
+		// The read-only inventory is the default spelling because the mutating
+		// form deletes and recreates containers.
+		apply := flags.Bool(
+			"apply",
+			false,
+			"migrate old-only containers instead of only inventorying them",
+		)
+		evidenceDir := flags.String(
+			"evidence-dir",
+			"",
+			"where to write the durable inventory and sweep records",
+		)
+		only := flags.String(
+			"only",
+			"",
+			"comma separated exact container identities to migrate; "+
+				"empty migrates every old-only container",
+		)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return usageError()
+		}
+		return manager.MigrateLabels(
+			ctx, *apply, *evidenceDir, splitIdentities(*only),
+		)
 	case "status":
 		flags := flag.NewFlagSet("status", flag.ContinueOnError)
 		asJSON := flags.Bool("json", false, "emit machine-readable JSON")
@@ -226,6 +255,6 @@ func parseProgressTarget(value string) (string, int64, error) {
 
 func usageError() error {
 	return fmt.Errorf(
-		"usage: agentopsctl deploy|start|drain|stop|rotate-postgres-admin|status|progress|worktree|logs|open (use -h after a command)",
+		"usage: agentopsctl deploy|start|drain|stop|rotate-postgres-admin|migrate-labels|status|progress|worktree|logs|open (use -h after a command)",
 	)
 }
