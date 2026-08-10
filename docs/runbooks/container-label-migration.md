@@ -10,6 +10,37 @@ container label は表示名ではなく**互換性 identifier** である。`ag
 label key の正典は `apps/control-plane/internal/lifecycle/ownership.go` **1 箇所だけ**である。
 新しい判定箇所を足すときも、key 文字列を書かず必ずこの file の関数を通す。
 
+## この binary を動かす前提（#123 以前から直接上げる installation は必読）
+
+このリポジトリの HEAD は**移行完了後**の状態である。reader は `com.mrbaron3.servo.*` だけを読み、
+**前へ進める migration は 1 つも含まれていない**（`migrate-labels --apply` は P3A で、
+`migrate-label-metadata --stage` は P3B で撤去済み。残っているのは `--rollback` だけ）。
+
+したがって **host が既に境界を越えている（`legacy-only` が 0 件）ことが前提**である。#123 以前の
+commit からこの HEAD へ直接上げた installation では、managed resource が `com.mrbaron3.workflow.*`
+しか持たないため、**この binary からは軒並み `missing-label`＝非所有に見える**。`agentopsctl status`
+が managed resource をほぼ全て missing-label と報告するなら、まずこれを疑うこと。start / teardown /
+reconcile はいずれも**拒否する**——採用も削除もしないので安全側には倒れるが、その host は操作できない。
+
+**この状態を 1 手で直す手段は用意していない。意図的である。** `legacy-only` → `current-only` を
+1 手で飛ばすのは Issue #123 の non-goal であり、P2 の delete/recreate sweep を撤去した理由そのもの
+である（writer 変更後は同じ経路がその禁じ手をやることになり、しかも自分の verification に落ちる
+前に元の container を削除してしまう）。dual-read と forward migration を「上げやすさのために」
+復活させることは、この epic が取り除いた事故をそのまま戻すことになる。
+
+未移行の installation は **phase を順に通す**。下記 commit は本 PR の merge 後 `main` の履歴に
+含まれるので、checkout して順に適用できる。
+
+| 順 | commit | 内容 |
+| --- | --- | --- |
+| 1 | `4dd2c3cd`（#125） | P1: dual-write / dual-read の互換層 |
+| 2 | `adcc14fc`（#126） | P2: `legacy-only` container の掃討 |
+| 3 | `69557952`（#127） | P3A: legacy write 停止と metadata の 2 段階移行 |
+| 4 | `15d4d33b`（#128） | P3B: legacy read 削除（＝この HEAD の状態） |
+
+各 phase の entry gate は次節の表のとおりで、あいだに観測窓を挟む。P3A の backup を保持していれば
+`--rollback` で P3A 以前へ戻せるが、それは**前へ進む手段ではない**。
+
 ## 分類（P3B 以降）
 
 **P3B の binary は `com.mrbaron3.servo.*` だけを読む。** 判定はすべて新 namespace の
