@@ -30,15 +30,27 @@ label key の正典は `apps/control-plane/internal/lifecycle/ownership.go` **1 
 | Phase | 入る条件 | 出る条件（次へ進む gate） |
 | --- | --- | --- |
 | **P1 dual label**（本 PR で実装済み） | なし | 新規作成 resource が新旧両 label を持ち、reader が上表 6 分類を明示し、旧 binary へ戻しても発見できることを grounded に確認済み |
-| **P2 旧 container 掃討**（未実装） | P1 が merge 済みで、稼働 host の inventory が取れている | old-only container が 0 件、移行・skip・conflict・block の bounded audit が残り、Apple Container 上で drain/recreate と volume detach/attach、restart 整合、rollback を grounded に確認済み |
+| **P2 旧 container 掃討**（本 PR で実装済み） | P1 が merge 済みで、稼働 host の inventory が取れている | old-only container が 0 件、移行・skip・conflict・block の bounded audit が残り、Apple Container 上で drain/recreate と volume detach/attach、restart 整合、rollback を grounded に確認済み |
 | **P3 新 label のみ**（未実装） | P2 の gate を満たし、dual label 観測窓で ownership／attachment の回帰が無い | 旧 write 停止 → 旧 read 削除の順で別々に review・merge され、全 managed container の新 label ownership が証明済み |
 
 **P1 から P3 へ直接飛ばない。** 旧 write と旧 read は同じ PR で消さない（write を先に止める）。
 
 ## Inventory command
 
-P1 時点では専用 subcommand は無い（inventory subcommand は P2 の作業）。Apple Container の
-listing を直接分類する。**listing は read-only であり、label selector による一括削除は行わない。**
+P2 以降は専用 subcommand を使う。**引数なしの `migrate-labels` は read-only の inventory であり、
+host を一切変更しない**（安全な綴りを短い方に割り当てている）。
+
+```sh
+agentopsctl migrate-labels                 # dry-run。分類・named volume・件数を出し、evidence を残す
+agentopsctl migrate-labels -evidence-dir <dir>   # evidence の出力先を変える
+```
+
+出力の `pending` が P2 の移行対象（`legacy-only` かつ忠実な replacement を再構築できるもの）、
+`blocked` は所有しているが**同一の replacement を作れない**もの、`conflicting` は部分移行、
+`skipped` は移行不要（`dual` / `current-only`）または非所有（`unmanaged` / `missing-label`）である。
+
+subcommand が使えない状況（binary が無い等）では Apple Container の listing を直接分類する。
+**listing は read-only であり、label selector による一括削除は行わない。**
 
 ```sh
 container list --all --format json | python3 -c '
@@ -133,6 +145,97 @@ container network delete <name>
 
 いずれの場合も、解消の前後で inventory を取り直して `conflicting` が 0 件になったことを確認する。
 
+## Phase 2: old-only container の掃討
+
+### なぜ作り直すのか
+
+**Apple Container 1.1.0 は既存 container の label を変更できない**（`container` に update/relabel 相当の
+subcommand が無い）。したがって新 namespace を足す唯一の方法は **container を作り直すこと**である。
+data は named volume 側にあるので container 自体は捨ててよい。**named volume は絶対に削除しない。**
+
+replacement は **その container 自身の観測結果から再構築**する。topology の spec builder
+（`agentopsctl start`）から作り直すのは image を rebuild して spec digest を変えてしまい、
+label 移行ではなく再 deploy になる。再構築できない container は近似せず `blocked` にする。
+
+### 手順
+
+```sh
+# 1. dry-run。ここで対象の exact id を確定する。host は変わらない。
+agentopsctl migrate-labels
+
+# 2. conflicting が 1 件でもあれば、ここで止める（下記「conflicting の解消」へ）。
+
+# 3. exact id を明示して移行する。--only は --apply に必須である。
+agentopsctl migrate-labels --apply --only <id1>,<id2>,...
+
+# 4. 事後 inventory。pending 0 / conflicting 0 を確認する。
+agentopsctl migrate-labels
+```
+
+**`--apply` は `--only` 無しでは必ず失敗する。** 「old-only な container 全部」は
+その時 host に何が居るかで意味が変わる broad selector であり、Issue #123 が mutation を
+禁じているのはまさにそれである。id を書かせることで、影響範囲が inventory の副作用ではなく
+**operator が書いた決定**になり、shell history にも残る。id の重複も拒否する（対象件数が曖昧になるため）。
+
+不安なら 1 件ずつ流してよい。sweep は container 単位で逐次実行し、最初の失敗で全体を止める。
+
+### 各 container が通る段階と中断点
+
+sweep は container ごとに次の順で進む。**どの段階で中断しても named volume の data は失われない。**
+
+| 段階 | 何をするか | 中断したときの位置 | rollback |
+| --- | --- | --- | --- |
+| `re-inspect` | exact id を取り直し、ownership/role/spec が conflict でないことを**削除直前に**再検証する | 何も変わっていない | 不要。再実行するだけ |
+| `stop` | running のときだけ graceful stop。**stopped のものは起動しない** | 元の container が stopped で残る（まだ legacy-only） | `container start <id>` |
+| `delete` | exact id の container を削除。volume は触らない | **container が存在しない唯一の窓**。volume と data は無傷 | snapshot（`pre-mutation-*.json`）を見て再作成する |
+| `volume-release` | 削除した container が listing から消え、どの container も当該 volume を掴んでいないことを polling で証明し、volume が今も存在することを確認する | read-only。位置は `delete` と同じ | 同上 |
+| `recreate` | 観測どおりの replacement を作る（**元が stopped なら stopped のまま作る**） | replacement が存在する | replacement を削除し snapshot から作り直す |
+| `verify` | 元と replacement が label 以外すべて一致し、新旧両 namespace を持つことを証明する | drift 検出時は sweep 全体を停止し、以降の container に触れない | **自動修復しない。** operator の判断事項として escalate する |
+
+`verify` が失敗した replacement を自動で作り直さないのは意図的である。「同一だと証明できない」状態は
+機械が繕ってよい状態ではない。
+
+### named volume の保全
+
+- sweep は **volume を作らず・消さない**。`sweep-*.json` の `volumes[]` に
+  `presentBefore` / `presentAfter` が残る。
+- Apple Container の named volume は **単一 VM へ排他 attach** される。だから
+  `delete` → `volume-release` の証明 → `recreate` の順序を崩さない。証明できないまま timeout した
+  場合は re-attach せずに失敗する（先に attach して replacement 側が VZ Code=2 で落ちる方が診断が難しい）。
+- **volume の label は P2 では変わらない**（作り直す＝data 破棄のため）。これは既知の残課題であり、
+  P3 の設計時に扱う。下記「P3 の entry gate」を見る。
+
+### 停止と再開
+
+sweep は container 単位で冪等である。中断したら **dry-run を取り直し**、まだ `pending` の
+exact id だけを `--only` に渡して再開する。既に `dual` になったものは `skipped` になるので、
+同じ id を二度渡しても作り直しは起きない。
+
+### 保全する evidence
+
+`--apply` は**最初の mutation より前に** `pre-mutation-<stamp>.json` を書く。書けなければ sweep は
+実行されない（監査も rollback もできない移行を始めないため）。sweep 後に `sweep-<stamp>.json` を
+書く。**失敗した sweep でも書く**——どの段階で止まったかが必要になるのはその場合だからである。
+
+evidence には secret 値・host path・環境変数値を入れない。記録するのは container の exact id、
+state、image と digest、ownership/role/spec label、named volume の**名前**と mount 先、tmpfs、
+network、分類と理由だけである（volume の host path は記録しない）。
+
+## P3 の entry gate
+
+次を**すべて**満たすまで P3 へ進まない。
+
+- `agentopsctl migrate-labels` の事後 inventory で **`pending` 0 / `conflicting` 0 / `blocked` 0**。
+- dual label 観測窓（**最低 20 分**）で ownership と attachment の回帰が 0 件。最低 3 サンプル:
+  移行直後・restart/reconcile 後・窓の終了時。
+- grounded Apple Container で drain/recreate、排他 volume の detach/attach、restart 整合、
+  旧 binary reader へ戻せる rollback predicate が確認済み。
+- **未解決の残課題**: managed な **volume / network は依然 `legacy-only`** である。P2 は
+  container だけを移行する（volume の label を直すには volume を作り直す必要があり、それは
+  data 破棄そのものだから）。P3 が旧 namespace の **read** を消すと、これらは `missing-label`＝
+  非所有に落ち、`EnsureVolume` / `EnsureNetwork` が自分の resource を拒否する。**P3 は
+  「旧 read の削除」の前に volume/network の移行方式を決めなければならない。**
+
 ## grounded 検証の実行
 
 実機 Apple Container 上で label の round-trip と 6 分類、rollback predicate を接地する:
@@ -142,6 +245,18 @@ AGENTOPS_TEST_APPLE_CONTAINER=1 \
 AGENTOPS_TEST_APPLE_IMAGE=<手元にある image reference> \
 go test ./apps/control-plane/internal/lifecycle/ -run AppleContainer -v -count=1
 ```
+
+P2 の掃討だけを接地する場合（`/bin/sh` と `/bin/sleep` を持つ image が必要）:
+
+```sh
+AGENTOPS_TEST_APPLE_CONTAINER=1 \
+AGENTOPS_TEST_APPLE_IMAGE=<手元にある image reference> \
+go test ./apps/control-plane/internal/lifecycle/ -run AppleContainerSweep -v -count=1
+```
+
+P2 の grounded suite は probe container の volume に sentinel を書き、container の
+削除・再作成と restart を跨いで**その中身が残ること**まで確認する。sweep は probe の exact id へ
+`Only` で限定されるため、同じ host で稼働している managed topology は対象にならない。
 
 環境変数が無ければ suite ごと skip する。**opt-in したのに前提が欠けている場合は skip ではなく fail する**
 （skip は exit 0 なので、gate が「証明が無い」を「証明した」と読んでしまう）。
@@ -155,13 +270,17 @@ go test ./apps/control-plane/internal/lifecycle/ -run AppleContainer -v -count=1
 | grounded Apple Container run（新旧 label の実 round-trip、6 分類、rollback predicate） | `evidence/label-p1/apple-container-dual-label-smoke.json` | P1 merge 前 |
 | 移行前 host の read-only inventory（分類ごとの件数と container 一覧） | 同上 `readOnlyHostInventory` | P1 merge 前と、P2 の掃討前後 |
 | local validation（Go test / vet / typecheck） | PR 本文の Validation 節 | 各 phase の PR |
-| P2 の bounded audit（migrated / skipped / conflicting / blocked） | P2 で定義する | P2 |
+| grounded Apple Container run（drain/recreate、排他 volume の detach/attach、volume data 保全、restart 整合、rollback predicate） | `evidence/label-p2/apple-container-sweep-smoke.json` | P2 merge 前 |
+| P2 の bounded audit（pending / migrated / skipped / conflicting / blocked） | `evidence/label-p2/pre-mutation-<stamp>.json` と `sweep-<stamp>.json`（subcommand が自動生成） | 掃討の直前と直後 |
+| dual label 観測窓のサンプル（最低 3 点・20 分以上） | `evidence/label-p2/inventory-<stamp>.json` | 移行直後・restart 後・窓の終了時 |
 
 evidence には secret 値、host path、credential を入れない。`agentopsctl` の error も同じ方針で
 redact 済みであることを前提にする。
 
-## 本 phase でやらないこと
+## P2 でやらないこと
 
-- 稼働・停止 container の掃討／再作成（P2）
-- 旧 namespace の write 停止・read 削除（P3）
+- 旧 namespace の write 停止・read 削除（P3）。**旧 label は 1 つも消さない。**
+- named volume / network の label 移行（作り直し＝data 破棄になるため。P3 の設計事項）
+- obsolete label の sweep（P3）
 - control-store schema 変更、release receipt の wire 変更、無関係な製品名 cleanup（Issue #123 の非目標）
+- `unmanaged` / `missing-label` の resource への操作。**件数を減らそうとしない。**
