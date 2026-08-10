@@ -806,6 +806,88 @@ func TestEquivalenceAcceptsLabelGainAndRejectsEveryOtherDrift(t *testing.T) {
 	}
 }
 
+// The ownership marker alone is not the contract. A replacement carrying both
+// ownership labels while keeping its role or specification digest in the legacy
+// namespace only is exactly the state Phase 3 deletes — and exactly what this
+// migration exists to remove — so the gate must reject it.
+func TestEquivalenceRequiresEveryCarriedPairToBecomeDual(t *testing.T) {
+	before := containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	)
+	for _, testCase := range []struct {
+		name   string
+		labels string
+	}{
+		{
+			name: "role left in the legacy namespace",
+			labels: `{
+				"com.mrbaron3.workflow.agentopsctl": "v1",
+				"com.mrbaron3.servo.agentopsctl": "v1",
+				"com.mrbaron3.workflow.role": "runner",
+				"com.mrbaron3.workflow.spec-sha256": "` + fixtureSpecDigest + `",
+				"com.mrbaron3.servo.spec-sha256": "` + fixtureSpecDigest + `"
+			}`,
+		},
+		{
+			name: "specification digest left in the legacy namespace",
+			labels: `{
+				"com.mrbaron3.workflow.agentopsctl": "v1",
+				"com.mrbaron3.servo.agentopsctl": "v1",
+				"com.mrbaron3.workflow.role": "runner",
+				"com.mrbaron3.servo.role": "runner",
+				"com.mrbaron3.workflow.spec-sha256": "` + fixtureSpecDigest + `"
+			}`,
+		},
+		{
+			name: "current role written with a different value",
+			labels: `{
+				"com.mrbaron3.workflow.agentopsctl": "v1",
+				"com.mrbaron3.servo.agentopsctl": "v1",
+				"com.mrbaron3.workflow.role": "runner",
+				"com.mrbaron3.servo.role": "triage",
+				"com.mrbaron3.workflow.spec-sha256": "` + fixtureSpecDigest + `",
+				"com.mrbaron3.servo.spec-sha256": "` + fixtureSpecDigest + `"
+			}`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			after := containerFixture(
+				t, "agentops-runner", "stopped", testCase.labels, "",
+			)
+			if err := VerifyMigrationEquivalence(before, after); err == nil {
+				t.Fatal("a half-migrated replacement passed the gate")
+			}
+		})
+	}
+	// The complete shape still passes.
+	complete := containerFixture(
+		t, "agentops-runner", "stopped",
+		dualLabels("runner", fixtureSpecDigest), "",
+	)
+	if err := VerifyMigrationEquivalence(before, complete); err != nil {
+		t.Fatalf("a fully migrated replacement was rejected: %v", err)
+	}
+}
+
+// A container that never carried a specification digest is not required to
+// gain one.
+func TestEquivalenceDoesNotDemandAPairTheOriginalNeverCarried(t *testing.T) {
+	before := containerFixture(t, "agentops-runner", "stopped", `{
+		"com.mrbaron3.workflow.agentopsctl": "v1",
+		"com.mrbaron3.workflow.role": "runner"
+	}`, "")
+	after := containerFixture(t, "agentops-runner", "stopped", `{
+		"com.mrbaron3.workflow.agentopsctl": "v1",
+		"com.mrbaron3.servo.agentopsctl": "v1",
+		"com.mrbaron3.workflow.role": "runner",
+		"com.mrbaron3.servo.role": "runner"
+	}`, "")
+	if err := VerifyMigrationEquivalence(before, after); err != nil {
+		t.Fatalf("an absent pair was treated as required: %v", err)
+	}
+}
+
 // Losing the legacy namespace is the Phase 3 shape. Reaching it during Phase 2
 // would strand the container for the pre-migration binary, which is the exact
 // rollback the epic promises to keep available.

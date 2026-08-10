@@ -71,6 +71,12 @@ type SweepStep struct {
 	Stage     SweepStage `json:"stage"`
 	Outcome   string     `json:"outcome"`
 	Detail    string     `json:"detail"`
+	// Mutating marks a step that actually changed the host. It is what makes
+	// "did this sweep apply anything?" answerable from the record rather than
+	// inferred from which stage it reached: stopping an already-stopped
+	// container changes nothing, and a delete that failed changed nothing
+	// either.
+	Mutating bool `json:"mutating,omitempty"`
 }
 
 // VolumePreservation records that a named volume outlived the sweep. Phase 2
@@ -315,6 +321,12 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 		migrated = append(migrated, plan.Observed.ID)
 	}
 	report.Migrated = migrated
+	// Applied means this sweep changed the host, not that it started. A first
+	// target that fails while being re-inspected has mutated nothing, and a
+	// durable record claiming otherwise would send an operator looking for
+	// damage that does not exist. Once anything has been stopped, deleted, or
+	// recreated — for this target or an earlier one — it stays true.
+	report.Applied = mutated(report)
 	report.Volumes = sweeper.preservation(ctx, volumesBefore, &report)
 	// The post-state is recorded even when the sweep halted. The case that
 	// matters is the dangerous one — some containers migrated and one did not —
@@ -577,7 +589,7 @@ func (sweeper *LabelSweeper) migrateOne(
 		); err != nil {
 			return sweeper.fail(report, id, StageStop, err)
 		}
-		sweeper.ok(report, id, StageStop, "graceful stop completed")
+		sweeper.changed(report, id, StageStop, "graceful stop completed")
 	} else {
 		sweeper.ok(report, id, StageStop, "already stopped; not started")
 	}
@@ -594,7 +606,7 @@ func (sweeper *LabelSweeper) migrateOne(
 	if err := sweeper.Runtime.DeleteExisting(ctx, id); err != nil {
 		return sweeper.fail(report, id, StageDelete, err)
 	}
-	sweeper.ok(report, id, StageDelete, "exact container deleted; "+
+	sweeper.changed(report, id, StageDelete, "exact container deleted; "+
 		"named volumes untouched")
 
 	// Stage 4: prove the named volumes are released before re-attaching them.
@@ -614,7 +626,7 @@ func (sweeper *LabelSweeper) migrateOne(
 	); err != nil {
 		return sweeper.fail(report, id, StageRecreate, err)
 	}
-	sweeper.ok(report, id, StageRecreate, fmt.Sprintf(
+	sweeper.changed(report, id, StageRecreate, fmt.Sprintf(
 		"replacement materialized with both ownership namespaces (running=%t)",
 		wasRunning,
 	))
@@ -644,7 +656,7 @@ func (sweeper *LabelSweeper) migrateOne(
 					err, stopErr,
 				))
 			}
-			sweeper.ok(report, id, StageVerify,
+			sweeper.changed(report, id, StageVerify,
 				"unproven replacement stopped pending an operator decision")
 		}
 		return sweeper.fail(report, id, StageVerify, err)
@@ -887,6 +899,29 @@ func (sweeper *LabelSweeper) ok(
 	report.Steps = append(report.Steps, SweepStep{
 		Container: container, Stage: stage, Outcome: "ok", Detail: detail,
 	})
+}
+
+// changed records a step that actually altered the host.
+func (sweeper *LabelSweeper) changed(
+	report *SweepReport,
+	container string,
+	stage SweepStage,
+	detail string,
+) {
+	report.Steps = append(report.Steps, SweepStep{
+		Container: container, Stage: stage, Outcome: "ok", Detail: detail,
+		Mutating: true,
+	})
+}
+
+// mutated reports whether any step changed the host.
+func mutated(report SweepReport) bool {
+	for _, step := range report.Steps {
+		if step.Mutating {
+			return true
+		}
+	}
+	return false
 }
 
 func (sweeper *LabelSweeper) fail(

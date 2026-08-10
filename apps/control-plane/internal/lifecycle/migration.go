@@ -639,6 +639,43 @@ func verifyLabelsOnlyGained(before, after ContainerActual) error {
 			before.ID, class,
 		)
 	}
+	// The ownership marker alone is not the contract. A replacement could carry
+	// both ownership labels while keeping its role or specification digest in
+	// the legacy namespace only — which is exactly the state Phase 3 deletes,
+	// and exactly what this migration exists to remove. Every pair the original
+	// carried has to come back written in both namespaces with its own value.
+	for _, pair := range []struct {
+		kind            string
+		legacy, current string
+	}{
+		{"ownership", LegacyManagedLabelKey, CurrentManagedLabelKey},
+		{"role", LegacyRoleLabelKey, CurrentRoleLabelKey},
+		{"specification digest", LegacySpecLabelKey, CurrentSpecLabelKey},
+	} {
+		expected, originally := ReadDualLabel(
+			before.Configuration.Labels, pair.legacy, pair.current,
+		)
+		if originally == LabelAbsent {
+			// The original never carried this pair; a container without a
+			// specification digest is not required to gain one.
+			continue
+		}
+		if originally == LabelConflicting {
+			return fmt.Errorf(
+				"container %s carried conflicting %s labels and must not have "+
+					"been migrated", before.ID, pair.kind,
+			)
+		}
+		value, agreement := ReadDualLabel(
+			afterLabels, pair.legacy, pair.current,
+		)
+		if agreement != LabelDual || value != expected {
+			return fmt.Errorf(
+				"container %s replacement did not write its %s label into "+
+					"both namespaces", before.ID, pair.kind,
+			)
+		}
+	}
 	return nil
 }
 

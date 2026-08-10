@@ -27,6 +27,9 @@ type fakeSweepRuntime struct {
 	createdSpec []ContainerSpec
 
 	deleteErr error
+	// deleteErrByID fails one exact identity's delete, which lets a test halt a
+	// later target after an earlier one has already been migrated.
+	deleteErrByID map[string]error
 	// imageConfig is what the probe image declares for itself.
 	imageConfig ImageConfiguration
 	imageEnvErr error
@@ -152,6 +155,9 @@ func (runtime *fakeSweepRuntime) DeleteExisting(
 ) error {
 	if runtime.deleteErr != nil {
 		return runtime.deleteErr
+	}
+	if err, targeted := runtime.deleteErrByID[name]; targeted {
+		return err
 	}
 	present := false
 	for _, container := range runtime.containers {
@@ -1020,6 +1026,63 @@ func TestSweepStopsRetryingAnAttachThatNeverFrees(t *testing.T) {
 			"expected exactly 3 attempts, saw %d",
 			1_000-runtime.attachBusyRemaining,
 		)
+	}
+}
+
+// "Applied" has to mean the host changed. A first target that fails while it
+// is still being re-inspected has mutated nothing, and a durable record saying
+// otherwise sends an operator looking for damage that does not exist.
+func TestReportIsNotAppliedWhenNothingWasMutated(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	// The tag no longer resolves to the digest the container was created from,
+	// so the very first stage fails before anything is touched.
+	runtime.imageDigest = "sha256:" + strings.Repeat("c", 64)
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
+	if err == nil {
+		t.Fatal("a moved tag was accepted")
+	}
+	if report.Applied {
+		t.Fatalf("nothing was mutated but the report says applied: %+v",
+			report.Steps)
+	}
+	if len(runtime.deleted) != 0 || len(runtime.createdSpec) != 0 ||
+		len(runtime.stopped) != 0 {
+		t.Fatal("the fixture mutated after all")
+	}
+}
+
+// Once anything has been stopped, deleted, or recreated — for this target or an
+// earlier one — the report must keep saying so even though the sweep failed.
+func TestReportStaysAppliedWhenAnEarlierTargetAlreadyMutated(t *testing.T) {
+	runtime := newFakeSweepRuntime(
+		containerFixture(t, "agentops-runner", "stopped",
+			legacyOnlyLabels("runner", fixtureSpecDigest), ""),
+		containerFixtureWithMounts(t, "agentops-triage", "stopped",
+			legacyOnlyLabels("triage", fixtureSpecDigest),
+			distinctVolume("agentops-triage-credentials"), ""),
+	)
+	sweeper := testSweeper(runtime, "agentops-runner", "agentops-triage")
+	// The second target's delete fails, so the sweep halts after the first has
+	// already been deleted and recreated.
+	runtime.deleteErrByID = map[string]error{
+		"agentops-triage": errors.New("delete refused by the runtime"),
+	}
+	report, err := sweeper.Apply(context.Background())
+	if err == nil {
+		t.Fatal("the second target should not have completed")
+	}
+	if !report.Applied {
+		t.Fatalf(
+			"an earlier target was migrated but the report denies it: %+v",
+			report.Steps,
+		)
+	}
+	if len(report.Migrated) != 1 || report.Migrated[0] != "agentops-runner" {
+		t.Fatalf("migrated set = %v", report.Migrated)
 	}
 }
 
