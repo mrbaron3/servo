@@ -76,7 +76,7 @@ print("---", dict(counts))
 - `conflicting` が 1 件でもあれば、**そこで止める**。`agentopsctl` はその resource に触れる操作を
   fail-closed で拒否する。error は**食い違っている 2 つの key 名だけ**を出し、label の値そのものは出さない
   （label 値は事故や外部由来の任意文字列で、durable な lifecycle failure record にも残るため）。
-  どちらの値が古いかは `container inspect <name>` で確認し、手で解消してから続行する。
+  どちらの値が古いかは `container inspect <name>` で確認する。解消手順は下記「conflicting の解消」を見る。
 - `conflicting` の error は drift の error と区別される。「DRAINING して stop して restart」を促す文言が
   出たらそれは drift であって部分移行ではない。**部分移行に対して drift の手順を実行しない**
   （排他 attach 中の named volume を持つ container を削除・再作成することになる）。
@@ -98,7 +98,40 @@ P1 の writer は新旧**両方**の label を書く。旧 binary は旧 namespa
 
 戻せない状況が 1 つだけある: 手動または外部 tool で**新旧の値を食い違わせた**場合
 （`conflicting`）。これは P1 の binary でも旧 binary でも安全に扱えないので、
-label を手で揃えてから rollback する。
+下記「conflicting の解消」を先に行ってから rollback する。
+
+## conflicting の解消
+
+**Apple Container は既存 resource の label を変更できない。** `container` CLI に update/relabel 相当の
+subcommand は無く（1.1.0 で確認）、label は create 時にしか設定できない。したがって解消は
+「作り直す」しかなく、resource 種別ごとに危険度が違う。
+
+**container** — data は named volume 側にあるので、container 自体は捨ててよい。
+
+```sh
+container inspect <name>            # どちらの label が古いかを確認する
+container stop <name>               # running なら
+container delete <name>             # agentopsctl ではなく raw CLI で消す
+```
+
+そのあと `agentopsctl start` に作り直させる。**container を消しても named volume の data は消えない。**
+
+**network** — 状態を持たないので同じく作り直す。
+
+```sh
+container network delete <name>
+```
+
+**volume — ここだけは delete が data 破棄そのものである。** label を直せないので、
+`container volume delete` は PostgreSQL の data を消すことを意味する。次のどちらかを選ぶ。
+
+1. **触らない**（推奨）。conflicting な volume を持つ topology は起動できないが、data は保持される。
+   Phase 2 の migration までそのまま待つ。
+2. どうしても今直すなら、まず `container volume inspect <name>` で
+   `configuration.source`（host 上の volume image path）を確認し、**data を退避してから**
+   `container volume delete` → `agentopsctl start` で作り直し、退避した data を戻す。
+
+いずれの場合も、解消の前後で inventory を取り直して `conflicting` が 0 件になったことを確認する。
 
 ## grounded 検証の実行
 

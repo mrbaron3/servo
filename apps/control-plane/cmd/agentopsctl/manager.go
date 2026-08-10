@@ -596,6 +596,13 @@ func (manager *manager) Drain(
 	// Keep the existing control process and its current internal address alive.
 	// PostgreSQL fences routing/enqueue/lease after the DRAINING commit, while
 	// the stable CONNECT proxy lets the current attempt reach a natural stop.
+	// Drain reaches a worker by configured name, so ownership has to be proven
+	// here too: signalling a foreign or partially migrated container would stop
+	// somebody else's process, or half-migrate our own while its named volume is
+	// still exclusively attached. Refusing one worker must not leave a second,
+	// provably owned one running — DRAINING is already committed, and returning
+	// early would make that worker unstoppable through agentopsctl.
+	var refused []error
 	for _, name := range []string{
 		manager.config.TriageContainer,
 		manager.config.RunnerContainer,
@@ -604,21 +611,22 @@ func (manager *manager) Drain(
 		if err != nil {
 			return err
 		}
-		if worker != nil && worker.Status.State == "running" {
-			// Drain reaches a worker by configured name, so ownership has to be
-			// proven here too. Signalling a foreign or partially migrated
-			// container would stop somebody else's process, or half-migrate our
-			// own while its named volume is still exclusively attached.
-			if err := lifecycle.RequireOwned(
-				"container "+name,
-				worker.Configuration.Labels,
-			); err != nil {
-				return err
-			}
-			if err := manager.runtime.SignalTerm(ctx, name); err != nil {
-				return err
-			}
+		if worker == nil || worker.Status.State != "running" {
+			continue
 		}
+		if err := lifecycle.RequireManaged(
+			"container "+name,
+			worker.Configuration.Labels,
+		); err != nil {
+			refused = append(refused, err)
+			continue
+		}
+		if err := manager.runtime.SignalTerm(ctx, name); err != nil {
+			return err
+		}
+	}
+	if len(refused) != 0 {
+		return errors.Join(refused...)
 	}
 	if err := manager.reconcileExpiredRunnerWork(ctx); err != nil {
 		return err
@@ -1351,13 +1359,13 @@ func managedDashboardControl(
 		return notRunning
 	}
 	if err := lifecycle.RequireOwned(
-		"control container "+config.ControlContainer,
+		"container "+config.ControlContainer,
 		actual.Configuration.Labels,
 	); err != nil {
 		return err
 	}
 	if err := lifecycle.RequireRole(
-		"control container "+config.ControlContainer,
+		"container "+config.ControlContainer,
 		"control",
 		actual.Configuration.Labels,
 	); err != nil {
@@ -1472,7 +1480,7 @@ func (manager *manager) ensurePostgres(ctx context.Context) (bool, error) {
 	}
 	if actual != nil {
 		if err := lifecycle.RequireOwned(
-			"postgres container "+manager.config.PostgresContainer,
+			"container "+manager.config.PostgresContainer,
 			actual.Configuration.Labels,
 		); err != nil {
 			return false, err
@@ -2435,8 +2443,8 @@ func (manager *manager) removeRunner(
 	if actual == nil {
 		return mutationReceipt{}, nil
 	}
-	if err := lifecycle.RequireOwned(
-		"runner container "+manager.config.RunnerContainer,
+	if err := lifecycle.RequireManaged(
+		"container "+manager.config.RunnerContainer,
 		actual.Configuration.Labels,
 	); err != nil {
 		return mutationReceipt{}, err
@@ -2683,7 +2691,7 @@ func (manager *manager) gracefulStop(
 	if err != nil || actual == nil || actual.Status.State != "running" {
 		return err
 	}
-	if err := lifecycle.RequireOwned(
+	if err := lifecycle.RequireManaged(
 		"container "+name,
 		actual.Configuration.Labels,
 	); err != nil {
@@ -3419,10 +3427,11 @@ func validateManagedActual(
 	if actual.ID != name {
 		return fmt.Errorf("%s ownership or role label does not match", name)
 	}
-	if err := lifecycle.RequireOwned(name, actual.Configuration.Labels); err != nil {
+	subject := "container " + name
+	if err := lifecycle.RequireOwned(subject, actual.Configuration.Labels); err != nil {
 		return err
 	}
-	if err := lifecycle.RequireRole(name, role, actual.Configuration.Labels); err != nil {
+	if err := lifecycle.RequireRole(subject, role, actual.Configuration.Labels); err != nil {
 		return err
 	}
 	if !imageReferenceMatches(actual.Configuration.Image.Reference, image) {

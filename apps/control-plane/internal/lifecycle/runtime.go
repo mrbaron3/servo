@@ -623,7 +623,7 @@ func (runtime *AppleRuntime) Delete(ctx context.Context, name string) error {
 	if err != nil || actual == nil {
 		return err
 	}
-	if err := RequireOwned(
+	if err := RequireManaged(
 		"container "+name,
 		actual.Configuration.Labels,
 	); err != nil {

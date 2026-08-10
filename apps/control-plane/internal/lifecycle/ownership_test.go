@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -554,5 +555,82 @@ func assertOwnershipRejection(t *testing.T, err error, conflict bool) {
 	}
 	if !strings.Contains(err.Error(), "is not owned by agentopsctl") {
 		t.Fatalf("a foreign resource was not reported as unowned: %v", err)
+	}
+}
+
+// Ownership is not the only pair that can be half-written. A container whose
+// role or specification namespaces disagree is just as partially migrated, and
+// the destructive paths are where that has to stop the caller.
+
+func TestRequireManagedRefusesSecondaryLabelConflicts(t *testing.T) {
+	owned := map[string]string{
+		LegacyManagedLabelKey:  "v1",
+		CurrentManagedLabelKey: "v1",
+	}
+	for name, extra := range map[string]map[string]string{
+		"role": {
+			LegacyRoleLabelKey:  "runner",
+			CurrentRoleLabelKey: "triage",
+		},
+		"specification digest": {
+			LegacySpecLabelKey:  strings.Repeat("a", 64),
+			CurrentSpecLabelKey: strings.Repeat("b", 64),
+		},
+	} {
+		labels := map[string]string{}
+		for key, value := range owned {
+			labels[key] = value
+		}
+		for key, value := range extra {
+			labels[key] = value
+		}
+		// Ownership alone still reads as owned, which is exactly the trap.
+		if err := RequireOwned("container agentops-runner", labels); err != nil {
+			t.Fatalf("%s fixture is not ownership-clean: %v", name, err)
+		}
+		err := RequireManaged("container agentops-runner", labels)
+		if err == nil {
+			t.Fatalf("a %s conflict passed the destructive gate", name)
+		}
+		if !errors.Is(err, ErrConflictingLabels) ||
+			!strings.Contains(err.Error(), name) {
+			t.Fatalf("%s conflict was not reported as a partial migration: %v", name, err)
+		}
+	}
+
+	// A resource with no secondary pairs at all — every network and volume — is
+	// still managed once ownership is proven.
+	if err := RequireManaged("volume agentops-postgres-data", owned); err != nil {
+		t.Fatalf("an owned volume was refused: %v", err)
+	}
+}
+
+func TestDeleteRefusesContainersWithConflictingRoleOrSpecLabels(t *testing.T) {
+	for name, extra := range map[string]string{
+		"role": `"` + LegacyRoleLabelKey + `":"runner","` +
+			CurrentRoleLabelKey + `":"triage"`,
+		"specification digest": `"` + LegacySpecLabelKey + `":"` +
+			strings.Repeat("a", 64) + `","` + CurrentSpecLabelKey + `":"` +
+			strings.Repeat("b", 64) + `"`,
+	} {
+		fake := &fakeRuntimeRunner{results: []CommandResult{{
+			Status: 0,
+			Stdout: `[{"id":"agentops-runner","configuration":{"labels":{` +
+				`"` + LegacyManagedLabelKey + `":"v1","` +
+				CurrentManagedLabelKey + `":"v1",` + extra +
+				`}},"status":{"state":"stopped"}}]`,
+		}}}
+		err := NewAppleRuntimeForTest(fake).Delete(
+			context.Background(),
+			"agentops-runner",
+		)
+		if !errors.Is(err, ErrConflictingLabels) {
+			t.Fatalf("a %s conflict did not fail closed on delete: %v", name, err)
+		}
+		for _, args := range fake.args {
+			if len(args) != 0 && args[0] == "delete" {
+				t.Fatalf("a %s-conflicting container was deleted: %#v", name, fake.args)
+			}
+		}
 	}
 }

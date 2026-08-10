@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -397,14 +396,36 @@ func TestGracefulStopAndRemoveRunnerNeverMutateUnownedOrConflictingContainers(t 
 				assertOwnershipRejection(t, stopErr, testCase.conflict)
 			}
 
+			stoppedListing := `[{"id":"agentops-runner","configuration":{"labels":` +
+				string(encoded) + `},"status":{"state":"stopped"}}]`
 			removeFake := &managerRuntimeRunner{results: []lifecycle.CommandResult{
-				{Status: 0, Stdout: listing},
+				{Status: 0, Stdout: listing},        // removeRunner lookup
+				{Status: 0, Stdout: listing},        // gracefulStop lookup
+				{Status: 0},                         // kill --signal TERM
+				{Status: 0, Stdout: stoppedListing}, // WaitState poll
+				{Status: 0, Stdout: stoppedListing}, // Delete lookup
+				{Status: 0},                         // delete
 			}}
 			removeSubject := newManager(cfg, lifecycle.NewAppleRuntimeForTest(removeFake))
 			receipt, removeErr := removeSubject.removeRunner(context.Background())
 			if testCase.owned {
-				if !receipt.Mutated {
-					t.Fatalf("an owned runner was not scheduled for removal: %v", removeErr)
+				if removeErr != nil || !receipt.Mutated {
+					t.Fatalf("an owned runner was not removed: %v (%#v)", removeErr, receipt)
+				}
+				var signalled, deleted bool
+				for _, args := range removeFake.args {
+					switch {
+					case len(args) != 0 && args[0] == "kill":
+						signalled = true
+					case len(args) != 0 && args[0] == "delete":
+						deleted = true
+					}
+				}
+				if !signalled || !deleted {
+					t.Fatalf(
+						"removeRunner did not reach stop and delete: %#v",
+						removeFake.args,
+					)
 				}
 				return
 			}
@@ -485,6 +506,7 @@ func TestDrainNeverSignalsUnownedOrConflictingWorkers(t *testing.T) {
 				{Status: 0, Stdout: listing},           // databaseHost -> list
 				{Status: 0, Stdout: drained},           // admin: lifecycle transition
 				{Status: 0, Stdout: listing},           // triage worker lookup
+				{Status: 0, Stdout: listing},           // runner worker lookup (absent)
 			}}
 			subject := newManager(cfg, lifecycle.NewAppleRuntimeForTest(fake))
 
@@ -505,43 +527,54 @@ func TestDrainNeverSignalsUnownedOrConflictingWorkers(t *testing.T) {
 
 func TestEnsurePostgresDoesNotOfferDriftRemediationForAPartialMigration(t *testing.T) {
 	cfg := testManagerConfig()
-	subject := newManager(cfg, nil)
-	spec := subject.postgresSpec()
 	image := "sha256:" + strings.Repeat("c", 64)
-	digest, err := lifecycle.SpecDigest(spec, image)
+	digest, err := lifecycle.SpecDigest(newManager(cfg, nil).postgresSpec(), image)
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec.SpecDigest = digest
-	actual := &lifecycle.ContainerActual{}
-	actual.ID = cfg.PostgresContainer
-	actual.Status.State = "running"
-	actual.Configuration.Image.Descriptor.Digest = image
-	actual.Configuration.Labels = map[string]string{
+	labels, err := json.Marshal(map[string]string{
 		lifecycle.LegacyManagedLabelKey:  "v1",
 		lifecycle.CurrentManagedLabelKey: "v1",
 		lifecycle.LegacyRoleLabelKey:     "postgres",
 		lifecycle.CurrentRoleLabelKey:    "postgres",
 		lifecycle.LegacySpecLabelKey:     digest,
 		lifecycle.CurrentSpecLabelKey:    strings.Repeat("d", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	err = validateSpecActual(actual, spec)
+	mounts := `[{"destination":"/tmp","type":{"tmpfs":{}}},` +
+		`{"destination":"/run/postgresql","type":{"tmpfs":{}}},` +
+		`{"destination":"/var/lib/postgresql","type":{"volume":{"name":"` +
+		cfg.PostgresVolume + `"}}}]`
+	listing := `[{"id":"` + cfg.PostgresContainer + `","configuration":{"labels":` +
+		string(labels) + `,"image":{"reference":"` + cfg.PostgresImage +
+		`","descriptor":{"digest":"` + image + `"}},` +
+		`"networks":[{"network":"agentops-internal"}],"mounts":` + mounts +
+		`,"publishedPorts":[],"publishedSockets":[]` +
+		`},"status":{"state":"running"}}]`
+	fake := &managerRuntimeRunner{results: []lifecycle.CommandResult{
+		{Status: 0, Stdout: `{"configuration":{"descriptor":{"digest":"` + image + `"}}}`},
+		{Status: 0, Stdout: listing},
+	}}
+	subject := newManager(cfg, lifecycle.NewAppleRuntimeForTest(fake))
+
+	_, err = subject.ensurePostgres(context.Background())
 	if !errors.Is(err, lifecycle.ErrConflictingLabels) {
-		t.Fatalf("a conflicting digest was not marked as a partial migration: %v", err)
+		t.Fatalf("ensurePostgres did not fail closed on a partial migration: %v", err)
 	}
 	// The drift remediation is drain, stop, and volume-preserving restart. A
 	// partially migrated container is not drifting, and following that advice
 	// deletes and recreates a container whose named volume is still attached.
-	wrapped := fmt.Errorf(
-		"PostgreSQL image/spec drift requires DRAINING, stop, and volume-preserving restart: %w",
-		err,
-	)
-	if !errors.Is(wrapped, lifecycle.ErrConflictingLabels) {
-		t.Fatal("errors.Is cannot see the conflict through the drift wrapper")
-	}
 	if strings.Contains(err.Error(), "DRAINING") ||
 		strings.Contains(err.Error(), "drifted") {
 		t.Fatalf("a partial migration was reported as drift: %v", err)
+	}
+	for _, args := range fake.args {
+		if len(args) != 0 &&
+			(args[0] == "delete" || args[0] == "run" || args[0] == "kill") {
+			t.Fatalf("a partially migrated PostgreSQL container was mutated: %#v", fake.args)
+		}
 	}
 }
 
@@ -605,5 +638,84 @@ func TestReconciliationReadsRoleFromTheCurrentNamespaceAlone(t *testing.T) {
 		[]string{"agentops-internal"}, false,
 	); err != nil {
 		t.Fatalf("a current-only container was rejected: %v", err)
+	}
+}
+
+func TestDrainStillStopsOwnedWorkersWhenAnotherWorkerIsConflicting(t *testing.T) {
+	// Fail-closed means not touching what this binary cannot own. It must not
+	// mean abandoning a worker it provably does own: DRAINING is already
+	// committed, so an unsignalled runner becomes unstoppable through agentopsctl.
+	cfg := testManagerConfig()
+	conflicting, err := json.Marshal(map[string]string{
+		lifecycle.LegacyManagedLabelKey:  "v1",
+		lifecycle.CurrentManagedLabelKey: "v2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, err := json.Marshal(withRole(
+		map[string]string{lifecycle.LegacyManagedLabelKey: "v1"},
+		"runner",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listing := `[{"id":"` + cfg.PostgresContainer + `","configuration":{"labels":` +
+		`{"` + lifecycle.LegacyManagedLabelKey + `":"v1"}},"status":{"state":"running",` +
+		`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}},` +
+		`{"id":"` + cfg.TriageContainer + `","configuration":{"labels":` +
+		string(conflicting) + `},"status":{"state":"running"}},` +
+		`{"id":"` + cfg.RunnerContainer + `","configuration":{"labels":` +
+		string(owned) + `},"status":{"state":"running"}}]`
+	fake := &managerRuntimeRunner{results: []lifecycle.CommandResult{
+		{Status: 0, Stdout: "container 1.1.0"},
+		{Status: 0},
+		{Status: 0, Stdout: listing},
+		{Status: 0, Stdout: `{"state":{"mode":"ACTIVE","generation":1,` +
+			`"updatedAt":"2026-08-10T00:00:00Z"},` +
+			`"databaseTime":"2026-08-10T00:00:00Z"}`},
+		{Status: 0, Stdout: listing},
+		{Status: 0, Stdout: `{"state":{"mode":"DRAINING","generation":2,` +
+			`"drainDeadlineAt":"2026-08-10T00:10:00Z",` +
+			`"updatedAt":"2026-08-10T00:00:01Z"}}`},
+		{Status: 0, Stdout: listing}, // triage lookup: conflicting
+		{Status: 0, Stdout: listing}, // runner lookup: owned
+		{Status: 0},                  // runner TERM
+	}}
+	subject := newManager(cfg, lifecycle.NewAppleRuntimeForTest(fake))
+
+	err = subject.Drain(context.Background(), time.Minute, "drain-request-002")
+	if !errors.Is(err, lifecycle.ErrConflictingLabels) {
+		t.Fatalf("drain did not report the conflicting worker: %v", err)
+	}
+	signalled := map[string]bool{}
+	for _, args := range fake.args {
+		if len(args) != 0 && args[0] == "kill" {
+			signalled[args[len(args)-1]] = true
+		}
+	}
+	if signalled[cfg.TriageContainer] {
+		t.Fatalf("a conflicting worker was signalled: %#v", fake.args)
+	}
+	if !signalled[cfg.RunnerContainer] {
+		t.Fatalf("an owned worker was left running by drain: %#v", fake.args)
+	}
+}
+
+func TestRoleMismatchDoesNotBlameOwnership(t *testing.T) {
+	// Ownership is proven separately at every caller, so naming it in a role
+	// failure sends the operator to a boundary already known to be sound.
+	err := lifecycle.RequireRole("container agentops-control", "control", map[string]string{
+		lifecycle.LegacyRoleLabelKey:  "runner",
+		lifecycle.CurrentRoleLabelKey: "runner",
+	})
+	if err == nil {
+		t.Fatal("a foreign role was accepted")
+	}
+	if strings.Contains(err.Error(), "ownership") {
+		t.Fatalf("a role mismatch blamed ownership: %v", err)
+	}
+	if !strings.Contains(err.Error(), "role label does not match") {
+		t.Fatalf("a role mismatch does not name the role: %v", err)
 	}
 }

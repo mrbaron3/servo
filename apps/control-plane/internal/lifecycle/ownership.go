@@ -189,6 +189,35 @@ func RequireOwned(subject string, labels map[string]string) error {
 	return fmt.Errorf("%s is not owned by agentopsctl", subject)
 }
 
+// RequireManaged is the gate for stopping, signalling, or deleting a container.
+// It proves ownership and additionally proves that no label pair is
+// half-written: a container whose role or specification namespaces disagree is
+// as partially migrated as one whose ownership marker does, and a destructive
+// path is exactly where that has to stop the caller.
+func RequireManaged(subject string, labels map[string]string) error {
+	if err := RequireOwned(subject, labels); err != nil {
+		return err
+	}
+	for _, pair := range []struct {
+		kind                  string
+		legacyKey, currentKey string
+	}{
+		{"role", LegacyRoleLabelKey, CurrentRoleLabelKey},
+		{"specification digest", LegacySpecLabelKey, CurrentSpecLabelKey},
+	} {
+		if _, agreement := ReadDualLabel(
+			labels,
+			pair.legacyKey,
+			pair.currentKey,
+		); agreement == LabelConflicting {
+			return conflictingLabelError(
+				subject, pair.kind, pair.legacyKey, pair.currentKey,
+			)
+		}
+	}
+	return nil
+}
+
 // RequireRole returns nil when both namespaces agree the resource carries the
 // wanted runtime role. Like RequireOwned it keeps the key pair inside this file
 // so Phase 3 can drop the legacy namespace without editing any caller.
@@ -201,7 +230,9 @@ func RequireRole(subject, want string, labels map[string]string) error {
 		)
 	}
 	if !agreement.Agreed() || role != want {
-		return fmt.Errorf("%s ownership or role label does not match", subject)
+		// Ownership is checked separately, so naming it here would send the
+		// operator to a boundary that is already known to be sound.
+		return fmt.Errorf("%s role label does not match %q", subject, want)
 	}
 	return nil
 }
