@@ -10,8 +10,10 @@ import (
 )
 
 // These cases cover what Phase 3B keeps of the Phase 3A metadata migration: the
-// path that returns a document to the exact bytes a Phase 3A run recorded for
-// it.
+// path that returns a document to the pre-migration labels a Phase 3A run
+// recorded for it. Byte-exact restoration from the backup is one of the three
+// outcomes that path can reach — the one taken when the document is still
+// byte-identical to what the migration wrote — not a property of every case.
 //
 // Every fixture here is reconstructed rather than produced. The forward stages
 // are gone, so no test can migrate a document and then roll it back; instead each

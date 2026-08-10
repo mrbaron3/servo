@@ -11,9 +11,12 @@ import (
 )
 
 // This file grounds what Phase 3B keeps of Phase 3A on a real Apple Container
-// host. Phase 3A's forward stages are gone; the recovery path that restores a
-// document to the exact bytes a Phase 3A run recorded is not, and only the real
-// runtime can prove the two things it rests on:
+// host. Phase 3A's forward stages are gone; the recovery path that returns a
+// document to the pre-migration labels a Phase 3A run recorded is not, and only
+// the real runtime can prove the two things it rests on. The case grounded below
+// is the byte-exact one — the document is untouched between the recorded write
+// and the rollback, so the backup is restored byte for byte — which is one of
+// that path's three outcomes rather than a claim about all of them:
 //
 //   - an offline edit is what the runtime reports after it starts again, which
 //     is the only definition of "the label changed" that matters. Reading back

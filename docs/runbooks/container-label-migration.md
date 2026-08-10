@@ -702,9 +702,12 @@ P3B が実機で証明すること:
 - **旧 namespace だけの volume / container を refuse し、かつ消さない。**
   refuse したあとも resource と label がそのまま残っていることまで確認する
   （排他 attach の named volume を「空いた名前」と誤読しないこと）。
-- rollback（`-run AppleContainerMetadata`）が document を逐語 bytes へ戻し、runtime が
+- rollback（`-run AppleContainerMetadata`）が document を移行前 label へ戻し、runtime が
   戻った label を報告し、**その resource がこの binary から見えなくなり**、それでも
   volume の中の sentinel は無傷であること。一方向境界そのものの接地である。
+  この case は document が記録時から一切変わっていない `bytes` path なので、**この test に
+  関しては**逐語 bytes での復元まで検証している（3 つの outcome すべてが逐語であるという
+  主張ではない。`relabelled` は現状の document へ label を書き戻す）。
 
 P2 の掃討だけを接地する場合（`/bin/sh` と `/bin/sleep` を持つ image が必要）:
 
@@ -731,7 +734,7 @@ P2 の grounded suite は probe container の volume に sentinel を書き、co
 | 移行前 host の read-only inventory（分類ごとの件数と container 一覧） | 同上 `readOnlyHostInventory` | P1 merge 前と、P2 の掃討前後 |
 | local validation（Go test / vet / typecheck） | PR 本文の Validation 節 | 各 phase の PR |
 | grounded Apple Container run（drain/recreate、排他 volume の detach/attach、volume data 保全、restart 整合、rollback predicate） | `evidence/label-p2/apple-container-sweep-smoke.json` | P2 merge 前 |
-| grounded Apple Container run（新 namespace 単独 read、legacy-only の refuse かつ非削除、plan の host 束縛、rollback の逐語復元と一方向境界、volume sentinel 保全、前後の host 不変） | `evidence/label-p3b/grounded-<stamp>.json` | P3B merge 前 |
+| grounded Apple Container run（新 namespace 単独 read、legacy-only の refuse かつ非削除、plan の host 束縛、rollback の移行前 label 復元（`bytes` path なので逐語 bytes まで検証）と一方向境界、volume sentinel 保全、前後の host 不変） | `evidence/label-p3b/grounded-<stamp>.json` | P3B merge 前 |
 | P2 の bounded audit（pending / migrated / skipped / conflicting / blocked） | `evidence/label-p2/pre-mutation-<stamp>.json` と `sweep-<stamp>.json`（subcommand が自動生成） | 掃討の直前と直後 |
 | dual label 観測窓のサンプル（最低 3 点・20 分以上） | `evidence/label-p2/inventory-<stamp>.json` | 移行直後・restart 後・窓の終了時 |
 

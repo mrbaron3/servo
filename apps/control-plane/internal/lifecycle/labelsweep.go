@@ -25,9 +25,19 @@ import (
 // What remains is recovery. A Phase 3A run recorded, in a private 0700 backup
 // root, the exact bytes of every document it rewrote and the complete label maps
 // on either side of the change. This file can still return those documents to
-// those bytes. It does so without interpreting a single label key: the recorded
-// maps are restored verbatim, which is what makes the retained path safe even
-// though it restores labels this binary can no longer read.
+// their PRE-MIGRATION LABELS. How it gets there depends on the document and is
+// reported per document rather than promised uniformly: one still byte-identical
+// to what the migration wrote is replaced with the backup byte for byte, while
+// one the runtime has re-serialised since — `container system start` rewrites
+// volumes/<name>/entity.json, preserving values but not key order — has the
+// recorded labels rewritten in place, and only after every non-label field is
+// proved equal by value. Writing the backup's bytes over that second case would
+// silently revert whatever else the runtime recorded since, so byte-exactness is
+// the outcome where it is achievable, not the contract.
+//
+// Whichever route it takes, it interprets no label key: the recorded maps are
+// restored verbatim, which is what makes the retained path safe even though it
+// restores labels this binary can no longer read.
 //
 // That asymmetry is the point. Phase 3B can undo Phase 3A but cannot redo it,
 // and a host returned to its pre-Phase-3A labels must then be operated by a

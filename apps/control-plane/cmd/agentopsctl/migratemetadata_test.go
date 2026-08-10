@@ -82,6 +82,34 @@ func TestMigrateLabelMetadataRefusesEveryRetiredFlagBeforeTouchingTheRuntime(t *
 					t.Errorf("refusal does not mention %q: %v", expected, err)
 				}
 			}
+			// The message describes what --rollback actually guarantees:
+			// per-document restoration to the PRE-MIGRATION LABELS. It must not
+			// promise byte-exactness for every document, because a document the
+			// runtime has re-serialised since the migration is relabelled in
+			// place — writing the backup's bytes over that would revert whatever
+			// else the runtime recorded since. An operator mid-incident sizing up
+			// their recovery from this text is exactly who a stale contract
+			// misleads.
+			for _, expected := range []string{
+				"pre-migration labels", "per document",
+			} {
+				if !strings.Contains(err.Error(), expected) {
+					t.Errorf(
+						"refusal does not describe the rollback contract as %q: %v",
+						expected, err,
+					)
+				}
+			}
+			for _, forbidden := range []string{
+				"exact recorded bytes", "exact original bytes", "exact bytes",
+			} {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Errorf(
+						"refusal still promises %q for every document: %v",
+						forbidden, err,
+					)
+				}
+			}
 		})
 	}
 }

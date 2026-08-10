@@ -58,8 +58,11 @@ var errForwardMetadataSweepRetired = fmt.Errorf(
 		"What remains is recovery:\n"+
 		"  agentopsctl migrate-label-metadata --rollback "+
 		"<backup-root>/<stage>-<stamp>/rollback-plan.json\n"+
-		"That restores the documents a Phase 3A run rewrote to their exact "+
-		"recorded bytes. Operating the host after a rollback requires "+
+		"That returns the documents a Phase 3A run rewrote to their "+
+		"pre-migration labels: byte for byte from the backup where the "+
+		"document is unchanged, and by rewriting the labels in place where "+
+		"the runtime has re-serialised it since. The outcome is reported per "+
+		"document. Operating the host after a rollback requires "+
 		"deliberately running a pre-Phase-3B binary, which reads both "+
 		"namespaces; this one will not see the restored labels.",
 	lifecycle.CurrentLabelNamespace,
