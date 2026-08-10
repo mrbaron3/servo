@@ -17,7 +17,7 @@
     "container volume list --format json",
     "container network list --format json"
   ],
-  "generatedAt": "20260810T124454Z",
+  "generatedAt": "20260810T125728Z",
   "grounded": {
     "TestAppleContainerCurrentLabelsSurviveOnALiveContainer": true,
     "TestAppleContainerMetadataRollbackRefusesWhileTheRuntimeIsUp": true,
@@ -105,7 +105,8 @@
     }
   ],
   "notGroundedHere": [
-    "the rollback command's own stop/start/prove sequence: this suite stops and starts the runtime itself around the recovery, so it cannot observe what the command does unaided. That is pinned by five command tests \u2014 TestRollbackSucceedsAndRestartsExactlyOnce, TestRollbackReportsAFailedRestartOnTheSuccessPath, TestRollbackRestartsTheRuntimeEvenWhenTheStopFails, TestRollbackRestartsUnderACancelledContext, and TestRollbackJoinsAPrimaryFailureWithAFailedRecovery"
+    "the rollback command's own stop/start/prove sequence: this suite stops and starts the runtime itself around the recovery, so it cannot observe what the command does unaided. Pinned by five command tests instead \u2014 TestRollbackSucceedsAndRestartsExactlyOnce, TestRollbackReportsAFailedRestartOnTheSuccessPath, TestRollbackRestartsTheRuntimeEvenWhenTheStopFails, TestRollbackRestartsUnderACancelledContext, and TestRollbackJoinsAPrimaryFailureWithAFailedRecovery",
+    "the malformed-label diagnostics: a real host carries no malformed resource and seeding one would assert about the seeding tool rather than the reader. Pinned headlessly by TestMalformedReasonNamesTheLabelActuallyAtFault"
   ],
   "note": "Identities, classes, states and volume attachments only. No host path, no environment value, and no raw ownership label value is recorded here.",
   "phase": "LABEL-P3B",

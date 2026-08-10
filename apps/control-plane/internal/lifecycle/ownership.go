@@ -279,11 +279,25 @@ func RequireSpecDigest(subject, want string, labels map[string]string) error {
 
 // describeMalformedOwnership names why the current namespace is incoherent. It
 // names keys only, never values: see malformedLabelError.
+//
+// The branches below are in the SAME order ClassifyOwnership decides in, and
+// that is the whole requirement rather than a stylistic one. Classification
+// treats a blank role or specification label as malformed whatever the marker
+// says, so a container carrying a valid marker beside a blank role is malformed
+// because of the role. A diagnostic that checked only the marker would fall
+// through and tell the operator the marker was absent — while it is sitting
+// right there, valid — and send them looking for the wrong label on a resource
+// no destructive path may touch.
 func describeMalformedOwnership(labels map[string]string) string {
 	if _, presence := ReadOwnershipLabel(
 		labels, CurrentManagedLabelKey,
 	); presence == LabelBlank {
 		return CurrentManagedLabelKey + " is present but empty"
+	}
+	for _, key := range []string{CurrentRoleLabelKey, CurrentSpecLabelKey} {
+		if _, presence := ReadOwnershipLabel(labels, key); presence == LabelBlank {
+			return key + " is present but empty"
+		}
 	}
 	return CurrentManagedLabelKey + " is absent while other " +
 		CurrentLabelNamespace + ".* ownership labels are present"

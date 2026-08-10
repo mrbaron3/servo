@@ -1038,3 +1038,98 @@ func fixtureCarriesSentinel(labels map[string]string) bool {
 	}
 	return false
 }
+
+// TestMalformedReasonNamesTheLabelActuallyAtFault pins the diagnostic against
+// the classifier. ClassifyOwnership treats a blank role or specification label
+// as malformed whatever the marker says, so the reason has to decide in the same
+// order — otherwise a container with a valid marker beside a blank role is
+// reported as having no marker at all, and the operator goes looking for a label
+// that is present and correct on a resource no destructive path may touch.
+func TestMalformedReasonNamesTheLabelActuallyAtFault(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for name, testCase := range map[string]struct {
+		labels  map[string]string
+		names   string
+		absents []string
+	}{
+		"blank marker": {
+			labels: map[string]string{CurrentManagedLabelKey: ""},
+			names:  CurrentManagedLabelKey + " is present but empty",
+		},
+		"managed marker and a blank role": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v1",
+				CurrentRoleLabelKey:    "",
+			},
+			names: CurrentRoleLabelKey + " is present but empty",
+			// The marker is present and valid; saying it is absent is the bug.
+			absents: []string{"is absent"},
+		},
+		"managed marker and a blank digest": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v1",
+				CurrentSpecLabelKey:    "   ",
+			},
+			names:   CurrentSpecLabelKey + " is present but empty",
+			absents: []string{"is absent"},
+		},
+		"unknown marker and a blank role": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v2",
+				CurrentRoleLabelKey:    "",
+			},
+			names:   CurrentRoleLabelKey + " is present but empty",
+			absents: []string{"is absent"},
+		},
+		"unknown marker and a blank digest": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "v2",
+				CurrentSpecLabelKey:    "",
+			},
+			names:   CurrentSpecLabelKey + " is present but empty",
+			absents: []string{"is absent"},
+		},
+		"absent marker beside a present role": {
+			labels: map[string]string{CurrentRoleLabelKey: "runner"},
+			names:  CurrentManagedLabelKey + " is absent",
+		},
+		"absent marker beside a present digest": {
+			labels: map[string]string{CurrentSpecLabelKey: digest},
+			names:  CurrentManagedLabelKey + " is absent",
+		},
+		"a blank marker outranks a blank role": {
+			labels: map[string]string{
+				CurrentManagedLabelKey: "",
+				CurrentRoleLabelKey:    "",
+			},
+			names: CurrentManagedLabelKey + " is present but empty",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The fixture has to actually be malformed, or the reason is moot.
+			if class := ClassifyOwnership(testCase.labels); class != OwnershipMalformed {
+				t.Fatalf("fixture classifies as %q, want malformed", class)
+			}
+			err := RequireOwned("container agentops-postgres", testCase.labels)
+			if !errors.Is(err, ErrMalformedOwnershipLabels) {
+				t.Fatalf("not reported as fail-closed: %v", err)
+			}
+			if !strings.Contains(err.Error(), testCase.names) {
+				t.Fatalf("the reason does not name the label at fault: %v", err)
+			}
+			for _, forbidden := range testCase.absents {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("the reason claims %q about a present label: %v",
+						forbidden, err)
+				}
+			}
+			// Keys only, never values.
+			for _, value := range testCase.labels {
+				if trimmed := strings.TrimSpace(value); trimmed != "" &&
+					strings.Contains(err.Error(), trimmed) {
+					t.Fatalf("the reason echoes a label value: %v", err)
+				}
+			}
+		})
+	}
+}
