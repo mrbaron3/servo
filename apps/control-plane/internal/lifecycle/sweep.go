@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -622,7 +621,7 @@ func (sweeper *LabelSweeper) migrateOne(
 
 	// Stage 5: recreate in the state the original was observed in.
 	if err := sweeper.materialize(
-		ctx, spec, volumes, wasRunning, report,
+		ctx, spec, plan.Observed, volumes, wasRunning, report,
 	); err != nil {
 		return sweeper.fail(report, id, StageRecreate, err)
 	}
@@ -681,12 +680,18 @@ var exclusiveAttachPattern = regexp.MustCompile(
 // The release proof before this point is derived from listings, and Apple
 // Container removes a container record before its virtual machine has finished
 // releasing the block device. Rather than claim a stronger proof than the
-// runtime offers, the sweep treats that specific failure as transient: it
-// reconciles any partially created container, re-proves listing-level release,
-// and tries again. Every other failure is returned immediately.
+// runtime offers, the sweep treats that specific failure as transient.
+//
+// Reconciliation is fail-closed, and deliberately never deletes. Apple
+// Container names carry no generation identifier, so a record answering to this
+// name after a failed create cannot be attributed to that failed create:
+// another actor could have taken the name in the gap. The only two safe
+// readings are "this is indistinguishable from the replacement I intended, so
+// accept it" and "I cannot account for this, so stop and leave it alone".
 func (sweeper *LabelSweeper) materialize(
 	ctx context.Context,
 	spec ContainerSpec,
+	observed ContainerActual,
 	volumes []VolumeAttachment,
 	wasRunning bool,
 	report *SweepReport,
@@ -697,6 +702,11 @@ func (sweeper *LabelSweeper) materialize(
 	}
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
+		// The name has to be free before each attempt. Creating over a record
+		// this sweep did not make is not its call to make.
+		if err := sweeper.requireNameFree(ctx, spec.Name); err != nil {
+			return err
+		}
 		var err error
 		if wasRunning {
 			_, err = sweeper.Runtime.RunContainer(ctx, spec)
@@ -711,18 +721,37 @@ func (sweeper *LabelSweeper) materialize(
 			attempt == attempts {
 			return err
 		}
-		// A failed create can still leave a container record behind. Removing
-		// it keeps the next attempt from colliding with the debris of this one.
+		// A busy create may still have left a record — or somebody else may now
+		// hold the name. The runtime cannot tell those apart, so neither can
+		// this code, and neither may delete.
 		existing, lookupErr := sweeper.containerByID(ctx, spec.Name)
 		if lookupErr != nil {
 			return lookupErr
 		}
 		if existing != nil {
-			if deleteErr := sweeper.Runtime.DeleteExisting(
-				ctx, spec.Name,
-			); deleteErr != nil && !errors.Is(deleteErr, ErrContainerAbsent) {
-				return deleteErr
+			if equivalenceErr := VerifyMigrationEquivalence(
+				observed, *existing,
+			); equivalenceErr != nil {
+				return fmt.Errorf(
+					"container %s reported the named volume busy and a record "+
+						"now holds that name which this sweep cannot account "+
+						"for (%v); it has been left untouched for an operator",
+					spec.Name, equivalenceErr,
+				)
 			}
+			// Indistinguishable from the replacement that was intended: the
+			// create landed after all. Stage 6 verifies it again on the way out.
+			sweeper.changed(report, spec.Name, StageRecreate, fmt.Sprintf(
+				"attempt %d reported the volume busy but left a record "+
+					"matching the intended replacement; accepted without "+
+					"recreating", attempt,
+			))
+			return nil
+		}
+		// The name is free. Retrying is only meaningful when a named volume
+		// could still be holding the attachment open.
+		if len(volumes) == 0 {
+			return err
 		}
 		if releaseErr := sweeper.proveVolumeRelease(
 			ctx, spec.Name, volumes,
@@ -730,11 +759,29 @@ func (sweeper *LabelSweeper) materialize(
 			return releaseErr
 		}
 		sweeper.ok(report, spec.Name, StageRecreate, fmt.Sprintf(
-			"attempt %d found the named volume still attached; "+
-				"reconciled and retrying", attempt,
+			"attempt %d found the named volume still attached and the name "+
+				"free; re-proved release and retrying", attempt,
 		))
 	}
 	return lastErr
+}
+
+// requireNameFree proves nothing answers to this identity yet.
+func (sweeper *LabelSweeper) requireNameFree(
+	ctx context.Context,
+	name string,
+) error {
+	existing, err := sweeper.containerByID(ctx, name)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		return fmt.Errorf(
+			"container %s already exists; refusing to create over a record "+
+				"this sweep cannot attribute to itself", name,
+		)
+	}
+	return nil
 }
 
 // proveVolumeRelease polls until the deleted container is gone from the

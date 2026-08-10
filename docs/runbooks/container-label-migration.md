@@ -193,7 +193,7 @@ sweep は container ごとに次の順で進む。**どの段階で中断して�
 | `stop` | running のときだけ graceful stop。**stopped のものは起動しない** | 元の container が stopped で残る（まだ legacy-only） | `container start <id>` |
 | `delete` | exact id の container を削除。volume は触らない | **container が存在しない唯一の窓**。volume と data は無傷 | `pre-mutation-*.json` の `plannedSpecs[]` から再作成する（下記） |
 | `volume-release` | 削除した container が listing から消え、どの container も当該 volume を掴んでいないことを polling で証明し、volume が今も存在することを確認する | read-only。位置は `delete` と同じ | 同上 |
-| `recreate` | **snapshot 時に確定した spec** から replacement を作る（**元が stopped なら stopped のまま作る**）。volume がまだ排他 attach されている旨の既知 error は、部分生成を片付けて release を取り直したうえで有限回だけ retry する | replacement が存在する（retry 中なら存在しない） | replacement を削除し `plannedSpecs[]` から作り直す |
+| `recreate` | **snapshot 時に確定した spec** から replacement を作る（**元が stopped なら stopped のまま作る**）。volume がまだ排他 attach されている旨の既知 error のときだけ、下記の fail-closed reconciliation を経て有限回 retry する | replacement が存在する（retry 中なら存在しない） | replacement を削除し `plannedSpecs[]` から作り直す |
 | `verify` | 元と replacement が label 以外すべて一致し、新旧両 namespace を持つことを証明する | drift 検出時は sweep 全体を停止し、以降の container に触れない | **自動修復しない。** running だった場合は replacement を **stop して隔離**し（削除はしない＝その構成の唯一の複製のため）、operator の判断事項として escalate する |
 
 `verify` が失敗した replacement を自動で作り直さないのは意図的である。「同一だと証明できない」状態は
@@ -262,9 +262,21 @@ Apple Container の container は**再利用可能な名前**で識別され、�
 それでも 1 呼び出しぶんの窓は消せない。volume の release 証明も「listing 上どの container も
 掴んでいない」ことの証明であって attach の予約ではなく、**Apple Container は VM が block device を
 手放し切る前に container record を消す**。そこで recreate は、排他 attach を示す既知の error
-（`VZ error code=2` 等）に限り、部分生成を片付け release を取り直したうえで**有限回**だけ retry する。
-それ以外の error は即座に失敗させる。**sweep 実行中に別の actor が同じ host の managed resource を
-触らないこと**は依然として前提である。
+（`VZ error code=2` 等）に限り**有限回**だけ retry する。それ以外の error は即座に失敗させる。
+
+**その reconciliation は fail-closed であり、決して delete しない。** Apple Container の名前には
+世代 id が無いので、busy の後にその名前で見つかった record が「自分の失敗した create の残骸」だとは
+**証明できない**——その隙に別の actor が同じ名前を取った可能性と区別が付かないからである。よって:
+
+1. **各 attempt の前に名前が空いていることを証明する。** 既に何か居るなら、自分が作ったと言えないので
+   その上に create しない。
+2. busy の後に record が居た場合、それが**捕捉済みの移行前観測と `VerifyMigrationEquivalence` 互換**
+   なら「create は結局成功していた」として**受理**する（作り直さない）。
+3. 互換でなければ**そこで停止し、その record には触れずに残す**。operator の判断事項である。
+4. retry するのは**名前が空いていて、かつ named volume がある**ときだけ。volume が無ければ排他 attach は
+   retry で解ける類の話ではない。retry の前に listing 由来の release を取り直す。
+
+**sweep 実行中に別の actor が同じ host の managed resource を触らないこと**は依然として前提である。
 
 ## P3 の entry gate
 

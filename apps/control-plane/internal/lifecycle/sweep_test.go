@@ -38,6 +38,10 @@ type fakeSweepRuntime struct {
 	// left the listing. It is deliberately separate from deleteLinger: the
 	// whole hazard is that listing disappearance is NOT detachment.
 	attachBusyRemaining int
+	// recordOnBusy is inserted under the target's name when a busy create is
+	// reported, modelling either this sweep's own debris or another actor
+	// taking the name — which Apple Container gives no way to distinguish.
+	recordOnBusy *ContainerActual
 	// imageDigest overrides what the tag currently resolves to; empty means it
 	// still resolves to the digest the fixture container was created from.
 	imageDigest    string
@@ -212,6 +216,14 @@ func (runtime *fakeSweepRuntime) materialize(
 	// though its record has left the listing.
 	if runtime.attachBusyRemaining > 0 {
 		runtime.attachBusyRemaining--
+		// A busy create can leave a record behind — or another actor can take
+		// the name in the same gap. The runtime cannot tell them apart.
+		if runtime.recordOnBusy != nil {
+			runtime.containers = append(
+				runtime.containers, *runtime.recordOnBusy,
+			)
+			runtime.recordOnBusy = nil
+		}
 		return "", fmt.Errorf(
 			"container run failed (status=1): Internal error: VZ error code=2: "+
 				"volume %q is already attached",
@@ -1006,6 +1018,114 @@ func TestSweepRetriesTheKnownExclusiveAttachTransient(t *testing.T) {
 	}
 	if retries != 2 {
 		t.Fatalf("retries were not recorded in the audit: %+v", report.Steps)
+	}
+}
+
+// Apple Container names carry no generation identifier, so a record answering
+// to the target's name after a busy create cannot be attributed to that create.
+// It must never be deleted, however plausibly it looks like this sweep's debris.
+func TestSweepNeverDeletesARecordItCannotAccountFor(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	runtime.attachBusyRemaining = 1
+	// Managed and owned — so an ownership-only check would happily delete it —
+	// but holding a different named volume, so it is not the replacement this
+	// sweep intended.
+	foreign := containerFixtureWithMounts(
+		t, "agentops-runner", "stopped",
+		dualLabels("runner", fixtureSpecDigest),
+		distinctVolume("somebody-elses-data"), "",
+	)
+	runtime.recordOnBusy = &foreign
+
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
+	if err == nil {
+		t.Fatal("an unaccountable record was silently reconciled")
+	}
+	// The original delete is expected; nothing else may be deleted.
+	if len(runtime.deleted) != 1 || runtime.deleted[0] != "agentops-runner" {
+		t.Fatalf("unexpected deletions: %v", runtime.deleted)
+	}
+	var stillThere bool
+	for _, container := range runtime.containers {
+		if container.ID == "agentops-runner" {
+			stillThere = true
+		}
+	}
+	if !stillThere {
+		t.Fatal("the unaccountable record was deleted")
+	}
+	if !strings.Contains(report.Halted, "left untouched") {
+		t.Fatalf("halt reason does not say it was left alone: %q", report.Halted)
+	}
+}
+
+// The other half of the same rule: a record indistinguishable from the intended
+// replacement is accepted rather than recreated, and still never deleted.
+func TestSweepAcceptsARecordMatchingTheIntendedReplacement(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	runtime.attachBusyRemaining = 1
+	landed := containerFixture(
+		t, "agentops-runner", "stopped",
+		dualLabels("runner", fixtureSpecDigest), "",
+	)
+	runtime.recordOnBusy = &landed
+
+	report, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background())
+	if err != nil {
+		t.Fatalf("a landed replacement was rejected: %v (%+v)", err, report.Steps)
+	}
+	if len(runtime.deleted) != 1 {
+		t.Fatalf("unexpected deletions: %v", runtime.deleted)
+	}
+	// The create that reported busy is the only one attempted.
+	if len(runtime.createdSpec) != 0 {
+		t.Fatalf("the replacement was created twice: %#v", runtime.createdSpec)
+	}
+	var accepted bool
+	for _, step := range report.Steps {
+		if step.Stage == StageRecreate &&
+			strings.Contains(step.Detail, "accepted without recreating") {
+			accepted = true
+		}
+	}
+	if !accepted {
+		t.Fatalf("the acceptance was not recorded: %+v", report.Steps)
+	}
+}
+
+// Retrying is only meaningful when a named volume could be holding the
+// attachment open. With none, the busy report is not ours to retry.
+func TestSweepDoesNotRetryABusyReportWithoutNamedVolumes(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixtureWithMounts(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest),
+		`[{"destination": "/tmp", "source": "tmpfs", "type": {"tmpfs": {}}}]`,
+		"",
+	))
+	if targets := BuildMigrationAudit("t", runtime.containers).
+		MigrationTargets(); len(targets) != 1 {
+		t.Fatalf("the volume-less fixture is not a migration target: %#v",
+			BuildMigrationAudit("t", runtime.containers).Totals)
+	}
+	runtime.attachBusyRemaining = 5
+	if _, err := testSweeper(runtime, "agentops-runner").
+		Apply(context.Background()); err == nil {
+		t.Fatal("a volume-less busy report was retried into success")
+	}
+	// Exactly one attempt was made: 5 - 4 remaining.
+	if runtime.attachBusyRemaining != 4 {
+		t.Fatalf(
+			"expected a single attempt, saw %d",
+			5-runtime.attachBusyRemaining,
+		)
 	}
 }
 
