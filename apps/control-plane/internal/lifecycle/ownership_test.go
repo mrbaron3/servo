@@ -281,10 +281,14 @@ func TestDeleteRefusesContainerWithoutOwnershipLabel(t *testing.T) {
 		}
 	}
 
+	// A real container always carries a role: containerArgs refuses a
+	// specification without one and then writes the label unconditionally. The
+	// fixture spells that out because the destructive gate now requires it.
 	owned := &fakeRuntimeRunner{results: []CommandResult{{
 		Status: 0,
 		Stdout: `[{"id":"agentops-runner","configuration":{"labels":` +
-			`{"` + CurrentManagedLabelKey + `":"v1"}},` +
+			`{"` + CurrentManagedLabelKey + `":"v1","` +
+			CurrentRoleLabelKey + `":"runner"}},` +
 			`"status":{"state":"stopped"}}]`,
 	}}}
 	if err := NewAppleRuntimeForTest(owned).Delete(
@@ -881,15 +885,24 @@ func TestDeleteNeverRemovesMalformedOrUnownedContainers(t *testing.T) {
 		deleted bool
 	}{
 		{
-			name:    "current-only",
-			labels:  `{"` + CurrentManagedLabelKey + `":"v1"}`,
+			name: "current-only",
+			labels: `{"` + CurrentManagedLabelKey + `":"v1","` +
+				CurrentRoleLabelKey + `":"runner"}`,
 			deleted: true,
 		},
 		{
 			name: "dual-equal",
 			labels: `{"` + legacyManagedLabelKey + `":"v1","` +
-				CurrentManagedLabelKey + `":"v1"}`,
+				CurrentManagedLabelKey + `":"v1","` +
+				CurrentRoleLabelKey + `":"runner"}`,
 			deleted: true,
+		},
+		// The marker alone is the shape of a managed volume or network, never of
+		// a container this binary created. Reaching delete through it would mean
+		// destroying a container whose labelling was interrupted.
+		{
+			name:   "current marker without a role",
+			labels: `{"` + CurrentManagedLabelKey + `":"v1"}`,
 		},
 		{name: "legacy-only", labels: `{"` + legacyManagedLabelKey + `":"v1"}`},
 		{
@@ -990,9 +1003,55 @@ func TestRequireManagedRefusesBlankSecondaryLabels(t *testing.T) {
 	}
 
 	// A resource with no secondary labels at all — every network and volume — is
-	// still managed once ownership is proven. Absent is not blank.
-	if err := RequireManaged("volume agentops-postgres-data", owned); err != nil {
+	// still OWNED once the marker is proven. Absent is not blank. That is
+	// RequireOwned's contract, and it is the gate volumes and networks actually
+	// pass through: no production caller hands one to RequireManaged.
+	if err := RequireOwned("volume agentops-postgres-data", owned); err != nil {
 		t.Fatalf("an owned volume was refused: %v", err)
+	}
+}
+
+// TestRequireManagedRefusesAContainerCarryingTheMarkerAlone pins the boundary
+// between the two gates. containerArgs refuses a specification without a role
+// and then writes the role label unconditionally, so a container carrying the
+// marker alone was interrupted mid-labelling or edited by hand. Treating it as
+// managed would let the destructive paths — delete, graceful stop, drain
+// refusal, runner removal — act on a resource whose labels are half-written,
+// which is the one reading this package exists to prevent.
+func TestRequireManagedRefusesAContainerCarryingTheMarkerAlone(t *testing.T) {
+	markerOnly := map[string]string{CurrentManagedLabelKey: "v1"}
+
+	// The classifier still owns it, and must: the same shape is every managed
+	// volume and network on the host.
+	if class := ClassifyOwnership(markerOnly); class != OwnershipOwned {
+		t.Fatalf("classified %q, want %q", class, OwnershipOwned)
+	}
+	if err := RequireOwned("volume agentops-postgres-data", markerOnly); err != nil {
+		t.Fatalf("a marker-only volume was refused ownership: %v", err)
+	}
+
+	err := RequireManaged("container agentops-runner", markerOnly)
+	if err == nil {
+		t.Fatal("a marker-only container passed the destructive gate")
+	}
+	if !errors.Is(err, ErrMalformedOwnershipLabels) {
+		t.Fatalf("a marker-only container was not reported as incomplete: %v", err)
+	}
+	if strings.Contains(err.Error(), "is not owned by agentopsctl") {
+		t.Fatalf("a half-labelled container was reported as unowned: %v", err)
+	}
+	if !strings.Contains(err.Error(), CurrentRoleLabelKey) {
+		t.Fatalf("the refusal does not name the missing role label: %v", err)
+	}
+
+	// A sealed digest is not what makes a container managed: an unsealed one the
+	// writer legitimately produced still passes.
+	unsealed := map[string]string{
+		CurrentManagedLabelKey: "v1",
+		CurrentRoleLabelKey:    "runner",
+	}
+	if err := RequireManaged("container agentops-runner", unsealed); err != nil {
+		t.Fatalf("an unsealed but fully-roled container was refused: %v", err)
 	}
 }
 

@@ -390,6 +390,66 @@ func TestBindToHostRefusesASymlinkedBackupIntermediate(t *testing.T) {
 
 // TestBindToHostRefusesATargetItCannotRestore proves the live document is
 // verified before the runtime is stopped rather than only inside the restore.
+// TestBindToHostRefusesPlanControlledOutputStrings pins the two fields a forged
+// plan could otherwise write straight to the operator's terminal. Document and
+// Backup are printed by RestoreOutcomes and embedded in every preflight error,
+// and unlike Path and BackupPath they were never reconstructed and compared.
+func TestBindToHostRefusesPlanControlledOutputStrings(t *testing.T) {
+	for name, corrupt := range map[string]func(*metadataFileApplication){
+		"document": func(file *metadataFileApplication) {
+			file.Document = "entity.json\x1b[2K\rrestored 32 resource(s) to " +
+				"their pre-migration labels"
+		},
+		"backup": func(file *metadataFileApplication) {
+			file.Backup = "../../elsewhere/entity.json"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := seedAppRoot(t)
+			backups := filepath.Join(t.TempDir(), "private-backups")
+			plan := bindablePlan(t, root, backups)
+			corrupt(plan.Applied[0].Files[0])
+			err := plan.BindToHost(&MetadataHost{
+				AppRoot: root, CLIVersion: "1.1.0",
+			})
+			if err == nil {
+				t.Fatalf("a plan-controlled %s string was bound to this host", name)
+			}
+			// Precise, so the test cannot pass because binding refused for some
+			// unrelated reason that happens to mention the same word.
+			if !strings.Contains(
+				err.Error(), "recorded "+name+" location",
+			) {
+				t.Fatalf("the refusal does not name the %s field: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestBindToHostRefusesAnUnrecognisedFileBeforeStopping proves the layout
+// refusal happens at bind time. It used to live only on the post-stop path, so
+// a `.DS_Store` — ordinary in ~/Library/Application Support once Finder has
+// opened the directory — cost the operator a full runtime stop/start cycle for
+// a rollback that was always going to refuse.
+func TestBindToHostRefusesAnUnrecognisedFileBeforeStopping(t *testing.T) {
+	root := seedAppRoot(t)
+	backups := filepath.Join(t.TempDir(), "private-backups")
+	plan := bindablePlan(t, root, backups)
+	stray := filepath.Join(
+		filepath.Dir(plan.Applied[0].Files[0].Path), ".DS_Store",
+	)
+	if err := os.WriteFile(stray, []byte("finder"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := plan.BindToHost(&MetadataHost{AppRoot: root, CLIVersion: "1.1.0"})
+	if err == nil {
+		t.Fatal("an unrecognised file did not refuse the plan before the stop")
+	}
+	if !strings.Contains(err.Error(), ".DS_Store") {
+		t.Fatalf("the refusal does not name the unrecognised file: %v", err)
+	}
+}
+
 func TestBindToHostRefusesATargetItCannotRestore(t *testing.T) {
 	root := seedAppRoot(t)
 	backups := filepath.Join(t.TempDir(), "private-backups")

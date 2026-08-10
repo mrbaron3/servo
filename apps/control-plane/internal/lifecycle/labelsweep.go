@@ -335,6 +335,53 @@ type pendingCreatedDocument struct {
 
 // planDocumentsCreatedSince verifies, without writing anything, every known
 // document that did not exist when the migration ran.
+// requireRecognisedLayout refuses a resource directory holding a file this
+// migration does not know. An unrecognised file means this code's model of the
+// on-disk layout is out of date, and acting on a stale model is how a recovery
+// misses a copy of the labels. Phase 3A enforced this while resolving an
+// operator-named target; that resolution went with the forward stages.
+//
+// It is deliberately separate from the created-since scan that follows it so
+// BindToHost can run it BEFORE StopSystem. The scan itself cannot move: it
+// compares document bytes and labels, and the runtime re-serialises entity.json
+// across a stop, so only the post-stop answer governs the write. Recognising
+// the directory's contents needs none of that — it is a listing and a name
+// comparison — and a `.DS_Store` left by Finder in `~/Library/Application
+// Support/...` is enough to refuse a rollback. Discovering that only after the
+// stop costs the operator their whole container runtime for a command that was
+// always going to say no.
+func requireRecognisedLayout(
+	kind MetadataResourceKind,
+	id, directory string,
+) error {
+	if directory == "" {
+		return nil
+	}
+	layout, err := layoutFor(kind)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", directory, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if _, known := layout.companions[name]; known {
+			continue
+		}
+		if _, known := layout.documents[name]; known {
+			continue
+		}
+		return fmt.Errorf(
+			"%s %s: %q is a file this migration does not recognise; recovery "+
+				"will not run against a layout it does not know",
+			kind, id, name,
+		)
+	}
+	return nil
+}
+
 func planDocumentsCreatedSince(
 	application *MetadataApplication,
 ) ([]pendingCreatedDocument, error) {
@@ -349,28 +396,10 @@ func planDocumentsCreatedSince(
 	for _, file := range application.Files {
 		recorded[filepath.Base(file.Path)] = struct{}{}
 	}
-	// An unrecognised file means this code's model of the on-disk layout is out
-	// of date, and acting on a stale model is how a recovery misses a copy of the
-	// labels. Phase 3A enforced this while resolving an operator-named target;
-	// that resolution went with the forward stages, so the refusal lives here now
-	// — on the one path that still decides which documents a resource has.
-	entries, err := os.ReadDir(application.Directory)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", application.Directory, err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if _, known := layout.companions[name]; known {
-			continue
-		}
-		if _, known := layout.documents[name]; known {
-			continue
-		}
-		return nil, fmt.Errorf(
-			"%s %s: %q is a file this migration does not recognise; recovery "+
-				"will not run against a layout it does not know",
-			application.Kind, application.ID, name,
-		)
+	if err := requireRecognisedLayout(
+		application.Kind, application.ID, application.Directory,
+	); err != nil {
+		return nil, err
 	}
 	names := make([]string, 0, len(layout.documents))
 	for name := range layout.documents {

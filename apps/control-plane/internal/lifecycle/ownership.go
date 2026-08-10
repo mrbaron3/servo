@@ -214,15 +214,23 @@ func RequireOwned(subject string, labels map[string]string) error {
 }
 
 // RequireManaged is the gate for stopping, signalling, or deleting a container.
-// It proves ownership, which since Phase 3B also proves that no ownership label
-// is half-written: ClassifyOwnership treats a blank role or specification label
-// as malformed whatever the marker says, so a destructive path cannot be reached
-// by a resource whose labels are incomplete.
+// Every caller resolves its subject through AppleRuntime.Container first, so
+// "managed" here means specifically a managed CONTAINER: volumes and networks
+// prove ownership with RequireOwned, which is the weaker gate they need.
 //
-// The per-label loop below is therefore redundant with the classifier and is
-// kept deliberately: it names WHICH label is at fault, and a caller reading
+// The distinction is the point. containerArgs refuses a container specification
+// without a role and then writes the role label unconditionally, so a container
+// carrying the marker alone is not a shape this binary can produce — it is one
+// whose labelling was interrupted, or one a metadata edit left half-written.
+// Volumes and networks legitimately carry the marker alone, which is why
+// ClassifyOwnership cannot demand a role and this gate has to.
+//
+// The per-label loop below is redundant with the classifier and is kept
+// deliberately: it names WHICH label is at fault, and a caller reading
 // "ownership labels are incomplete" on a container with a valid marker has no
-// other way to find out.
+// other way to find out. It also supplies the human-readable kind — the
+// specification digest's key spells "spec-sha256" and says nothing about a
+// digest on its own.
 func RequireManaged(subject string, labels map[string]string) error {
 	for _, label := range []struct{ kind, key string }{
 		{"role", CurrentRoleLabelKey},
@@ -236,7 +244,23 @@ func RequireManaged(subject string, labels map[string]string) error {
 			)
 		}
 	}
-	return RequireOwned(subject, labels)
+	if err := RequireOwned(subject, labels); err != nil {
+		return err
+	}
+	// Ownership is proven, so the role is now either readable or absent: a blank
+	// one was refused above and again by the classifier. Absent is the case that
+	// has to stop here rather than in ClassifyOwnership, because refusing it
+	// there would refuse every managed volume and network too.
+	//
+	// The specification digest stays optional on purpose: containerArgs omits it
+	// for a container that was never sealed, so demanding it would refuse a
+	// container this binary legitimately created.
+	if _, presence := ReadRoleLabel(labels); !presence.Readable() {
+		return malformedLabelError(
+			subject, "role", CurrentRoleLabelKey+" is absent",
+		)
+	}
+	return nil
 }
 
 // RequireRole returns nil when the resource carries the wanted runtime role.

@@ -356,6 +356,18 @@ func (plan *RollbackPlan) BindToHost(host *MetadataHost) error {
 		if err := requireNoSymlinkInPath(directory, host.AppRoot); err != nil {
 			return err
 		}
+		// Run the layout-recognition refusal here, before StopSystem, as well as
+		// inside the restore. Only the pre-stop run has to be able to say no; the
+		// post-stop one governs the write. Without this, an unrecognised file in
+		// a resource directory — a `.DS_Store` is enough — refuses the rollback
+		// only after the operator's entire container runtime has been taken down
+		// and brought back, which is exactly what this function's contract says
+		// must not happen.
+		if err := requireRecognisedLayout(
+			application.Kind, identity, directory,
+		); err != nil {
+			return err
+		}
 		seenDocuments := make(map[string]struct{}, len(application.Files))
 		for _, file := range application.Files {
 			name := filepath.Base(file.Path)
@@ -404,6 +416,31 @@ func (plan *RollbackPlan) BindToHost(host *MetadataHost) error {
 				file.BackupPath, backupRoot,
 			); err != nil {
 				return err
+			}
+			// Document and Backup are the only plan-controlled strings that reach
+			// operator output: RestoreOutcomes prints them and every preflight
+			// error embeds them. Everything else printed from a plan is either
+			// reconstructed here or, like Stage and ClassBefore/ClassAfter,
+			// deliberately never printed at all. Left unchecked they are a free
+			// text channel out of a forged plan into the terminal of the one
+			// command still permitted to rewrite runtime metadata — enough for
+			// control characters that corrupt the aligned outcome table, or for a
+			// fabricated "restored N resource(s)" line. Both are reconstructible
+			// from values this binding already derived, so checking them costs two
+			// comparisons.
+			if file.Document != filepath.Join(layout.directory, identity, name) {
+				return fmt.Errorf(
+					"%s: the plan's recorded document location for %s does not "+
+						"match where this host keeps it", resource, name,
+				)
+			}
+			if file.Backup != filepath.Join(
+				string(application.Kind), identity, name,
+			) {
+				return fmt.Errorf(
+					"%s: the plan's recorded backup location for %s does not "+
+						"match where its backup root keeps it", resource, name,
+				)
 			}
 			if err := verifyRecordedBackup(resource, name, file); err != nil {
 				return err

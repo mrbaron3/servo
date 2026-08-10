@@ -165,8 +165,21 @@ P3B の binary は `com.mrbaron3.servo.*` しか読まないので、旧 label �
 ### 手順
 
 ```sh
-# 1. managed container を全て停止する（rollback は runtime を止めて metadata を書く）。
-agentopsctl drain && agentopsctl stop
+# 1. lease を quiesce したうえで、plan が名指しする container を「削除せずに」停止する。
+#
+#    **`agentopsctl stop` を使ってはならない。** stop は runner / triage /
+#    github-broker / control を gracefulStop の後に delete する。その 4 本は retire
+#    plan が復元対象として記録している container そのものであり、削除すると復元すべき
+#    metadata document ごと消える。document が消えると preflightRestore は ENOENT で
+#    撥ね、BindToHost は最初の失敗で plan 全体を拒否するため、まだ健全な volume 20 本と
+#    network 7 本まで巻き添えで復元不能になる。意図して受け入れた one-way boundary が
+#    no-way boundary に変わる。
+#
+#    stop 後に `agentopsctl start` で作り直しても復旧しない。同じ path に別 bytes の
+#    container が座るため、今度は digest 不一致で撥ねられる。
+agentopsctl drain
+container stop agentops-runner agentops-triage agentops-github-broker \
+  agentops-control agentops-postgres
 
 # 2. 保全済み plan を渡す。runtime の停止・再起動は command 側が面倒を見る。
 agentopsctl migrate-label-metadata --rollback <backup-root>/retire-<stamp>/rollback-plan.json
@@ -179,6 +192,17 @@ agentopsctl migrate-label-metadata --rollback <backup-root>/retire-<stamp>/rollb
 rollback は**冪等**である。中断したら同じ plan で再実行してよい。P3A 実行後に生まれた
 document（container を start すると runtime が作る `config.json`）も、sweep が書いた label と
 完全一致することを確認したうえで面倒を見る（`reconciled` に記録される）。
+
+ただし**中断後の再実行では手順 1 の `agentopsctl drain` も使えなくなる**。既に戻された
+resource は pre-P3A label を持つので、この binary からは `missing-label` に見える。
+gracefulStop は `RequireManaged` を通すため、それらの container を触ろうとする
+`agentopsctl` の経路は軒並み拒否する。再実行時は上記の生 `container stop` だけで
+not-running gate を満たすこと。
+
+rollback が plan の途中で失敗した場合、host は**部分的に戻った状態**になる（reverse 順に
+処理するため、失敗した application より後ろは既に復元済み）。どこまで戻ったかは
+コマンドが出力する per-document の outcome 表に出る。同じ plan の再実行が正規の復旧手段
+である（`RestoreAlreadyBefore` で冪等）。
 
 ### 移行期の rollback（歴史的記録）
 

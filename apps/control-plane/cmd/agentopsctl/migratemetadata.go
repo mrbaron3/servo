@@ -267,23 +267,43 @@ func runMetadataRollback(
 	if stoppedErr := runtime.RequireServicesStopped(ctx); stoppedErr != nil {
 		return stoppedErr
 	}
-	if rollbackErr := lifecycle.RollbackMetadataSweep(plan); rollbackErr != nil {
-		return rollbackErr
-	}
-	for _, application := range plan.Applied {
-		for _, file := range application.RestoreOutcomes() {
-			fmt.Printf("  %-10s %-46s %s\n", application.Kind, application.ID, file)
+	printRestoreOutcomes := func() {
+		for _, application := range plan.Applied {
+			for _, file := range application.RestoreOutcomes() {
+				fmt.Printf("  %-10s %-46s %s\n", application.Kind, application.ID, file)
+			}
 		}
 	}
+	if rollbackErr := lifecycle.RollbackMetadataSweep(plan); rollbackErr != nil {
+		// The rollback unwinds within one resource but not across them: it stops
+		// at the first failing application and leaves every higher-indexed one it
+		// already restored reverted. These outcomes are the only record of which
+		// half of the host is in which state. They cannot be recomputed after the
+		// process exits — a reverted resource carries pre-Phase-3A labels, so this
+		// binary cannot see it, and `agentopsctl status` cannot tell the two apart
+		// by design. Printing them only on success threw that record away in the
+		// one case an operator needs it.
+		printRestoreOutcomes()
+		fmt.Fprintf(
+			os.Stderr,
+			"NOTE: the host is partially reverted. The outcomes above name every "+
+				"document that landed; the rest still carry their post-migration "+
+				"labels. Re-running this same plan is the supported recovery and "+
+				"is idempotent.\n",
+		)
+		return rollbackErr
+	}
+	// Restarted and proved BEFORE any success output, so a rollback that could
+	// not bring the runtime back does not print a success summary. The outcome
+	// table is part of that summary: it reads as "this all worked".
+	if restartErr := restart(); restartErr != nil {
+		return restartErr
+	}
+	printRestoreOutcomes()
 	fmt.Printf(
 		"restored %d resource(s) to their pre-migration labels\n",
 		len(plan.Applied),
 	)
-	// Restarted and proved here rather than left to the defer, so a rollback
-	// that could not bring the runtime back does not print a success summary.
-	if restartErr := restart(); restartErr != nil {
-		return restartErr
-	}
 	// The restored labels may be in the namespace this binary no longer reads,
 	// in which case it can no longer see the resources it just restored. Saying
 	// so here is the difference between a deliberate one-way boundary and an

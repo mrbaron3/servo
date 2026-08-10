@@ -428,12 +428,21 @@ func (runtime *AppleRuntime) ImageDigest(
 	return digest, nil
 }
 
-// ImageConfiguration is the part of an image's own configuration the label
-// migration has to reason about. Apple Container reports a container's
-// *effective* process, environment, and working directory without saying which
-// parts came from the image and which were supplied at creation. Reading the
-// image's own declarations is what lets the migration tell those apart before
-// it deletes anything, rather than discovering the difference afterwards.
+// ImageConfiguration is the part of an image's own configuration the retired
+// Phase 2 label migration had to reason about. Apple Container reports a
+// container's *effective* process, environment, and working directory without
+// saying which parts came from the image and which were supplied at creation.
+// Reading the image's own declarations is what let that sweep tell them apart
+// before it deleted anything.
+//
+// Nothing deletes now, and no production code calls this: the sweep is retired
+// and the remaining migration edits metadata in place. It is kept because it is
+// the only reader of the image's declared configuration and is covered by
+// TestImageEnvironmentParsesTheRealInspectShape and
+// TestImageEnvironmentRefusesDisagreeingVariants, not because a caller depends
+// on it. A
+// future phase that needs image-versus-effective drift should use it; anything
+// else should leave it alone.
 type ImageConfiguration struct {
 	Environment []string
 	Entrypoint  []string
@@ -584,7 +593,12 @@ type ContainerSpec struct {
 	Remove      bool
 	// WorkingDir, CPUs, and MemoryMiB exist so the Phase 2 label migration can
 	// restate what it observed instead of hoping the runtime defaults the same
-	// way twice. They are left zero by the topology's own specifications, which
+	// way twice. That sweep is retired, so nothing sets them today; they are
+	// kept because the merged Phase 2 evidence under evidence/label-p2/ still
+	// decodes through these types and TestMergedPhase2EvidenceStillDecodes pins
+	// that. Do not read this as a live caller — there is none.
+	//
+	// They are left zero by the topology's own specifications, which
 	// deliberately take the image's working directory and the runtime's
 	// resource defaults.
 	WorkingDir string
@@ -631,16 +645,14 @@ func (runtime *AppleRuntime) RunContainer(
 	return runtime.materializeContainer(ctx, "run", spec)
 }
 
-// CreateContainer materializes a container without starting it. The Phase 2
-// label migration uses this so a container an operator deliberately left
-// stopped is replaced in the same stopped state: relabelling is not a reason to
-// start a topology, and starting one would begin real work.
-func (runtime *AppleRuntime) CreateContainer(
-	ctx context.Context,
-	spec ContainerSpec,
-) (string, error) {
-	return runtime.materializeContainer(ctx, "create", spec)
-}
+// CreateContainer is deliberately absent. It materialized a container without
+// starting it, for the Phase 2 sweep's replace-a-stopped-container-in-place
+// step; with that sweep retired it had no caller and no test. Together with
+// DeleteExisting it was the delete-and-recreate pair Issue #123 withdrew, and
+// sweep.go states why an unreachable half of it must not be left behind:
+// destructive code no caller can reach is code no test can honestly exercise.
+// Recreate it from materializeContainer if a future phase needs it, and give it
+// a caller in the same change.
 
 func (runtime *AppleRuntime) materializeContainer(
 	ctx context.Context,

@@ -140,7 +140,8 @@ func TestRollbackNeverStopsTheRuntimeWhenThePlanDoesNotBind(t *testing.T) {
 	// A plan that parses and is internally consistent, but names a document
 	// under an application root this host does not have.
 	plan := `{"stage":"retire","applied":[{"kind":"volume","id":"vol-a",` +
-		`"files":[{"document":"volumes/vol-a/entity.json","labelPath":["labels"]}]}],` +
+		`"files":[{"document":"volumes/vol-a/entity.json",` +
+		`"backup":"volume/vol-a/entity.json","labelPath":["labels"]}]}],` +
 		`"locations":[[{"path":"/nowhere/volumes/vol-a/entity.json",` +
 		`"backupPath":"/nowhere/backups/volume/vol-a/entity.json"}]],` +
 		`"labels":[{"before":{"a":"b"},"after":{"c":"d"}}]}`
@@ -229,7 +230,13 @@ func rollbackFixture(t *testing.T) (planPath, appRoot string) {
 		"applied": []map[string]any{{
 			"kind": "volume", "id": "vol-a",
 			"files": []map[string]any{{
-				"document":     "volumes/vol-a/entity.json",
+				"document": "volumes/vol-a/entity.json",
+				// Rendered relative to the backup root, exactly as a real retained
+				// plan spells it (`<kind>/<id>/<name>`, singular kind). BindToHost
+				// reconstructs and compares both of these rather than trusting the
+				// plan, because they are the only plan-controlled strings that
+				// reach operator output.
+				"backup":       "volume/vol-a/entity.json",
 				"labelPath":    []string{"labels"},
 				"beforeSha256": sum(before),
 				"afterSha256":  sum(after),

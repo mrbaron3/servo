@@ -362,8 +362,12 @@ func TestReplaceControlPostDeleteFailureReturnsMutationReceipt(t *testing.T) {
 	postgres := `[{"id":"agentops-postgres","configuration":{"labels":` +
 		`{"com.mrbaron3.servo.agentopsctl":"v1"}},"status":{"state":"running",` +
 		`"networks":[{"network":"agentops-internal","ipv4Address":"192.0.2.10/24"}]}}]`
+	// The role label is not decoration here: the destructive gate requires it,
+	// because a container carrying the ownership marker alone is one this binary
+	// never wrote.
 	stoppedControl := `[{"id":"agentops-control","configuration":{"labels":` +
-		`{"com.mrbaron3.servo.agentopsctl":"v1"}},"status":{"state":"stopped"}}]`
+		`{"com.mrbaron3.servo.agentopsctl":"v1",` +
+		`"com.mrbaron3.servo.role":"control"}},"status":{"state":"stopped"}}]`
 	fake := &managerRuntimeRunner{results: []lifecycle.CommandResult{
 		{Status: 0, Stdout: postgres},
 		{Status: 0, Stdout: `{"configuration":{"descriptor":{"digest":"sha256:` +
