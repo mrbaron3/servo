@@ -596,6 +596,13 @@ func (manager *manager) Drain(
 	// Keep the existing control process and its current internal address alive.
 	// PostgreSQL fences routing/enqueue/lease after the DRAINING commit, while
 	// the stable CONNECT proxy lets the current attempt reach a natural stop.
+	// Drain reaches a worker by configured name, so ownership has to be proven
+	// here too: signalling a foreign or partially migrated container would stop
+	// somebody else's process, or half-migrate our own while its named volume is
+	// still exclusively attached. Refusing one worker must not leave a second,
+	// provably owned one running — DRAINING is already committed, and returning
+	// early would make that worker unstoppable through agentopsctl.
+	var refused []error
 	for _, name := range []string{
 		manager.config.TriageContainer,
 		manager.config.RunnerContainer,
@@ -604,11 +611,22 @@ func (manager *manager) Drain(
 		if err != nil {
 			return err
 		}
-		if worker != nil && worker.Status.State == "running" {
-			if err := manager.runtime.SignalTerm(ctx, name); err != nil {
-				return err
-			}
+		if worker == nil || worker.Status.State != "running" {
+			continue
 		}
+		if err := lifecycle.RequireManaged(
+			"container "+name,
+			worker.Configuration.Labels,
+		); err != nil {
+			refused = append(refused, err)
+			continue
+		}
+		if err := manager.runtime.SignalTerm(ctx, name); err != nil {
+			return err
+		}
+	}
+	if len(refused) != 0 {
+		return errors.Join(refused...)
 	}
 	if err := manager.reconcileExpiredRunnerWork(ctx); err != nil {
 		return err
@@ -1290,10 +1308,11 @@ func (manager *manager) Open(ctx context.Context) error {
 		ctx,
 		manager.config.ControlContainer,
 	)
-	if err != nil || !managedDashboardControl(control, manager.config) {
-		return fmt.Errorf(
-			"managed Control API is not running on the expected loopback publication",
-		)
+	if err != nil {
+		return err
+	}
+	if err := managedDashboardControl(control, manager.config); err != nil {
+		return err
 	}
 	if !manager.dashboardReachable(
 		"127.0.0.1",
@@ -1323,16 +1342,39 @@ func (manager *manager) Open(ctx context.Context) error {
 	return nil
 }
 
+// managedDashboardControl reports why the running Control API cannot be opened.
+// It returns the ownership failure rather than a bare bool: a partially
+// migrated control container is reachable and healthy, and reporting it as "not
+// running" sends the operator looking for a crash instead of at the labels.
 func managedDashboardControl(
 	actual *lifecycle.ContainerActual,
 	config config,
-) bool {
-	return actual != nil &&
-		actual.ID == config.ControlContainer &&
-		actual.Status.State == "running" &&
-		actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] == "v1" &&
-		actual.Configuration.Labels["com.mrbaron3.workflow.role"] == "control" &&
-		exactLoopbackPublication(actual, config.ControlHostPort)
+) error {
+	notRunning := fmt.Errorf(
+		"managed Control API is not running on the expected loopback publication",
+	)
+	if actual == nil ||
+		actual.ID != config.ControlContainer ||
+		actual.Status.State != "running" {
+		return notRunning
+	}
+	if err := lifecycle.RequireOwned(
+		"container "+config.ControlContainer,
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
+	}
+	if err := lifecycle.RequireRole(
+		"container "+config.ControlContainer,
+		"control",
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
+	}
+	if !exactLoopbackPublication(actual, config.ControlHostPort) {
+		return notRunning
+	}
+	return nil
 }
 
 func latestDashboardBootstrapURL(logOutput string, port int) (string, error) {
@@ -1437,8 +1479,11 @@ func (manager *manager) ensurePostgres(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if actual != nil {
-		if actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] != "v1" {
-			return false, fmt.Errorf("postgres container name is owned by another deployment")
+		if err := lifecycle.RequireOwned(
+			"container "+manager.config.PostgresContainer,
+			actual.Configuration.Labels,
+		); err != nil {
+			return false, err
 		}
 		if err := validatePostgresMajorBoundary(actual); err != nil {
 			return false, err
@@ -1448,6 +1493,13 @@ func (manager *manager) ensurePostgres(ctx context.Context) (bool, error) {
 				return false, err
 			}
 			if err := validateSpecActual(actual, spec); err != nil {
+				// Drift is resolved by draining, stopping, and restarting onto
+				// the preserved volume. A partial label migration is resolved by
+				// fixing the labels — following the drift remediation would
+				// delete and recreate a container that is not drifting at all.
+				if errors.Is(err, lifecycle.ErrConflictingLabels) {
+					return false, err
+				}
 				return false, fmt.Errorf(
 					"PostgreSQL image/spec drift requires DRAINING, stop, and volume-preserving restart: %w",
 					err,
@@ -2391,10 +2443,11 @@ func (manager *manager) removeRunner(
 	if actual == nil {
 		return mutationReceipt{}, nil
 	}
-	if actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] != "v1" {
-		return mutationReceipt{}, fmt.Errorf(
-			"runner container name is owned by another deployment",
-		)
+	if err := lifecycle.RequireManaged(
+		"container "+manager.config.RunnerContainer,
+		actual.Configuration.Labels,
+	); err != nil {
+		return mutationReceipt{}, err
 	}
 	receipt := mutationReceipt{Mutated: true}
 	if err := manager.gracefulStop(
@@ -2638,8 +2691,11 @@ func (manager *manager) gracefulStop(
 	if err != nil || actual == nil || actual.Status.State != "running" {
 		return err
 	}
-	if actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] != "v1" {
-		return fmt.Errorf("container %s is not owned by agentopsctl", name)
+	if err := lifecycle.RequireManaged(
+		"container "+name,
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
 	}
 	if err := manager.runtime.SignalTerm(ctx, name); err != nil {
 		return err
@@ -3083,9 +3139,12 @@ func validateSpecActual(
 	if expected.SpecDigest != expectedDigest {
 		return fmt.Errorf("%s desired specification digest is inconsistent", expected.Name)
 	}
-	if actual.Configuration.Labels["com.mrbaron3.workflow.spec-sha256"] !=
-		expected.SpecDigest {
-		return fmt.Errorf("%s immutable image or runtime specification drifted", expected.Name)
+	if err := lifecycle.RequireSpecDigest(
+		expected.Name,
+		expected.SpecDigest,
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
 	}
 	actualEnvironment := make(map[string]string)
 	for _, entry := range actual.Configuration.InitProcess.Environment {
@@ -3365,10 +3424,15 @@ func validateManagedActual(
 	if actual == nil || actual.Status.State != "running" {
 		return fmt.Errorf("%s container is not running", name)
 	}
-	if actual.ID != name ||
-		actual.Configuration.Labels["com.mrbaron3.workflow.agentopsctl"] != "v1" ||
-		actual.Configuration.Labels["com.mrbaron3.workflow.role"] != role {
+	if actual.ID != name {
 		return fmt.Errorf("%s ownership or role label does not match", name)
+	}
+	subject := "container " + name
+	if err := lifecycle.RequireOwned(subject, actual.Configuration.Labels); err != nil {
+		return err
+	}
+	if err := lifecycle.RequireRole(subject, role, actual.Configuration.Labels); err != nil {
+		return err
 	}
 	if !imageReferenceMatches(actual.Configuration.Image.Reference, image) {
 		return fmt.Errorf("%s image does not match %s", name, image)

@@ -19,13 +19,6 @@ import (
 	"time"
 )
 
-const (
-	managedLabelKey   = "com.mrbaron3.workflow.agentopsctl"
-	managedLabelValue = "v1"
-	roleLabelKey      = "com.mrbaron3.workflow.role"
-	specLabelKey      = "com.mrbaron3.workflow.spec-sha256"
-)
-
 var resourceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var credentialEnvironmentKeyPattern = regexp.MustCompile(
 	`(?:^|_)(?:TOKEN|PASSWORD|SECRET|DATABASE_URL|API_KEY|CAPABILITY)$`,
@@ -283,8 +276,11 @@ func (runtime *AppleRuntime) EnsureNetwork(
 		if resourceName != name {
 			continue
 		}
-		if resource.Configuration.Labels[managedLabelKey] != managedLabelValue {
-			return fmt.Errorf("network %s exists but is not owned by agentopsctl", name)
+		if err := RequireOwned(
+			"network "+name,
+			resource.Configuration.Labels,
+		); err != nil {
+			return err
 		}
 		if resource.Configuration.Mode != "" &&
 			resource.Configuration.Mode != "host" &&
@@ -297,12 +293,9 @@ func (runtime *AppleRuntime) EnsureNetwork(
 		}
 		return nil
 	}
-	return runtime.command(ctx, []string{
-		"network", "create",
-		"--internal",
-		"--label", managedLabelKey + "=" + managedLabelValue,
-		name,
-	}, nil)
+	args := []string{"network", "create", "--internal"}
+	args = append(args, managedOwnershipLabelArgs()...)
+	return runtime.command(ctx, append(args, name), nil)
 }
 
 func (runtime *AppleRuntime) EnsureVolume(ctx context.Context, name string) error {
@@ -325,16 +318,11 @@ func (runtime *AppleRuntime) EnsureVolume(ctx context.Context, name string) erro
 		if resourceName != name {
 			continue
 		}
-		if resource.Configuration.Labels[managedLabelKey] != managedLabelValue {
-			return fmt.Errorf("volume %s exists but is not owned by agentopsctl", name)
-		}
-		return nil
+		return RequireOwned("volume "+name, resource.Configuration.Labels)
 	}
-	return runtime.command(ctx, []string{
-		"volume", "create",
-		"--label", managedLabelKey + "=" + managedLabelValue,
-		name,
-	}, nil)
+	args := []string{"volume", "create"}
+	args = append(args, managedOwnershipLabelArgs()...)
+	return runtime.command(ctx, append(args, name), nil)
 }
 
 func (runtime *AppleRuntime) ImageExists(ctx context.Context, image string) bool {
@@ -507,16 +495,22 @@ func buildContainerArgs(spec ContainerSpec) ([]string, []string, error) {
 	if spec.Remove {
 		args = append(args, "--rm")
 	}
-	args = append(args,
-		"--name", spec.Name,
-		"--label", managedLabelKey+"="+managedLabelValue,
-		"--label", roleLabelKey+"="+spec.Role,
-	)
+	args = append(args, "--name", spec.Name)
+	args = append(args, managedOwnershipLabelArgs()...)
+	args = append(args, dualLabelArgs(
+		LegacyRoleLabelKey,
+		CurrentRoleLabelKey,
+		spec.Role,
+	)...)
 	if spec.SpecDigest != "" {
 		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(spec.SpecDigest) {
 			return nil, nil, fmt.Errorf("invalid container specification digest")
 		}
-		args = append(args, "--label", specLabelKey+"="+spec.SpecDigest)
+		args = append(args, dualLabelArgs(
+			LegacySpecLabelKey,
+			CurrentSpecLabelKey,
+			spec.SpecDigest,
+		)...)
 	}
 	for _, network := range spec.Networks {
 		if err := validateResourceName(network); err != nil {
@@ -629,8 +623,11 @@ func (runtime *AppleRuntime) Delete(ctx context.Context, name string) error {
 	if err != nil || actual == nil {
 		return err
 	}
-	if actual.Configuration.Labels[managedLabelKey] != managedLabelValue {
-		return fmt.Errorf("container %s is not owned by agentopsctl", name)
+	if err := RequireManaged(
+		"container "+name,
+		actual.Configuration.Labels,
+	); err != nil {
+		return err
 	}
 	return runtime.command(ctx, []string{"delete", name}, nil)
 }

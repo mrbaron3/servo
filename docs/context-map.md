@@ -38,7 +38,7 @@ topology orchestrationを保つため、当面の release unit は repository �
 | 製品、repository、人間向け文書 | **Servo** / `mrbaron3/servo` | `workflow` / `AgentOps`を製品名として新規使用しない |
 | 実行系component、CLI、環境変数 | `agentops` / `agentopsctl` / `AGENTOPS_*` | technical prefixとして維持し、製品名と同一視しない |
 | application root | `apps/control-plane/` / `apps/agentops/` | ADR-0021以前の旧pathは歴史記録に限る |
-| container label | 現行authorityは`com.mrbaron3.workflow.*` | `com.mrbaron3.servo.*`移行は新旧併記→旧掃討→新のみの独立3段階issue。片側変更禁止 |
+| container label | 新規resourceは`com.mrbaron3.workflow.*`と`com.mrbaron3.servo.*`をdual-write、readerは両方を認識（[#123](https://github.com/mrbaron3/servo/issues/123) Phase 1済） | 旧掃討（Phase 2）→新のみ（Phase 3）は別PR。片側変更禁止、新旧の値が食い違うresourceはunowned扱いせずfail-closed。運用は[runbook](runbooks/container-label-migration.md) |
 | schema `$id` | `https://github.com/mrbaron3/servo/contracts/**` | repository内consumerを照合して旧`workflow`識別子をretire済み。schemaの値域・versionとは別のidentity変更 |
 
 判断根拠は[ADR-0022](decisions/ADR-0022-servo-product-and-agentops-component-naming.md)。
