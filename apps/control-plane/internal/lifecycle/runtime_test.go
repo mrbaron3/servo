@@ -142,6 +142,48 @@ func TestImageDigestParsesImmutableDescriptor(t *testing.T) {
 	}
 }
 
+// The environment subtraction is only as good as this parser, and it returns an
+// empty set on any shape it does not recognize — which would silently disable
+// the subtraction rather than fail. The payload here is the shape Apple
+// Container 1.1.0 actually emits.
+func TestImageEnvironmentParsesTheRealInspectShape(t *testing.T) {
+	fake := &fakeRuntimeRunner{results: []CommandResult{{
+		Status: 0,
+		Stdout: `[{"id":"agentops-control:dev","variants":[{"config":{"config":{
+			"Env":["PATH=/usr/local/bin:/usr/bin","HOME=/home/nonroot",
+			"AGENTOPS_APP_ROOT=/app"]}}}]}]`,
+	}}}
+	runtime := NewAppleRuntimeForTest(fake)
+	environment, err := runtime.ImageEnvironment(
+		context.Background(), "agentops-control:dev",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(environment) != 3 ||
+		environment[0] != "PATH=/usr/local/bin:/usr/bin" ||
+		environment[2] != "AGENTOPS_APP_ROOT=/app" {
+		t.Fatalf("image environment = %#v", environment)
+	}
+}
+
+// Guessing between variants that declare different environments would silently
+// change the replacement's environment.
+func TestImageEnvironmentRefusesDisagreeingVariants(t *testing.T) {
+	fake := &fakeRuntimeRunner{results: []CommandResult{{
+		Status: 0,
+		Stdout: `[{"variants":[
+			{"config":{"config":{"Env":["PATH=/a"]}}},
+			{"config":{"config":{"Env":["PATH=/b"]}}}]}]`,
+	}}}
+	runtime := NewAppleRuntimeForTest(fake)
+	if _, err := runtime.ImageEnvironment(
+		context.Background(), "agentops-control:dev",
+	); err == nil {
+		t.Fatal("disagreeing variants were silently reconciled")
+	}
+}
+
 func TestBuildControlArgsAreExactLoopbackAndSecretsRedact(t *testing.T) {
 	spec := ContainerSpec{
 		Name: "agentops-control", Role: "control", Image: "control:test",

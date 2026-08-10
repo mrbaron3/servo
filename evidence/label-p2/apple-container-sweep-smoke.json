@@ -168,8 +168,13 @@
       }
     }
   },
+  "knownEvidenceLimitations": [
+    "The retained pre-mutation and sweep files were produced by the implementation as it stood before review rounds 1 and 2, so they contain no plannedSpecs[] and no migrated[]. The rollback the runbook documents was therefore NOT performable from the artifacts of the migration that actually ran; it is proven by the headless tests and by the grounded suite against the hardened code, not by those historical files. They are retained unedited because they are the true record of what happened.",
+    "The five host containers were already dual by the time the hardening landed, so they are no longer migration targets and the hardened sweep could not be re-run against them. Re-proving on the real host would require seeding a fresh legacy-only container, which the grounded suite does with disposable probe resources instead.",
+    "The five observation samples are identical in every field the window watches, so the 05:18:11Z sample is not distinguishable from the others by its file contents alone. The restart it follows is recorded separately under hostMigration.restartReconciliation (agentops-postgres started, reported dual labels and its re-attached volume, PG_VERSION=18 read back, returned to stopped); the sample's value is that nothing regressed across that restart, not that the file looks different."
+  ],
   "postReviewHardening": {
-    "note": "review round 1 (fresh Codex + fresh Claude) found defects in the implementation that produced the migration above. The confirmed ones were fixed and the grounded suite was re-run against the hardened code; the already-migrated containers were not re-swept, because they are dual and no longer migration targets.",
+    "note": "review rounds 1 and 2 (fresh Codex + fresh Claude each, read-only, separate terminals) found defects in the implementation that produced the migration above. The confirmed ones were fixed and the grounded suite was re-run against the hardened code; the already-migrated containers were not re-swept, because they are dual and no longer migration targets.",
     "groundedRerun": {
       "command": "AGENTOPS_TEST_APPLE_CONTAINER=1 AGENTOPS_TEST_APPLE_IMAGE=agentops-postgres:ciso07-078330f go test ./apps/control-plane/internal/lifecycle/ -run AppleContainerSweep -v -count=1",
       "result": "ok github.com/mrbaron3/servo/apps/control-plane/internal/lifecycle 52.856s",

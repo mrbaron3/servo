@@ -29,6 +29,11 @@ type fakeSweepRuntime struct {
 	// imageEnvironment is what the probe image declares for itself.
 	imageEnvironment []string
 	imageEnvErr      error
+	// imageDigest overrides what the tag currently resolves to; empty means it
+	// still resolves to the digest the fixture container was created from.
+	imageDigest    string
+	imageDigestErr error
+	volumeListErr  error
 	// synthesize builds the replacement. Tests override it to inject drift.
 	synthesize func(ContainerSpec, ContainerActual) ContainerActual
 	// deleteVolume simulates a runtime that destroys a volume on delete, which
@@ -83,6 +88,9 @@ func (runtime *fakeSweepRuntime) remove(id string) {
 func (runtime *fakeSweepRuntime) Volumes(
 	_ context.Context,
 ) ([]Resource, error) {
+	if runtime.volumeListErr != nil {
+		return nil, runtime.volumeListErr
+	}
 	resources := make([]Resource, 0, len(runtime.volumes))
 	for name, present := range runtime.volumes {
 		if !present {
@@ -101,6 +109,16 @@ func (runtime *fakeSweepRuntime) ImageEnvironment(
 	_ string,
 ) ([]string, error) {
 	return runtime.imageEnvironment, runtime.imageEnvErr
+}
+
+func (runtime *fakeSweepRuntime) ImageDigest(
+	_ context.Context,
+	_ string,
+) (string, error) {
+	if runtime.imageDigest != "" {
+		return runtime.imageDigest, runtime.imageDigestErr
+	}
+	return "sha256:" + strings.Repeat("a", 64), runtime.imageDigestErr
 }
 
 func (runtime *fakeSweepRuntime) Stop(
@@ -775,6 +793,52 @@ func TestSweepBlocksAllTargetsBeforeMutatingAnyOfThem(t *testing.T) {
 	}
 	if len(runtime.deleted) != deletionsBefore {
 		t.Fatal("the sweep mutated an unreproducible target")
+	}
+}
+
+// The specification carries a mutable tag. A tag rebuilt since the container
+// was created would make the replacement different content, so it must stop the
+// sweep while the original is still alive.
+func TestSweepRefusesWhenTheImageTagHasMoved(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	runtime.imageDigest = "sha256:" + strings.Repeat("b", 64)
+	report, err := testSweeper(
+		runtime, "agentops-runner",
+	).Apply(context.Background())
+	if err == nil {
+		t.Fatal("a moved image tag was accepted")
+	}
+	if len(runtime.deleted) != 0 {
+		t.Fatal("the sweep deleted a container it could not faithfully rebuild")
+	}
+	last := report.Steps[len(report.Steps)-1]
+	if last.Stage != StageReinspect || last.Outcome != "failed" {
+		t.Fatalf("the move was caught too late: %#v", last)
+	}
+}
+
+// An unreadable volume listing is not an absent volume, and recording it as one
+// would write the strongest possible false data-loss claim into evidence.
+func TestPreservationDistinguishesAnUnreadableListingFromALostVolume(t *testing.T) {
+	runtime := newFakeSweepRuntime(containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest), "",
+	))
+	sweeper := testSweeper(runtime, "agentops-runner")
+	report := SweepReport{}
+	runtime.volumeListErr = errors.New("volume listing unavailable")
+	records := sweeper.preservation(
+		context.Background(), map[string]bool{"agentops-runner-workspace": true},
+		&report,
+	)
+	if len(records) != 0 {
+		t.Fatalf("an unreadable listing produced volume claims: %#v", records)
+	}
+	if report.VolumeListingError == "" {
+		t.Fatal("the unreadable listing was not recorded")
 	}
 }
 

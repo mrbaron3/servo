@@ -533,6 +533,97 @@ func TestEquivalenceDetectsADroppedMount(t *testing.T) {
 	}
 }
 
+// Ownership can be dual while the role or specification digest is still written
+// in the legacy namespace only. Phase 3 deletes that namespace, so such a
+// container is not finished and must not be reported as skipped.
+func TestInventoryTreatsAOneSidedRoleOrSpecPairAsStillPending(t *testing.T) {
+	record := InventoryContainer(containerFixture(t, "agentops-runner",
+		"stopped", `{
+			"com.mrbaron3.workflow.agentopsctl": "v1",
+			"com.mrbaron3.servo.agentopsctl": "v1",
+			"com.mrbaron3.workflow.role": "runner",
+			"com.mrbaron3.workflow.spec-sha256": "`+fixtureSpecDigest+`"
+		}`, ""))
+	if record.Disposition != MigrationPending {
+		t.Fatalf(
+			"a container whose role is still legacy-only reported %q",
+			record.Disposition,
+		)
+	}
+}
+
+// A container with no legacy-only pair left is finished.
+func TestInventorySkipsAFullyDualLabelledContainer(t *testing.T) {
+	record := InventoryContainer(containerFixture(
+		t, "agentops-runner", "stopped",
+		dualLabels("runner", fixtureSpecDigest), "",
+	))
+	if record.Disposition != MigrationSkipped {
+		t.Fatalf("a finished container reported %q", record.Disposition)
+	}
+}
+
+// An operator-supplied variable with an empty value must survive. The image
+// does not declare it, and a one-value map lookup would treat it as a default.
+func TestRebuildKeepsAnEmptyValuedEnvironmentVariable(t *testing.T) {
+	actual := containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest),
+		`,"initProcess": {
+			"executable": "/bin/run",
+			"environment": ["PATH=/usr/bin", "FEATURE_FLAG="],
+			"user": {"raw": {"userString": "agentops"}}
+		}`,
+	)
+	spec, err := RebuildMigratedSpec(actual, []string{"PATH=/usr/bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, present := spec.Environment["FEATURE_FLAG"]
+	if !present || value != "" {
+		t.Fatalf(
+			"empty-valued variable was dropped: %#v", spec.Environment,
+		)
+	}
+	if _, inherited := spec.Environment["PATH"]; inherited {
+		t.Fatal("an image default was carried onto the replacement")
+	}
+}
+
+// A read-only tmpfs cannot be restated: the specification carries a tmpfs as a
+// bare destination, so it would silently come back writable.
+func TestRebuildRefusesAReadOnlyTmpfs(t *testing.T) {
+	actual := containerFixtureWithMounts(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest),
+		`[{"destination": "/tmp", "source": "tmpfs", "options": ["ro"],
+		   "type": {"tmpfs": {}}}]`, "",
+	)
+	if _, err := RebuildMigratedSpec(actual, nil); err == nil {
+		t.Fatal("a read-only tmpfs was accepted for rebuild")
+	}
+}
+
+// Network attachment options are not restatable, so the equivalence gate is the
+// only thing that can notice a replacement landing on different ones.
+func TestEquivalenceDetectsNetworkAttachmentOptionDrift(t *testing.T) {
+	before := containerFixture(
+		t, "agentops-runner", "stopped",
+		legacyOnlyLabels("runner", fixtureSpecDigest),
+		`,"networks": [{"network": "agentops-internal",
+			"options": {"hostname": "agentops-runner", "mtu": 1280}}]`,
+	)
+	after := containerFixture(
+		t, "agentops-runner", "stopped",
+		dualLabels("runner", fixtureSpecDigest),
+		`,"networks": [{"network": "agentops-internal",
+			"options": {"hostname": "agentops-runner", "mtu": 1500}}]`,
+	)
+	if err := VerifyMigrationEquivalence(before, after); err == nil {
+		t.Fatal("a replacement on a different MTU was accepted")
+	}
+}
+
 // A container whose role or specification namespaces disagree is partially
 // migrated. Rebuilding it would pick one side of a disagreement it cannot
 // adjudicate.

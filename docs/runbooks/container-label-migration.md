@@ -41,9 +41,13 @@ P2 以降は専用 subcommand を使う。**引数なしの `migrate-labels` は
 host を一切変更しない**（安全な綴りを短い方に割り当てている）。
 
 ```sh
-agentopsctl migrate-labels                 # dry-run。分類・named volume・件数を出し、evidence を残す
-agentopsctl migrate-labels -evidence-dir <dir>   # evidence の出力先を変える
+agentopsctl migrate-labels                       # dry-run。分類・named volume・件数を出す（file は書かない）
+agentopsctl migrate-labels -evidence-dir <dir>   # 上記に加えて durable な控えを <dir> へ書く
 ```
+
+引数なしの `migrate-labels` は **stdout に出すだけで file を書かない**。read-only を名乗るものが
+worktree に file を落とさないためである。観測窓のサンプルなど控えが要るときだけ `-evidence-dir` を渡す。
+`--only` は `--apply` 専用で、inventory には渡せない（gate として読む件数が host 全体である必要があるため）。
 
 出力の `pending` が P2 の移行対象（`legacy-only` かつ忠実な replacement を再構築できるもの）、
 `blocked` は所有しているが**同一の replacement を作れない**もの、`conflicting` は部分移行、

@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -38,6 +39,7 @@ type SweepRuntime interface {
 	Containers(ctx context.Context) ([]ContainerActual, error)
 	Volumes(ctx context.Context) ([]Resource, error)
 	ImageEnvironment(ctx context.Context, image string) ([]string, error)
+	ImageDigest(ctx context.Context, image string) (string, error)
 	Stop(ctx context.Context, name string, seconds int) error
 	Delete(ctx context.Context, name string) error
 	CreateContainer(ctx context.Context, spec ContainerSpec) (string, error)
@@ -84,6 +86,9 @@ type SweepReport struct {
 	// post-sweep inventory cannot tell apart from ones that were already dual.
 	Migrated []string `json:"migrated"`
 	Halted   string   `json:"halted,omitempty"`
+	// VolumeListingError records that the post-sweep volume listing could not
+	// be read. It is deliberately distinct from an absent volume.
+	VolumeListingError string `json:"volumeListingError,omitempty"`
 	// PlannedSpecs records, per target, the configuration needed to recreate it
 	// if the sweep is interrupted after the delete. Environment values are
 	// reduced to their keys: the runbook's rollback needs to know which
@@ -246,6 +251,11 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 	}
 	volumesBefore, err := sweeper.volumeNames(ctx)
 	if err != nil {
+		// Every other abort path says so in the durable record; this one must
+		// too, or the evidence claims a sweep ran when none did.
+		report.Applied = false
+		report.Halted = "the pre-sweep volume listing could not be read: " +
+			err.Error()
 		return report, err
 	}
 	migrated := make([]string, 0, len(targets))
@@ -261,7 +271,7 @@ func (sweeper *LabelSweeper) Apply(ctx context.Context) (SweepReport, error) {
 		migrated = append(migrated, target.ID)
 	}
 	report.Migrated = migrated
-	report.Volumes = sweeper.preservation(ctx, volumesBefore)
+	report.Volumes = sweeper.preservation(ctx, volumesBefore, &report)
 	// The post-state is recorded even when the sweep halted. The case that
 	// matters is the dangerous one — some containers migrated and one did not —
 	// and that is exactly the case an empty post-state would hide.
@@ -330,6 +340,40 @@ func (sweeper *LabelSweeper) planReplacements(
 		planned = append(planned, RedactedReplacement(spec, *actual))
 	}
 	return planned, nil
+}
+
+// requireUnmovedImage proves the container's image reference still resolves to
+// the digest it was created from. Phase 2 replaces a container's labels, not
+// its contents, and a moved tag would quietly turn one into the other.
+func (sweeper *LabelSweeper) requireUnmovedImage(
+	ctx context.Context,
+	actual ContainerActual,
+) error {
+	observed := strings.TrimSpace(
+		actual.Configuration.Image.Descriptor.Digest,
+	)
+	if observed == "" {
+		return fmt.Errorf(
+			"container %s records no image digest, so its replacement cannot "+
+				"be pinned to the same content", actual.ID,
+		)
+	}
+	current, err := sweeper.Runtime.ImageDigest(
+		ctx, actual.Configuration.Image.Reference,
+	)
+	if err != nil {
+		return err
+	}
+	if current != observed {
+		// The digests are named but not echoed alongside operator-supplied
+		// text; they are safe to show and are what the operator needs.
+		return fmt.Errorf(
+			"container %s was created from image digest %s but its reference "+
+				"now resolves to %s; recreating it would replace its contents, "+
+				"not its labels", actual.ID, observed, current,
+		)
+	}
+	return nil
 }
 
 // requireStillOwned re-resolves an exact identity and proves this binary still
@@ -417,6 +461,13 @@ func (sweeper *LabelSweeper) migrateOne(
 		return sweeper.fail(report, planned.ID, StageReinspect, fmt.Errorf(
 			"container is now %q, not a migration target", current.Disposition,
 		))
+	}
+	// The specification carries a mutable image reference, so a tag rebuilt
+	// since this container was created would make the "replacement" different
+	// content. That is a redeployment, and without this check it would only be
+	// discovered by the equivalence gate — after the irreversible delete.
+	if err := sweeper.requireUnmovedImage(ctx, *actual); err != nil {
+		return sweeper.fail(report, planned.ID, StageReinspect, err)
 	}
 	imageEnvironment, err := sweeper.Runtime.ImageEnvironment(
 		ctx, actual.Configuration.Image.Reference,
@@ -645,10 +696,16 @@ func (sweeper *LabelSweeper) volumeNames(
 func (sweeper *LabelSweeper) preservation(
 	ctx context.Context,
 	before map[string]bool,
+	report *SweepReport,
 ) []VolumePreservation {
 	after, err := sweeper.volumeNames(ctx)
 	if err != nil {
-		after = map[string]bool{}
+		// Recording "presentAfter: false" here would write the strongest
+		// possible false claim into durable evidence — that every named volume,
+		// including the database's, was destroyed. An unreadable listing is not
+		// an absent volume, so it is reported as what it is.
+		report.VolumeListingError = err.Error()
+		return nil
 	}
 	names := make([]string, 0, len(before))
 	for name := range before {

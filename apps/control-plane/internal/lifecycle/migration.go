@@ -162,6 +162,24 @@ func InventoryContainer(actual ContainerActual) ContainerInventoryRecord {
 // disposition maps an ownership class onto the sweep's verdict. Every branch
 // returns a reason, because an audit row without one cannot be acted on by the
 // operator who reads it weeks later.
+// carriesLegacyOnlyPair reports whether any of the three managed label pairs
+// exists in the legacy namespace only. A pair that is absent entirely is not a
+// partial migration — a container without a specification digest never had one.
+func carriesLegacyOnlyPair(labels map[string]string) bool {
+	for _, pair := range [][2]string{
+		{LegacyManagedLabelKey, CurrentManagedLabelKey},
+		{LegacyRoleLabelKey, CurrentRoleLabelKey},
+		{LegacySpecLabelKey, CurrentSpecLabelKey},
+	} {
+		if _, agreement := ReadDualLabel(
+			labels, pair[0], pair[1],
+		); agreement == LabelLegacyOnly {
+			return true
+		}
+	}
+	return false
+}
+
 func disposition(
 	actual ContainerActual,
 	class OwnershipClass,
@@ -196,10 +214,21 @@ func disposition(
 		return MigrationSkipped, "no ownership label; not managed by agentopsctl"
 	case OwnershipUnmanaged:
 		return MigrationSkipped, "ownership label names another deployment"
-	case OwnershipDual:
-		return MigrationSkipped, "already carries both ownership namespaces"
-	case OwnershipCurrentOnly:
-		return MigrationSkipped, "already past the legacy namespace"
+	case OwnershipDual, OwnershipCurrentOnly:
+		// Ownership can be dual while the role or specification digest is still
+		// written in the legacy namespace only. That container is not finished:
+		// Phase 3 removes the legacy namespace, and it holds the only copy of
+		// those values. Reporting it as skipped would let the gate pass on it.
+		if !carriesLegacyOnlyPair(actual.Configuration.Labels) {
+			return MigrationSkipped, "every ownership label pair is present in " +
+				"the current namespace"
+		}
+		if _, err := RebuildMigratedSpec(actual, nil); err != nil {
+			return MigrationBlocked, "a label pair is still legacy-only and " +
+				"no identical replacement can be rebuilt: " + err.Error()
+		}
+		return MigrationPending, "a role or specification digest label is " +
+			"still written in the legacy namespace only"
 	case OwnershipLegacyOnly:
 		// Classification asks only whether a faithful replacement is
 		// expressible, which does not depend on the image's declared
@@ -374,7 +403,10 @@ func reproducibleShape(actual ContainerActual) error {
 			)
 		}
 		for _, option := range mount.Options {
-			if option != "ro" {
+			// "ro" is restatable on a named volume only. The specification
+			// carries a tmpfs as a bare destination, so a read-only tmpfs would
+			// silently come back writable.
+			if option != "ro" || isTmpfs {
 				return fmt.Errorf(
 					"container %s mounts %s with option %q, which the managed "+
 						"specification cannot restate",
@@ -447,7 +479,12 @@ func VerifyMigrationEquivalence(before, after ContainerActual) error {
 			after.Configuration.PublishedPorts},
 		{"published sockets", before.Configuration.PublishedSock,
 			after.Configuration.PublishedSock},
-		{"networks", containerNetworks(before), containerNetworks(after)},
+		// The whole attachment record is compared, not just the names. Per
+		// attachment options are not restatable through the specification, so
+		// the only defence against a replacement landing on different ones is
+		// noticing.
+		{"networks", before.Configuration.Networks,
+			after.Configuration.Networks},
 		// The whole mount list is compared, not just the named volumes and
 		// tmpfs targets the rebuild understands. Comparing only the shapes the
 		// rebuild can produce would make a dropped mount invisible to the one
@@ -586,8 +623,11 @@ func environmentMap(
 					"different values", actual.ID, key,
 			)
 		}
-		if value == declared[key] {
-			// The image supplies this one; the replacement inherits it.
+		// The two-value lookup matters: a missing key also yields "", so a
+		// one-value comparison would treat an operator-supplied `KEY=` as an
+		// image default and drop it from the replacement entirely.
+		if declaredValue, isDeclared := declared[key]; isDeclared &&
+			value == declaredValue {
 			continue
 		}
 		environment[key] = value

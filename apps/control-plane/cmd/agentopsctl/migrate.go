@@ -66,6 +66,15 @@ func (manager *manager) MigrateLabels(
 				"identities to migrate; run without --apply to inventory them",
 		)
 	}
+	// --only narrows a sweep, not an inventory. Accepting it here and ignoring
+	// it would make the natural rehearsal for `--apply --only <id>` report
+	// something other than what it appears to.
+	if !apply && len(only) > 0 {
+		return fmt.Errorf(
+			"--only applies to --apply; the inventory always reports the whole " +
+				"host so its counts can be read as a phase gate",
+		)
+	}
 	// The inventory promises not to change the host, and starting the Apple
 	// Container system service would break that promise before the operator has
 	// chosen --apply. Only the mutating path may start the runtime.
@@ -96,7 +105,11 @@ func (manager *manager) MigrateLabels(
 	}
 	sweeper := lifecycle.NewLabelSweeper(manager.runtime)
 	sweeper.Only = only
-	stamp := time.Now().UTC().Format("20060102T150405Z")
+	// The process id keeps two runs started in the same second from writing the
+	// same evidence path, where the later one would truncate the earlier.
+	stamp := fmt.Sprintf(
+		"%s-%d", time.Now().UTC().Format("20060102T150405Z"), os.Getpid(),
+	)
 
 	if !apply {
 		audit, err := sweeper.Plan(ctx, "dry-run")

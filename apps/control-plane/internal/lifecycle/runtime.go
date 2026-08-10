@@ -194,6 +194,17 @@ type ContainerMount struct {
 	Type    map[string]any `json:"type"`
 }
 
+// ContainerNetworkAttachment is one network attachment as Apple Container
+// reports it. Options carries the per-attachment settings (hostname and MTU on
+// 1.1.0). The migration cannot restate them — the specification attaches by
+// name — so they are decoded in order to be *compared*: a replacement that
+// landed on different attachment options is drift the equivalence gate has to
+// see rather than silently accept.
+type ContainerNetworkAttachment struct {
+	Network string         `json:"network"`
+	Options map[string]any `json:"options"`
+}
+
 type ContainerActual struct {
 	ID            string `json:"id"`
 	Configuration struct {
@@ -239,9 +250,7 @@ type ContainerActual struct {
 			MemoryInBytes int64   `json:"memoryInBytes"`
 			CPUOverhead   float64 `json:"cpuOverhead"`
 		} `json:"resources"`
-		Networks []struct {
-			Network string `json:"network"`
-		} `json:"networks"`
+		Networks []ContainerNetworkAttachment `json:"networks"`
 	} `json:"configuration"`
 	Status struct {
 		State    string `json:"state"`

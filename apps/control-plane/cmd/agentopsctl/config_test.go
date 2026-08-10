@@ -83,9 +83,7 @@ func TestValidateRunnerActualRequiresFullHardenedTopology(t *testing.T) {
 	actual.Configuration.Image.Reference = "docker.io/library/agentops-runner:dev"
 	actual.Configuration.Networks = append(
 		actual.Configuration.Networks,
-		struct {
-			Network string `json:"network"`
-		}{Network: cfg.Network},
+		lifecycle.ContainerNetworkAttachment{Network: cfg.Network},
 	)
 	actual.Configuration.ReadOnly = true
 	actual.Configuration.CapDrop = []string{"ALL"}
@@ -133,9 +131,7 @@ func TestValidateTriageActualHasNoWorkspaceOrDevelopmentImage(t *testing.T) {
 	actual.Configuration.Image.Reference = "docker.io/library/agentops-triage:dev"
 	actual.Configuration.Networks = append(
 		actual.Configuration.Networks,
-		struct {
-			Network string `json:"network"`
-		}{Network: cfg.Network},
+		lifecycle.ContainerNetworkAttachment{Network: cfg.Network},
 	)
 	actual.Configuration.ReadOnly = true
 	actual.Configuration.CapDrop = []string{"ALL"}
