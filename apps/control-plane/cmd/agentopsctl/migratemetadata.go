@@ -25,6 +25,11 @@ import (
 // files that belong to another program, and the safe word has to be the short
 // one.
 
+// serviceRestartTimeout bounds the mandatory restart. It is generous: bringing
+// the runtime back matters more than finishing quickly, and the alternative to
+// waiting is leaving the operator's machine without a container runtime.
+const serviceRestartTimeout = 3 * time.Minute
+
 // metadataEvidence is the durable record of one plan, application, or rollback.
 // Every path in it is relative to the application root, so a file that is
 // committed to the repository never records where the operator's home
@@ -220,7 +225,17 @@ func runMigrateLabelMetadata(ctx context.Context, args []string) error {
 		if started {
 			return
 		}
-		if err := runtime.StartSystem(ctx); err != nil {
+		// The restart must not inherit this command's context. main wires it to
+		// signal.NotifyContext, so a SIGINT arriving inside the stopped window
+		// cancels it — and exec.CommandContext will not launch with a cancelled
+		// context. The one operation that must always run would be exactly the
+		// one cancellation disables, leaving the operator's runtime down.
+		// Cancellation aborts the migration; it must not abort the recovery.
+		restartCtx, cancelRestart := context.WithTimeout(
+			context.WithoutCancel(ctx), serviceRestartTimeout,
+		)
+		defer cancelRestart()
+		if err := runtime.StartSystem(restartCtx); err != nil {
 			fmt.Fprintf(
 				os.Stderr,
 				"WARNING: Apple Container did not start again: %v\n", err,
@@ -320,7 +335,13 @@ func runMetadataRollback(
 		return fmt.Errorf("stop Apple Container: %w", err)
 	}
 	defer func() {
-		if err := runtime.StartSystem(ctx); err != nil {
+		// Same reasoning as the apply path: a cancelled context must not be able
+		// to leave Apple Container stopped.
+		restartCtx, cancelRestart := context.WithTimeout(
+			context.WithoutCancel(ctx), serviceRestartTimeout,
+		)
+		defer cancelRestart()
+		if err := runtime.StartSystem(restartCtx); err != nil {
 			fmt.Fprintf(
 				os.Stderr,
 				"WARNING: Apple Container did not start again: %v\n", err,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrbaron3/servo/apps/control-plane/internal/lifecycle"
 )
@@ -63,5 +64,34 @@ func TestMigrateLabelsOnlyIsRejectedWithoutApply(t *testing.T) {
 	}
 	if runner.called {
 		t.Fatal("the refusal came after the runtime was queried")
+	}
+}
+
+// TestRestartContextSurvivesCancellation pins the P1 the automated review
+// found. main wires the command context to signal.NotifyContext, so a SIGINT
+// arriving inside the stopped window cancels it — and exec.CommandContext
+// refuses to launch with a cancelled context. Without a detached context the
+// mandatory restart becomes the one operation cancellation disables, and the
+// operator is left with no container runtime.
+func TestRestartContextSurvivesCancellation(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	restart, cancelRestart := context.WithTimeout(
+		context.WithoutCancel(parent), serviceRestartTimeout,
+	)
+	defer cancelRestart()
+	cancel()
+	if parent.Err() == nil {
+		t.Fatal("the parent context should be cancelled")
+	}
+	if err := restart.Err(); err != nil {
+		t.Fatalf("the restart context was cancelled with its parent: %v", err)
+	}
+	// It must still be bounded, or a hung restart would wedge the command.
+	deadline, ok := restart.Deadline()
+	if !ok {
+		t.Fatal("the restart context has no deadline")
+	}
+	if time.Until(deadline) > serviceRestartTimeout+time.Second {
+		t.Fatalf("restart deadline is further out than intended: %v", deadline)
 	}
 }
