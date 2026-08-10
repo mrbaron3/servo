@@ -617,9 +617,20 @@ document は後者だからである。
 差し替えられる。rollback は backup を**読む**だけでなく created-since の copy を**書く**ので、
 document path と同じ扱いにする。
 
-**runtime の再起動は stop より前に登録する。** 途中で失敗した stop も service を落として
-いる可能性があり、その error path で復旧が登録されていなければ、operator の machine は
-container runtime を失ったまま残る。
+**runtime の再起動は「1 度だけ」走る closure で、呼び口が 2 つある。**
+
+- **stop より前に fallback を defer 登録する。** 途中で失敗した stop も service を落として
+  いる可能性があり、その error path で復旧が登録されていなければ、operator の machine は
+  container runtime を失ったまま残る。
+- **成功路では明示的に restart してから検証する。** defer だけでは足りない——関数本体の
+  末尾に書いた検証は**どの defer よりも先に**走るので、成功した rollback のたびに
+  「止まっている runtime」を読んで、起きていない失敗を報告することになる。
+- **`system start` は多くとも 1 回**（`restarted` flag）。deferred fallback が、明示呼び出しが
+  既に報告した start をやり直さない。
+- **defer の restart 失敗は返り値へ join する**（named result）。defer は print では exit status を
+  変えられず、「rollback が失敗し、かつ runtime が落ちている」は片方だけとは別の事故である。
+- restart context は `context.WithoutCancel` で作る。SIGINT は rollback を中断してよいが、
+  復旧を中断してはいけない。
 
 ### P3B でやらないこと
 

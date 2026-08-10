@@ -17,7 +17,7 @@
     "container volume list --format json",
     "container network list --format json"
   ],
-  "generatedAt": "20260810T123008Z",
+  "generatedAt": "20260810T123848Z",
   "grounded": {
     "TestAppleContainerCurrentLabelsSurviveOnALiveContainer": true,
     "TestAppleContainerMetadataRollbackRefusesWhileTheRuntimeIsUp": true,
@@ -105,7 +105,7 @@
     }
   ],
   "notGroundedHere": [
-    "that a binding failure precedes StopSystem, and that a failed StopSystem still restarts the runtime: this suite stops the runtime itself before it binds, so both orderings are pinned by the command tests TestRollbackNeverStopsTheRuntimeWhenThePlanDoesNotBind and TestRollbackRestartsTheRuntimeEvenWhenTheStopFails"
+    "the rollback command's stop/start ordering: this suite stops and starts the runtime itself around the recovery, so it cannot observe what the command does on its own. Ordering is pinned by four command tests instead \u2014 TestRollbackSucceedsAndRestartsExactlyOnce (nil result, exactly one start, stop before start before verify), TestRollbackReportsAFailedRestartOnTheSuccessPath, TestRollbackRestartsTheRuntimeEvenWhenTheStopFails, and TestRollbackRestartsUnderACancelledContext"
   ],
   "note": "Identities, classes, states and volume attachments only. No host path, no environment value, and no raw ownership label value is recorded here.",
   "phase": "LABEL-P3B",

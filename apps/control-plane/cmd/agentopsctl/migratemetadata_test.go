@@ -194,13 +194,13 @@ func TestRollbackRejectsABlankPlanPath(t *testing.T) {
 	}
 }
 
-// TestRollbackRestartsTheRuntimeEvenWhenTheStopFails pins the ordering that
-// keeps an operator's machine usable. A stop that fails partway has still taken
-// services down, so the restart has to be registered before the stop rather
-// than after it succeeds.
-func TestRollbackRestartsTheRuntimeEvenWhenTheStopFails(t *testing.T) {
+// rollbackFixture writes an application root, a private backup root, and a plan
+// that binds cleanly against them. Every restart case below drives the same real
+// rollback and differs only in what the runtime is made to do.
+func rollbackFixture(t *testing.T) (planPath, appRoot string) {
+	t.Helper()
 	root := t.TempDir()
-	appRoot := filepath.Join(root, "appRoot")
+	appRoot = filepath.Join(root, "appRoot")
 	backups := filepath.Join(root, "backups")
 	document := filepath.Join(appRoot, "volumes", "vol-a", "entity.json")
 	backup := filepath.Join(backups, "volume", "vol-a", "entity.json")
@@ -246,22 +246,146 @@ func TestRollbackRestartsTheRuntimeEvenWhenTheStopFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	planPath := filepath.Join(root, "rollback-plan.json")
+	planPath = filepath.Join(root, "rollback-plan.json")
 	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	status := "status running\n" +
+	return planPath, appRoot
+}
+
+// stoppedStatus is what `container system status` reports once the services are
+// down. The stopped-state proof requires this positive marker, not merely a
+// nonzero exit: "the command failed" is not evidence that a service stopped.
+const stoppedStatus = "apiserver is not running"
+
+func runningStatus(appRoot string) string {
+	return "status running\n" +
 		"apiserver.version  container-apiserver version 1.1.0 (build: release)\n" +
 		"appRoot " + appRoot + "\n"
-	runner := &recordingRuntimeRunner{results: []lifecycle.CommandResult{
-		{Status: 0, Stdout: "container CLI version 1.1.0"}, // version probe
-		{Status: 0, Stdout: status},                        // system status
-		{Status: 0, Stdout: `[]`},                          // containers
-		{Status: 0, Stdout: `[]`},                          // volumes
-		{Status: 0, Stdout: `[]`},                          // networks
-		{Status: 1, Stderr: "stop failed halfway"},         // system stop
-	}}
-	err = migrateLabelMetadata(
+}
+
+// preStopResults are the calls every rollback makes before it stops anything:
+// host resolution, then the inventory the not-running gate reads.
+func preStopResults(appRoot string) []lifecycle.CommandResult {
+	return []lifecycle.CommandResult{
+		{Status: 0, Stdout: "container CLI version 1.1.0"},
+		{Status: 0, Stdout: runningStatus(appRoot)},
+		{Status: 0, Stdout: `[]`},
+		{Status: 0, Stdout: `[]`},
+		{Status: 0, Stdout: `[]`},
+	}
+}
+
+// stoppedProofResults are what RequireServicesStopped needs: a usable CLI, a
+// failing status that says the apiserver is not running, and a data-plane call
+// that also fails.
+func stoppedProofResults() []lifecycle.CommandResult {
+	return []lifecycle.CommandResult{
+		{Status: 0, Stdout: "container CLI version 1.1.0"},
+		{Status: 1, Stderr: stoppedStatus},
+		{Status: 1, Stderr: stoppedStatus},
+	}
+}
+
+func startCommands(args [][]string) int {
+	count := 0
+	for _, argv := range args {
+		if len(argv) >= 2 && argv[0] == "system" && argv[1] == "start" {
+			count++
+		}
+	}
+	return count
+}
+
+func commandOrder(args [][]string) []string {
+	order := make([]string, 0, len(args))
+	for _, argv := range args {
+		order = append(order, strings.Join(argv, " "))
+	}
+	return order
+}
+
+// TestRollbackSucceedsAndRestartsExactlyOnce is the case a deferred-only restart
+// breaks: a check written after the function body runs BEFORE any defer fires,
+// so verifying the runtime there reads a stopped runtime and reports a failure
+// that did not happen. A successful rollback returns nil, starts the runtime
+// once, and verifies it afterwards.
+func TestRollbackSucceedsAndRestartsExactlyOnce(t *testing.T) {
+	planPath, appRoot := rollbackFixture(t)
+	results := preStopResults(appRoot)
+	results = append(results, lifecycle.CommandResult{Status: 0})
+	results = append(results, stoppedProofResults()...)
+	results = append(results,
+		lifecycle.CommandResult{Status: 0},
+		lifecycle.CommandResult{Status: 0, Stdout: "container CLI version 1.1.0"},
+		lifecycle.CommandResult{Status: 0, Stdout: runningStatus(appRoot)},
+	)
+	runner := &recordingRuntimeRunner{results: results}
+	if err := migrateLabelMetadata(
+		context.Background(),
+		[]string{"--rollback", planPath},
+		lifecycle.NewAppleRuntimeForTest(runner),
+	); err != nil {
+		t.Fatalf("a successful rollback reported an error: %v\n%v",
+			err, commandOrder(runner.args))
+	}
+	if starts := startCommands(runner.args); starts != 1 {
+		t.Fatalf("system start ran %d times, want exactly 1: %v",
+			starts, commandOrder(runner.args))
+	}
+	order := commandOrder(runner.args)
+	stopIndex, startIndex, verifyIndex := -1, -1, -1
+	for index, command := range order {
+		switch {
+		case command == "system stop":
+			stopIndex = index
+		case command == "system start":
+			startIndex = index
+		case command == "system status" && startIndex >= 0 && verifyIndex < 0:
+			verifyIndex = index
+		}
+	}
+	if stopIndex < 0 || startIndex < stopIndex || verifyIndex < startIndex {
+		t.Fatalf("stop, start and verify are out of order: %v", order)
+	}
+}
+
+// TestRollbackReportsAFailedRestartOnTheSuccessPath: the restore succeeded but
+// the runtime did not come back, so the command must not exit 0 — and the
+// deferred fallback must not retry a start the explicit call already made.
+func TestRollbackReportsAFailedRestartOnTheSuccessPath(t *testing.T) {
+	planPath, appRoot := rollbackFixture(t)
+	results := preStopResults(appRoot)
+	results = append(results, lifecycle.CommandResult{Status: 0})
+	results = append(results, stoppedProofResults()...)
+	results = append(results, lifecycle.CommandResult{Status: 1, Stderr: "start failed"})
+	runner := &recordingRuntimeRunner{results: results}
+	err := migrateLabelMetadata(
+		context.Background(),
+		[]string{"--rollback", planPath},
+		lifecycle.NewAppleRuntimeForTest(runner),
+	)
+	if err == nil {
+		t.Fatalf("a failed restart exited 0: %v", commandOrder(runner.args))
+	}
+	if starts := startCommands(runner.args); starts != 1 {
+		t.Fatalf("system start ran %d times, want exactly 1: %v",
+			starts, commandOrder(runner.args))
+	}
+}
+
+// TestRollbackRestartsTheRuntimeEvenWhenTheStopFails pins the other half. A stop
+// that fails partway has still taken services down, so the restart has to be
+// registered before the stop rather than after it succeeds — and still run once.
+func TestRollbackRestartsTheRuntimeEvenWhenTheStopFails(t *testing.T) {
+	planPath, appRoot := rollbackFixture(t)
+	results := preStopResults(appRoot)
+	results = append(results,
+		lifecycle.CommandResult{Status: 1, Stderr: "stop failed halfway"},
+		lifecycle.CommandResult{Status: 0},
+	)
+	runner := &recordingRuntimeRunner{results: results}
+	err := migrateLabelMetadata(
 		context.Background(),
 		[]string{"--rollback", planPath},
 		lifecycle.NewAppleRuntimeForTest(runner),
@@ -269,17 +393,70 @@ func TestRollbackRestartsTheRuntimeEvenWhenTheStopFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("a failed stop was reported as success")
 	}
+	if starts := startCommands(runner.args); starts != 1 {
+		t.Fatalf("a failed stop produced %d starts, want exactly 1: %v",
+			starts, commandOrder(runner.args))
+	}
+}
 
-	started := false
-	for _, args := range runner.args {
-		if len(args) >= 2 && args[0] == "system" && args[1] == "start" {
-			started = true
-		}
+// TestRollbackRestartsUnderACancelledContext proves cancellation aborts the
+// rollback without aborting the recovery. main wires ctx to signal.NotifyContext,
+// so a SIGINT inside the stopped window would otherwise disable exactly the one
+// operation that must always run.
+func TestRollbackRestartsUnderACancelledContext(t *testing.T) {
+	planPath, appRoot := rollbackFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	results := preStopResults(appRoot)
+	results = append(results,
+		lifecycle.CommandResult{Status: 0},
+		lifecycle.CommandResult{Status: 0},
+	)
+	runner := &cancellingRuntimeRunner{
+		recordingRuntimeRunner: recordingRuntimeRunner{results: results},
+		cancelOn:               "system stop",
+		cancel:                 cancel,
 	}
-	if !started {
-		t.Fatalf(
-			"a failed stop returned without restarting the runtime: %#v",
-			runner.args,
-		)
+	err := migrateLabelMetadata(
+		ctx,
+		[]string{"--rollback", planPath},
+		lifecycle.NewAppleRuntimeForTest(runner),
+	)
+	if err == nil {
+		t.Fatal("a cancelled rollback was reported as success")
 	}
+	if starts := startCommands(runner.args); starts != 1 {
+		t.Fatalf("a cancelled rollback produced %d starts, want exactly 1: %v",
+			starts, commandOrder(runner.args))
+	}
+	if !runner.sawStartAfterCancel {
+		t.Fatalf("the restart did not survive cancellation: %v",
+			commandOrder(runner.args))
+	}
+}
+
+// cancellingRuntimeRunner cancels the caller's context partway through, so the
+// restart has to survive it.
+type cancellingRuntimeRunner struct {
+	recordingRuntimeRunner
+	cancelOn            string
+	cancel              context.CancelFunc
+	cancelled           bool
+	sawStartAfterCancel bool
+}
+
+func (runner *cancellingRuntimeRunner) Run(
+	ctx context.Context,
+	args []string,
+) lifecycle.CommandResult {
+	command := strings.Join(args, " ")
+	if runner.cancelled && command == "system start" && ctx.Err() == nil {
+		// The restart context must be alive even though the caller's is not.
+		runner.sawStartAfterCancel = true
+	}
+	result := runner.recordingRuntimeRunner.Run(ctx, args)
+	if command == runner.cancelOn && !runner.cancelled {
+		runner.cancelled = true
+		runner.cancel()
+	}
+	return result
 }

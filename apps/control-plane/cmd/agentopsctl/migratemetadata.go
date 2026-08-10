@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -154,7 +155,7 @@ func runMetadataRollback(
 	runtime *lifecycle.AppleRuntime,
 	host *lifecycle.MetadataHost,
 	reportPath string,
-) error {
+) (err error) {
 	raw, err := os.ReadFile(reportPath)
 	if err != nil {
 		return fmt.Errorf("read report: %w", err)
@@ -190,12 +191,24 @@ func runMetadataRollback(
 			len(unique), strings.Join(unique, ", "),
 		)
 	}
-	fmt.Printf("stopping Apple Container services\n")
-	// The restart is registered BEFORE the stop, not after it succeeds. A stop
-	// that fails partway has still taken services down, and returning from that
-	// error without a registered restart is how an operator's machine is left
-	// without a container runtime by a command that only meant to refuse.
-	defer func() {
+	// The restart is one closure with two callers, and it runs at most once.
+	//
+	// A deferred restart alone is not enough: the success path has to PROVE the
+	// runtime came back, and a check written after the function body still runs
+	// before any defer fires — which would read a stopped runtime on every
+	// successful rollback and report a failure that did not happen. An explicit
+	// restart alone is not enough either: a stop that fails partway has still
+	// taken services down, and that error path never reaches the explicit call.
+	//
+	// So the normal path restarts explicitly and then verifies, and the defer is
+	// the fallback for every path that returned before getting there. `restarted`
+	// is what keeps those two from starting the runtime twice.
+	restarted := false
+	restart := func() error {
+		if restarted {
+			return nil
+		}
+		restarted = true
 		// A cancelled context must not be able to leave Apple Container stopped.
 		// main wires ctx to signal.NotifyContext, so a SIGINT arriving inside the
 		// stopped window would otherwise disable exactly the one operation that
@@ -205,21 +218,39 @@ func runMetadataRollback(
 			context.WithoutCancel(ctx), serviceRestartTimeout,
 		)
 		defer cancelRestart()
-		if err := runtime.StartSystem(restartCtx); err != nil {
+		return runtime.StartSystem(restartCtx)
+	}
+
+	fmt.Printf("stopping Apple Container services\n")
+	// Registered BEFORE the stop, not after it succeeds: returning from a failed
+	// stop without a registered restart is how an operator's machine is left
+	// without a container runtime by a command that only meant to refuse.
+	defer func() {
+		if restarted {
+			return
+		}
+		if restartErr := restart(); restartErr != nil {
 			fmt.Fprintf(
 				os.Stderr,
-				"WARNING: Apple Container did not start again: %v\n", err,
+				"WARNING: Apple Container did not start again: %v\n", restartErr,
 			)
+			// Joined into the returned error rather than only printed. A defer
+			// cannot change the exit status by printing, and "the rollback
+			// failed AND the runtime is down" is not the same incident as
+			// either one alone.
+			err = errors.Join(err, fmt.Errorf(
+				"Apple Container did not start again: %w", restartErr,
+			))
 		}
 	}()
-	if err := runtime.StopSystem(ctx); err != nil {
-		return fmt.Errorf("stop Apple Container: %w", err)
+	if stopErr := runtime.StopSystem(ctx); stopErr != nil {
+		return fmt.Errorf("stop Apple Container: %w", stopErr)
 	}
-	if err := runtime.RequireServicesStopped(ctx); err != nil {
-		return err
+	if stoppedErr := runtime.RequireServicesStopped(ctx); stoppedErr != nil {
+		return stoppedErr
 	}
-	if err := lifecycle.RollbackMetadataSweep(plan); err != nil {
-		return err
+	if rollbackErr := lifecycle.RollbackMetadataSweep(plan); rollbackErr != nil {
+		return rollbackErr
 	}
 	for _, application := range plan.Applied {
 		for _, file := range application.RestoreOutcomes() {
@@ -230,10 +261,15 @@ func runMetadataRollback(
 		"restored %d resource(s) to their pre-migration labels\n",
 		len(plan.Applied),
 	)
-	// The deferred restart above reports a failure on stderr but cannot change
-	// the exit status from inside a defer. Re-proving the runtime is up here is
-	// what keeps "the rollback succeeded" from being printed by a process that
-	// exits 0 with the operator's container runtime down.
+	// Restarted here rather than left to the defer, so the proof below has
+	// something to observe. Checking capability before this call would read a
+	// runtime this function has not started yet.
+	if restartErr := restart(); restartErr != nil {
+		return fmt.Errorf("start Apple Container: %w", restartErr)
+	}
+	// And the runtime's own answer, not this process's belief about it: a start
+	// that returns success but leaves the apiserver down would otherwise be
+	// reported as a completed rollback by a process exiting 0.
 	if capability := runtime.Capability(ctx); !capability.ServiceRunning {
 		return fmt.Errorf(
 			"the rollback completed but Apple Container is not running again; " +
